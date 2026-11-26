@@ -1,0 +1,77 @@
+"""What: unit tests for scripts/keys.py (env upsert, format checks, masking, file permissions).
+Use when: run in CI and before changing keys.py. Inputs: none. Output: unittest results.
+Side effects: writes temp files only. Role: guards the secret-handling helper."""
+import os
+import stat
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+import keys  # noqa: E402
+
+
+class UpsertTests(unittest.TestCase):
+    """What: tests for writing keys into an env file.
+    Use when: changing upsert_env. Inputs: none. Output: assertions.
+    Side effects: temp files. Role: protects existing lines and secrecy of the file."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.path = Path(self.dir.name) / ".env"
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_replaces_existing_key_and_keeps_other_lines(self):
+        self.path.write_text("# comment\nLANGSMITH_API_KEY=\nLANGSMITH_PROJECT=cs-voice-agent\n")
+        keys.upsert_env(self.path, "LANGSMITH_API_KEY", "lsv2_sk_abc123")
+        text = self.path.read_text()
+        self.assertIn("LANGSMITH_API_KEY=lsv2_sk_abc123\n", text)
+        self.assertIn("# comment\n", text)
+        self.assertIn("LANGSMITH_PROJECT=cs-voice-agent\n", text)
+        self.assertEqual(text.count("LANGSMITH_API_KEY="), 1)
+
+    def test_appends_missing_key(self):
+        self.path.write_text("A=1\n")
+        keys.upsert_env(self.path, "OPENAI_API_KEY", "sk-proj-xyz")
+        self.assertEqual(self.path.read_text(), "A=1\nOPENAI_API_KEY=sk-proj-xyz\n")
+
+    def test_creates_file_owner_only(self):
+        keys.upsert_env(self.path, "ANTHROPIC_API_KEY", "sk-ant-xyz")
+        mode = stat.S_IMODE(os.stat(self.path).st_mode)
+        self.assertEqual(mode, 0o600)
+
+    def test_rejects_newline_in_value(self):
+        with self.assertRaises(ValueError):
+            keys.upsert_env(self.path, "OPENAI_API_KEY", "sk-a\nEVIL=1")
+
+    def test_reads_values(self):
+        self.path.write_text("A=1\n# B=2\nC=\n")
+        self.assertEqual(keys.read_env(self.path), {"A": "1", "C": ""})
+
+
+class FormatTests(unittest.TestCase):
+    """What: tests for per-key format checks and masking.
+    Use when: changing the key registry. Inputs: none. Output: assertions.
+    Side effects: none. Role: catches pasting the wrong key into the wrong slot."""
+
+    def test_prefix_checks(self):
+        self.assertIsNone(keys.format_problem("LANGSMITH_API_KEY", "lsv2_sk_" + "a" * 30))
+        self.assertIsNotNone(keys.format_problem("LANGSMITH_API_KEY", "sk-ant-" + "a" * 30))
+        self.assertIsNone(keys.format_problem("ANTHROPIC_API_KEY", "sk-ant-" + "a" * 30))
+        self.assertIsNotNone(keys.format_problem("OPENAI_API_KEY", "sk-ant-" + "a" * 30))
+        self.assertIsNone(keys.format_problem("OPENAI_API_KEY", "sk-proj-" + "a" * 30))
+
+    def test_rejects_whitespace_and_short(self):
+        self.assertIsNotNone(keys.format_problem("OPENAI_API_KEY", "sk- abc"))
+        self.assertIsNotNone(keys.format_problem("OPENAI_API_KEY", "sk-abc"))
+
+    def test_mask_never_shows_more_than_last_four(self):
+        self.assertEqual(keys.mask("lsv2_sk_abcdefghijkl"), "set (ends ...ijkl)")
+        self.assertEqual(keys.mask(""), "MISSING")
+
+
+if __name__ == "__main__":
+    unittest.main()
