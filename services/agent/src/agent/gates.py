@@ -640,24 +640,41 @@ def _suspect(chunk: dict[str, Any]) -> bool:
     return "injection_suspect" in (chunk.get("flags") or []) or bool(chunk.get("injection_suspect"))
 
 
+_WRAPPER_PREFIXES = ("tool_result:", "doc:", "source:")
+
+
+def _source_name(source_id: Any, sources: set[str]) -> Any:
+    """What: read a source id the verifier wrote with its wrapper tag as a prefix ("tool_result:prepare_refund",
+    "doc:refund-policy#2") as the id it names, only when that id is a real source. Use when: enforce_code_rules.
+    Inputs: the claim's source_id, the citable ids. Output: the id (unchanged when it is not such a prefix form).
+    Side effects: none. Role: browser pass 2b live; the code rule still decides support."""
+    sid = str(source_id or "")
+    for prefix in _WRAPPER_PREFIXES:
+        if sid.startswith(prefix) and sid[len(prefix):] in sources:
+            return sid[len(prefix):]
+    return source_id
+
+
 def enforce_code_rules(result: GroundingResult, draft: str, chunks: dict[str, dict[str, Any]], *,
                        tool_names: set[str]) -> GroundingResult:
     """What: the Gate 2 rules that live in code, applied to the verifier's reply.
-    1. A supported claim counts only when its source_id is a relevant chunk this turn that is not flagged
-       injection_suspect, or the name of a non-search tool that returned a result this turn. Any other source
-       (null, unknown id, "search_kb", a suspect chunk) makes the claim unsupported, so it is never cited.
+    1. A supported claim counts only when its source_id is a relevant chunk in the session evidence (D-065) that
+       is not flagged injection_suspect, or a non-chunk source id in it (a tool name, account_context, a fixed
+       line, agent_capabilities); a wrapper prefix ("tool_result:", "doc:", "source:") before a real id is read
+       as that id. Any other source (null, unknown id, "search_kb", a suspect chunk) makes the claim unsupported,
+       so it is never cited.
     2. Zero claims passes here (D-059): what counts as a claim is the verifier's judgement (its prompt covers
        facts inside questions and commitments in words); apply_floor then fails it closed when needs_grounding
        fired (D-064). A verifier error, timeout or unreadable reply stays "error".
     Use when: GroundingMiddleware, right after the verifier. Inputs: result, draft text (unused since D-059, kept
-    for the caller's signature), TurnControl retrieval_chunks, this turn's tool names.
+    for the caller's signature), the evidence chunks, the evidence's non-chunk source ids.
     Output: a new GroundingResult ("error" is returned unchanged).
     Side effects: none. Role: review PR #52 I2; the source rules live in code, not in the prompt."""
     if result.verdict == "error":
         return result
     sources = {cid for cid, c in chunks.items() if not _suspect(c)} | (tool_names - {"search_kb"})
-    claims = [{**c, "supported": bool(c["supported"]) and (c.get("source_id") or "") in sources}
-              for c in result.claims]
+    claims = [{**c, "source_id": _source_name(c.get("source_id"), sources)} for c in result.claims]
+    claims = [{**c, "supported": bool(c["supported"]) and (c.get("source_id") or "") in sources} for c in claims]
     verdict = "pass" if all(c["supported"] for c in claims) else "fail"
     return GroundingResult(verdict, claims, result.commitment, no_claims_reason=result.no_claims_reason)
 

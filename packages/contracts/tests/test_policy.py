@@ -414,3 +414,12 @@ def test_frozen_config_dumps_and_deep_copies():
         c.tickets.priority_by_tier.update(pro="P1")  # type: ignore[attr-defined]
     with pytest.raises(TypeError):
         del c.tickets.target_label["P1"]  # type: ignore[attr-defined]
+
+
+def test_role_decline_states_the_next_step_it_allows():
+    """Browser pass 2b: the member decline gave no next step, so the agent's "an owner or billing admin can ask for
+    it" had no source and Gate 2 failed the S3 reply. The tool result must carry the step it allows (the
+    roles-and-permissions article's billing permissions section says the same)."""
+    msg = yaml.safe_load(POLICY.read_text())["reason_codes"]["ROLE_NOT_PERMITTED"]["message"]
+    assert msg.startswith("Only an account owner or billing admin can make billing changes.")
+    assert "an owner or billing admin on your account can ask for it" in msg.lower()

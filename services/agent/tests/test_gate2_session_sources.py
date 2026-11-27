@@ -144,3 +144,15 @@ async def test_d066_a_weak_gate1_turn_that_asks_a_clarifying_question_still_ends
                 replies=[_call("search_kb", "c1"), AIMessage("Do you mean the Pro or the Business plan?")])
     outcome, _, values = await h.run()
     assert outcome.end_reason == "clarify" and int(values.get("weak_streak") or 0) == 1
+
+
+def test_a_wrapper_prefixed_source_id_is_read_as_the_source_it_names():
+    # Browser pass 2b live: the verifier cited "tool_result:prepare_refund"; the source is the tool result named
+    # prepare_refund, so the code rule reads it by name. An unknown name stays unsupported.
+    ids = {"agent_capabilities", "prepare_refund"}
+    res = GroundingResult("pass", [{"text": "Only owners can", "supported": True, "source_id": "tool_result:prepare_refund"},
+                                   {"text": "Pro: 30 days", "supported": True, "source_id": "doc:refund-policy#2"}])
+    out = enforce_code_rules(res, DRAFT, {"refund-policy#2": CHUNK}, tool_names=ids)
+    assert out.passed and [c["source_id"] for c in out.claims] == ["prepare_refund", "refund-policy#2"]
+    bad = GroundingResult("pass", [{"text": "x", "supported": True, "source_id": "tool_result:list_charges"}])
+    assert not enforce_code_rules(bad, DRAFT, {}, tool_names=ids).passed
