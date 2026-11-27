@@ -7,7 +7,24 @@
  * Role: shared UI utility.
  */
 import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
+import { extendTailwindMerge } from "tailwind-merge";
+
+/**
+ * What: tailwind-merge that knows the DESIGN.md type scale (globals.css --text-*) as font sizes.
+ * Use when: cn merges classes.
+ * Inputs: none.
+ * Output: a merge function.
+ * Side effects: none.
+ * Role: without this, `text-label` and a text color such as `text-ink` look like the same
+ *   group and the size is dropped.
+ */
+const twMerge = extendTailwindMerge({
+  extend: {
+    theme: {
+      text: ["title", "heading", "body", "body-sm", "label", "label-sm", "caption", "mono", "mono-sm", "mono-lg"],
+    },
+  },
+});
 
 /**
  * What: merges class values and drops conflicting Tailwind classes.
