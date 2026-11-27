@@ -28,6 +28,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 
 from agent.clients.http import ToolCallError
+from agent.deadline import clamp_timeout, retry_fits  # shared doc 07 s8.2 helpers (re-exported)
 from agent.middleware.visibility import visible_tool_names
 from agent.turn_control import CURRENT_CALL, CallScope, Route, TurnControl, require_control
 from agent.untrusted import unknown_result, wrap_result, wrap_search
@@ -72,24 +73,6 @@ SPECS: dict[str, ToolSpec] = {
                               "Opened a ticket", "Ticket creation failed", "Retrying the ticket system..."),
 }
 _UNKNOWN_SPEC = ToolSpec(None, 0, "Using a tool", "Used a tool", "Tool failed")
-
-
-def clamp_timeout(listed_s: float, remaining_s: float, *, reserve_s: float = limits.ESCALATION_RESERVE_S,
-                  minimum_s: float = limits.CORE_MIN_CALL_S) -> float | None:
-    """What: doc 07 s8.2 clamp: min(listed, remaining - reserve), or None when that is below the minimum.
-    Use when: before every attempt. Inputs: listed timeout, seconds left in the turn, reserve, minimum.
-    Output: the attempt timeout, or None (skip the call; the turn takes the deadline path). Side effects: none.
-    Role: shared clamp rule for tool calls."""
-    t = min(listed_s, remaining_s - reserve_s)
-    return None if t < minimum_s else t
-
-
-def retry_fits(listed_s: float, remaining_s: float, backoff_s: float, *,
-               reserve_s: float = limits.ESCALATION_RESERVE_S) -> bool:
-    """What: doc 07 s8.2 budget check: retry only if, after the backoff, remaining - reserve still fits the
-    full retry timeout. Use when: before a retry. Inputs: listed timeout, seconds left, backoff, reserve.
-    Output: bool. Side effects: none. Role: deadline-aware retry."""
-    return remaining_s - backoff_s - reserve_s >= listed_s
 
 
 def _detail(name: str, artifact: Any) -> str | None:
