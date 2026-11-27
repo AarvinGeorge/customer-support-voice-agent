@@ -45,7 +45,7 @@ x-agent: &agent
     CORE_URL: ${CORE_URL:-http://core:8000}
     KNOWLEDGE_URL: ${KNOWLEDGE_URL:-http://knowledge:8000}
     SITE_ORIGIN: ${SITE_ORIGIN:-http://localhost:3000}
-    FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-172.30.0.0/24}
+    FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-${EDGE_SUBNET:-172.30.0.0/24}}
     DEMO_FAULTS_ENABLED: ${DEMO_FAULTS_ENABLED:-true}
     FEATURE_A4: ${FEATURE_A4:-false}
 
@@ -203,7 +203,7 @@ services:
 networks:
   edge:
     ipam:
-      config: [{subnet: 172.30.0.0/24}]
+      config: [{subnet: "${EDGE_SUBNET:-172.30.0.0/24}"}]  # set EDGE_SUBNET per lane stack so projects do not collide
   backend:
     internal: true
   egress: {}

@@ -18,4 +18,4 @@ COPY infra/migrate.py ./migrate.py
 RUN useradd --system --uid 10001 app && chown -R app /app
 USER app
 EXPOSE 8000
-CMD ["sh", "-c", "uvicorn ${SERVICE}.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips \"${FORWARDED_ALLOW_IPS:-127.0.0.1}\""]
+CMD ["sh", "-c", "exec uvicorn ${SERVICE}.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips \"${FORWARDED_ALLOW_IPS:-127.0.0.1}\""]

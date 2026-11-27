@@ -7,6 +7,7 @@ Role: proves doc 06 s10 and doc 07 s15.2: core and knowledge are off the edge ne
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -34,11 +35,11 @@ FORBIDDEN_ENV = {
 }
 
 
-def render() -> dict:
+def render(extra_env: dict[str, str] | None = None) -> dict:
     """What: render the merged Compose config as a dict. Use when: every check starts here.
-    Inputs: none. Output: parsed JSON. Side effects: one docker compose subprocess. Role: single config source."""
+    Inputs: optional extra environment (for example EDGE_SUBNET). Output: parsed JSON. Side effects: one docker compose subprocess. Role: single config source."""
     out = subprocess.run(["docker", "compose", "--profile", "edge", "config", "--format", "json"], cwd=ROOT,
-                         check=True, capture_output=True, text=True).stdout
+                         check=True, capture_output=True, text=True, env={**os.environ, **(extra_env or {})}).stdout
     return json.loads(out)
 
 
@@ -50,6 +51,8 @@ def main() -> int:
     failures: list[str] = []
 
     def check(name: str, ok: bool) -> None:
+        """What: print and record one result. Use when: each assertion. Inputs: name, pass flag.
+        Output: none. Side effects: stdout, appends to failures. Role: reporter."""
         print(("PASS " if ok else "FAIL ") + name)
         if not ok:
             failures.append(name)
@@ -77,6 +80,11 @@ def main() -> int:
     for agent in ("agent_a", "agent_b"):
         check(f"{agent} waits for the agent migration",
               services[agent]["depends_on"].get("migrate_agent", {}).get("condition") == "service_completed_successfully")
+    other = render({"EDGE_SUBNET": "172.31.7.0/24", "FORWARDED_ALLOW_IPS": ""})
+    check("EDGE_SUBNET moves the edge subnet",
+          other["networks"]["edge"]["ipam"]["config"][0]["subnet"] == "172.31.7.0/24")
+    check("FORWARDED_ALLOW_IPS follows EDGE_SUBNET",
+          other["services"]["agent_a"]["environment"]["FORWARDED_ALLOW_IPS"] == "172.31.7.0/24")
     if failures:
         print(f"{len(failures)} check(s) failed")
         return 1
