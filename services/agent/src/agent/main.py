@@ -74,8 +74,14 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
     async def _clients(app: FastAPI) -> AsyncIterator[None]:
         """What: the agent_app pool, Redis and HTTP clients plus the real probes.
         Use when: lifespan without injected probes. Inputs: app. Output: none.
-        Side effects: opens and closes the clients (also when the startup check fails). Role: resource lifetime."""
+        Side effects: opens and closes the clients (also when the startup check fails); installs the redacting log
+        formatter and the hiding LangSmith client (doc 07 s11.1). Role: resource lifetime."""
         import redis.asyncio as aioredis
+
+        from agent.logs import install_log_redaction
+        from agent.tracing import configure_tracing
+        install_log_redaction()
+        configure_tracing()
         from psycopg_pool import AsyncConnectionPool
 
         pool = AsyncConnectionPool(cfg.agent_db_url, min_size=1, max_size=4, open=False,

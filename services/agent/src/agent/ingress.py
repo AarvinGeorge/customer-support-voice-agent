@@ -8,8 +8,9 @@ Output: IngressError (HTTP error) or IngressStream (SSE stream plus the backgrou
 Side effects: rows in agent.turns, user_turns, lock:turn:{sid} in Redis, the turn task.
 Role: plain code before and after the model (doc 07 s2.4). Voice (CS-E-05.S3.T2): the step 7 call-key dedupe
 (optional CallKeys) and the step 12 transcript merge (optional merge_transcript) are hooks here; step 3 (voice
-session match and expiry) runs in the voice/ask route (agent.voice). Not here yet, by plan: rate limits
-(CS-E-07.S2.T1), admission semaphore (designed only), PIN scan (CS-E-03.S7.T9), repair and memory
+session match and expiry) runs in the voice/ask route (agent.voice). Step 9a (PIN scan and the typed-PIN refusal,
+CS-E-03.S7.T9) runs first in the turn task, through agent.pin_guard. Not here yet, by plan: rate limits
+(CS-E-07.S2.T1), admission semaphore (designed only), repair and memory
 (CS-E-03.S7.T5), structured input (CS-E-03.S7.T8). Tickets on the deadline and limit paths live in the body
 (agent.turn_body, agent.escalation, CS-E-03.S4.T1); ingress keeps only a hard net at the full deadline.
 """
@@ -34,6 +35,7 @@ from langchain_core.utils.uuid import uuid7
 from pydantic import ValidationError
 
 from agent.deadline import TurnBudgetExhausted
+from agent.pin_guard import refuse_without_thread, scan_input, session_redact_context
 from agent.sse import TurnMeta, TurnOutcome, TurnStream, start_turn
 from agent.turn_control import TurnControl, bind_turn_control, loop_clock
 
@@ -268,13 +270,16 @@ class Ingress:
     """What: the callable ingress entry. Use when: one instance per app; handle() per request.
     Inputs: store, lock, replica name, agent body, deadlines and reserve (overridable for tests), clock,
     call keys (voice step 7 dedupe; production RedisCallKeys), merge_transcript (step 12; production
-    agent.voice.TranscriptMerger), trajectory writer (app.state.trajectory, or None: events are not persisted).
+    agent.voice.TranscriptMerger), trajectory writer (app.state.trajectory, or None: events are not persisted),
+    refuse_typed_pin (step 9a refusal body; production agent.pin_guard.TypedPinRefusal, default: event and fixed
+    line without a thread write), flags (awaiting_verification writer for the step 9a hint).
     Output: handle(). Side effects: see module. Role: doc 07 s2.4 orchestration."""
 
     def __init__(self, store: TurnStore, lock: TurnLock, *, served_by: str, run_agent: AgentBody,
                  turn_deadline_s: dict[str, float] | None = None, reserve_s: float = limits.ESCALATION_RESERVE_S,
                  now: Callable[[], datetime] = lambda: datetime.now(UTC), call_keys: CallKeys | None = None,
-                 merge_transcript: MergeTranscript | None = None, trajectory: Any = None) -> None:
+                 merge_transcript: MergeTranscript | None = None, trajectory: Any = None,
+                 refuse_typed_pin: AgentBody | None = None, flags: Any = None) -> None:
         """What: wire dependencies. Use when: app start or tests. Inputs: see class. Output: none.
         Side effects: none. Role: constructor."""
         self.store, self.lock, self.served_by, self.run_agent = store, lock, served_by, run_agent
@@ -282,6 +287,8 @@ class Ingress:
         self.deadline_s = turn_deadline_s or TURN_DEADLINE_S
         self.reserve_s, self.now = reserve_s, now
         self.call_keys, self.merge_transcript = call_keys, merge_transcript
+        self.refuse_typed_pin: AgentBody = refuse_typed_pin or refuse_without_thread
+        self.flags = flags  # agent.sessions.awaiting_verification writer for the step 9a hint (None: no hint)
 
     async def handle(self, inp: IngressInput) -> IngressError | IngressStream:
         """What: run steps 1, 4, 6, 7, 8, 9 and start the turn task (14 to 16). A resend that finds its own
@@ -328,10 +335,30 @@ class Ingress:
                 if refused is not None:
                     await self.lock.release(inp.session_id, token)
                     return refused
-            return await self._start(inp, release)
+            return await self._start(inp, session, release)
         except BaseException:
             await self.lock.release(inp.session_id, token)
             raise
+
+    async def _awaiting_hint(self, session: SessionRow, scanned: Any) -> None:
+        """What: step 9a session hint: set awaiting_verification when an unverified customer announced a PIN without
+        giving it ("my PIN is", or only an account id), clear it when the customer moved on to another topic.
+        Use when: the turn task, right after the scan. Inputs: session row, Scanned. Output: none.
+        Side effects: one UPDATE agent.sessions at most; a failure is logged, the turn goes on.
+        Role: review PR #57 round 2 (split PINs N18, N20; the flag clears per 07 s6.3 and s7.3 intent)."""
+        if self.flags is None:
+            return
+        want: bool | None = None
+        if scanned.expects_pin and not session.awaiting_verification and session.verified_user_id is None:
+            want = True
+        elif scanned.moved_on and session.awaiting_verification and not scanned.refuse:
+            want = False
+        if want is None:
+            return
+        try:
+            await self.flags.set_awaiting_verification(session.session_id, want)
+        except Exception:  # noqa: BLE001 - the hint is defence in depth, never a reason to fail a turn
+            log.warning("awaiting hint not written session_id=%s", session.session_id, exc_info=True)
 
     async def _claim_call(self, inp: IngressInput, token: str) -> IngressError | IngressStream | None:
         """What: SET voice_call:{sid}:{call} NX after the lock; if taken, re-run step 4 (replay a finished turn,
@@ -380,9 +407,10 @@ class Ingress:
         return await self.store.find_turn(inp.session_id, inp.client_turn_id,
                                           inp.realtime_call_id if inp.mode == "voice" else None)
 
-    async def _start(self, inp: IngressInput, release: Callable[[TurnOutcome], Awaitable[None]]) -> IngressStream | IngressError:
-        """What: step 9 (row, count, stream) and the deadline-bound turn task.
-        Use when: handle, under the lock. Inputs: input, release callback. Output: stream or 409.
+    async def _start(self, inp: IngressInput, session: SessionRow,
+                     release: Callable[[TurnOutcome], Awaitable[None]]) -> IngressStream | IngressError:
+        """What: step 9 (row, count, stream) and the deadline-bound turn task (step 9a first inside it).
+        Use when: handle, under the lock. Inputs: input, session row, release callback. Output: stream or 409.
         Side effects: insert, count, task. Role: helper."""
         started = self.now()
         budget = self.deadline_s[inp.mode]
@@ -406,16 +434,21 @@ class Ingress:
         async def body(s: TurnStream) -> TurnOutcome:
             """What: the agent loop under asyncio.timeout, with the turn's one TurnControl bound (deadline = the 45 s
             or 20 s turn deadline, so every clamp subtracts the 3 s reserve from it; the request's demo fault).
+            Step 9a runs first: the PIN scan (only redacted text travels further) and the typed-PIN refusal.
             Use when: the turn task. Inputs: stream.
             Output: outcome (deadline outcome, no ticket, on the hard net or on a call skipped by the clamp). Side effects: model
-            and tools; binds TURN_CONTROL in this task. Role: step 14; doc 07 s8.2 deadline path."""
+            and tools; binds TURN_CONTROL in this task. Role: steps 9a to 14; doc 07 s8.2 deadline path."""
+            scanned = scan_input(inp, session_redact_context(session))  # step 9a
+            await self._awaiting_hint(session, scanned)
             control = TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
                                   deadline=deadline_mono, demo_fault=inp.demo_fault, events=s)
             bind_turn_control(control)  # the turn task's own context; the only .set() (spike 15)
             cm = asyncio.timeout(hard_net)
             try:
                 async with cm:
-                    return await self.run_agent(s, await self._merge(inp, row), row)
+                    if scanned.refuse:
+                        return await self.refuse_typed_pin(s, scanned.inp, row)
+                    return await self.run_agent(s, await self._merge(scanned.inp, row), row)
             except (TimeoutError, TurnBudgetExhausted) as exc:
                 if isinstance(exc, TimeoutError) and not cm.expired():  # an inner timeout is an error, not the deadline
                     raise

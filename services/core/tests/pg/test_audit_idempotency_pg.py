@@ -36,6 +36,20 @@ def test_pin_is_in_the_fixture_and_absent_from_the_stored_audit_row(app_conn):
     assert not leaks(row_text, PIN) and "priya@acme.com" not in row_text
 
 
+def test_free_text_pin_in_audit_args_is_absent_from_the_stored_row(app_conn):
+    """What: a PIN typed into free text (a ticket summary carrying the customer's words, "QS-10423 4821") is
+    redacted by the s11.1 scanner inside redact before the audit row is stored; the account id is kept.
+    Use when: always. Inputs: app_conn. Output: assertions. Side effects: rolled back.
+    Role: CS-E-03.S7.T9 sink test, core audit rows (the agent pg sink test covers the agent tables)."""
+    args = {"summary": "Customer wrote: QS-10423 4821, charged twice", "said": "my PIN is four eight two one"}
+    assert PIN in str(args) and "four eight two one" in str(args)  # the secret is in the fixture
+    audit_id = write_audit(app_conn, AuditEvent(event="ticket_create", actor="agent", mode="chat", args=args),
+                           clock=CLOCK)
+    row_text = app_conn.execute("SELECT t::text FROM audit_events t WHERE id = %s", (audit_id,)).fetchone()[0]
+    assert "QS-10423 [PIN]" in row_text  # the row holds the text, redacted
+    assert PIN not in row_text and "four eight two one" not in row_text
+
+
 def test_audit_ts_comes_from_the_injected_clock(app_conn):
     """What: the stored ts equals the injected clock, not the database clock. Use when: always. Inputs: app_conn.
     Output: assertion. Side effects: rolled back. Role: one time source (America/New_York clock)."""

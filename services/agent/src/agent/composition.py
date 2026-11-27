@@ -9,7 +9,8 @@ flag), the commit token (read only inside CoreCommitClient.from_env), app.state 
 trajectory, voice).
 Output: AgentRuntime, build_agent_runtime, build_ingress, wire_app, gate2_wired, pending_safety, wiring_gaps,\nassert_wired.
 Side effects: wire_app sets app.state.ingress and app.state.voice.ingress; reads models.yaml; nothing connects.
-Role: wiring only (CS-E-03.S7 composition, CS-E-08.S5 wiring parts 1 and 2).
+Role: wiring only (CS-E-03.S7 composition, CS-E-08.S5 wiring parts 1 and 2). CS-E-03.S7.T9: Ingress runs
+the step 9a PIN scan before any body, and the typed-PIN refusal (TypedPinRefusal) is wired here.
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from agent.clients.core_agent import CoreAgentClient
 from agent.clients.knowledge import KnowledgeClient
 from agent.ingress import CallKeys, Ingress, IngressInput, MergeTranscript, PgTurnStore, RedisTurnLock, TurnLock
 from agent.settings import Settings, secret_problem
+from agent.pin_guard import TypedPinRefusal
 from agent.structured.confirm import Confirmer, CoreCommitClient, agent_ticket_opener
 from agent.structured.handler import StructuredInput
 from agent.tools.catalog import build_tools
@@ -86,7 +88,8 @@ def build_ingress(runtime: Any, *, store: PgTurnStore | Any, lock: TurnLock, ser
     body = TurnRunner(runtime.agent, runtime.core, structured=structured, flags=flags,
                       cost_of=runtime.registry.cost_for_model)
     return Ingress(store, lock, served_by=served_by, run_agent=body, call_keys=call_keys,
-                   merge_transcript=merge_transcript, **extra)
+                   merge_transcript=merge_transcript,
+                   refuse_typed_pin=TypedPinRefusal(runtime.agent, flags), flags=flags, **extra)
 
 
 def wire_app(app: FastAPI, cfg: Settings) -> Ingress | None:
