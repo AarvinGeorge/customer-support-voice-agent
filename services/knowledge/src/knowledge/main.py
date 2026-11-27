@@ -14,7 +14,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
 
-from knowledge import auth, config, db, errors
+from contracts.knowledge_api import SearchRequest, SearchResponse
+from knowledge import auth, config, db, errors, search
+from knowledge.embeddings import EmbeddingError, OpenAIEmbedder
 from knowledge.ids import uuid7
 
 log = logging.getLogger("knowledge")
@@ -49,6 +51,11 @@ async def lifespan(app: FastAPI):
     if not os.environ.get("KNOWLEDGE_DB_URL"):
         raise RuntimeError("KNOWLEDGE_DB_URL is not set")
     app.state.db = db.Database(os.environ.get("KNOWLEDGE_DB_URL", ""))
+    try:
+        app.state.embedder = OpenAIEmbedder()
+    except EmbeddingError as exc:  # no key: search runs keyword-only instead of the service refusing to start
+        log.warning("embedder unavailable, search will be keyword-only: %s", exc)
+        app.state.embedder = None
     yield
 
 
@@ -96,6 +103,14 @@ def create_app() -> FastAPI:
                                   details={"chunks": st["chunks"]})
         return {"status": "ready", "database": "ok", "corpus_version": st["corpus_version"], "chunks": st["chunks"],
                 "embedding_model": config.embedding_model()}
+
+    @app.post("/v1/search", response_model=SearchResponse, dependencies=[Depends(auth.require_scope("search"))])
+    async def search_route(req: SearchRequest, request: Request) -> SearchResponse:
+        """What: hybrid search. Use when: the agent's search_kb wrapper or the calibration script calls it.
+        Inputs: SearchRequest body, bearer token with scope search. Output: SearchResponse (200), 401, 422 or 503
+        envelopes. Side effects: one embedding call, two SQL queries. Role: doc 07 s4.1."""
+        return await search.run_search(req, request.app.state.db, request.app.state.embedder,
+                                       request.state.request_id, request.state.trace_id)
 
     @app.get("/v1/corpus", dependencies=[Depends(auth.require_scope("corpus.read"))])
     def corpus(request: Request) -> dict:
