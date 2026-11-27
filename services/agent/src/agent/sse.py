@@ -26,6 +26,7 @@ from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 
 from agent.middleware.router import route_reply
 from agent.models.usage import add_usage, normalize_usage, token_usage
+from agent.structured.pending import confirm_label
 from agent.turn_control import TURN_CONTROL, TurnControl, bind_turn_control
 
 log = logging.getLogger("agent.sse")
@@ -260,7 +261,8 @@ def _tool_messages(result: Any) -> int:
 
 def route_outcome(stream: TurnStream, control: TurnControl, usage: Usage, model_used: str | None) -> TurnOutcome:
     """What: the outcome of a turn the router ended: its fixed line, say and end_reason; a verify route also
-    emits verification.required (doc 07 s6.3 step 3).
+    emits verification.required (doc 07 s6.3 step 3); a readback route with a card emits confirmation.required and
+    puts the card in FinalAnswer.pending_action (CS-E-03.S7.T8).
     Use when: classify_final sees the router's line as the last message. Inputs: stream, control, usage,
     model id. Output: TurnOutcome. Side effects: one verification.required event for verify. Role: helper."""
     reply = route_reply(control)
@@ -268,8 +270,12 @@ def route_outcome(stream: TurnStream, control: TurnControl, usage: Usage, model_
             "account_lookup", "action", "ticket_status"):
         stream.emit("verification.required", reason=reply.verification_reason, prompt_text=reply.text,
                     attempts_left=control.verify_attempts_left, fields=["account_id", "pin"])
-    final = FinalAnswer(text=reply.text, say=reply.say, citations=[], escalated=reply.escalated,
-                        ticket=reply.ticket)  # type: ignore[arg-type]  # dict validated into TicketRef
+    card = (control.route.pending or {}).get("card") if control.route is not None else None
+    if reply.end_reason == "readback" and card:  # doc 07 s6.2: the card is shown on the read-back turn
+        stream.emit("confirmation.required", pending=card, confirm_label=confirm_label(card))
+    final = FinalAnswer.model_validate({"text": reply.text, "say": reply.say, "citations": [],
+                                        "escalated": reply.escalated, "ticket": reply.ticket,
+                                        "pending_action": card if reply.end_reason == "readback" else None})
     return TurnOutcome(final=final, usage=usage, end_reason=reply.end_reason, model_used=model_used)
 
 
