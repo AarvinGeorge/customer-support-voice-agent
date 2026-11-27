@@ -1,0 +1,38 @@
+# What: the live smoke gate. For every PR to main it posts the commit status `smoke-gate` on the PR head: success when
+#   no path in scripts/smoke_gated_paths.txt changed, or when a PR commit carries a `live-smoke` success status (posted
+#   by scripts/live_smoke.sh on the exact commit it tested, cap at most 25) and no gated path changed after it;
+#   failure otherwise. It reads commit statuses, never the PR body (PR #73 review I1).
+# Use when: GitHub runs it on PR pushes (pull_request_target) and whenever a `live-smoke` status is posted (status), so
+#   finishing a smoke re-evaluates the PR without a new push. Whether `smoke-gate` becomes required is the coordinator's call.
+# Inputs: the event payload. Runs the BASE branch's checker and config (pull_request_target and status both run the
+#   default branch's workflow), so a PR cannot shrink the gated list or weaken the check for itself (review I3). No PR
+#   code is executed: the PR head is only fetched for git diff and rev-list.
+# Output: the `smoke-gate` status on each evaluated PR head, and this job's log. Needs no secrets; makes no model call.
+# Side effects: commit status POSTs with the workflow token. Role: root-cause audit class A, priority 1 (b).
+name: smoke-gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  status:
+
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: read
+
+jobs:
+  smoke-gate:
+    name: smoke gate
+    if: github.event_name == 'pull_request_target' || github.event.context == 'live-smoke'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4   # the default branch: trusted checker and config only
+        with:
+          fetch-depth: 0
+      - name: Evaluate and post smoke-gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check_smoke_status.py --repo "$GITHUB_REPOSITORY" --event "$GITHUB_EVENT_PATH" --event-name "$GITHUB_EVENT_NAME"

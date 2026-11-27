@@ -72,10 +72,12 @@ def pending(pa: str = "PA-3F2A9C1B", amount: int = 9600) -> dict[str, Any]:
 
 def turn(index: int, kind: str, parts: list[dict[str, Any]] | None = None, *, end_reason: str = "answered", text: str = "Done.",
          say: str | None = None, citations: list[str] | None = None, input: dict[str, Any] | None = None,
-         input_kind: str | None = None, tokens: bool = False) -> tuple[TurnResult, list[Event]]:
+         input_kind: str | None = None, tokens: bool = False, model_calls: int = 1,
+         confidence: dict[str, Any] | None = None) -> tuple[TurnResult, list[Event]]:
     """What: build one turn: the SSE events (with tokens) and the stored events (without tokens).
     Use when: a grader test needs an observed turn. Inputs: index, case turn kind, partial events in order, end_reason,
-    final text and say, cited chunk ids, the request input. Output: (TurnResult, stored events). Side effects: none.
+    final text and say, cited chunk ids, the request input, Usage.model_calls, FinalAnswer.confidence.
+    Output: (TurnResult, stored events). Side effects: none.
     Role: every event is validated against the contract so a bad helper cannot hide a grader bug."""
     tid = f"019a7c2e-5b20-7000-8000-{index:012d}"
     ik = input_kind or {"text": "text", "verification": "verification", "confirm": "confirm", "voice": "voice"}[kind]
@@ -101,9 +103,9 @@ def turn(index: int, kind: str, parts: list[dict[str, Any]] | None = None, *, en
     cites = [{"chunk_id": c, "label": "L", "ref": c, "spoken": "s", "url": "https://x.test/a", "section_title": "S",
               "excerpt": "e", "score": 0.7} for c in citations or []]
     final = {"text": text, "say": say if say is not None else text, "citations": cites, "escalated": end_reason == "escalated",
-             "ticket": None, "pending_action": None, "confidence": None}
+             "ticket": None, "pending_action": None, "confidence": confidence}
     usage = {"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost_usd_est": 0.0,
-             "first_status_ms": 1, "ttft_ms": 1, "latency_ms": 10, "model_calls": 1, "tool_calls": 0, "models_used": [],
+             "first_status_ms": 1, "ttft_ms": 1, "latency_ms": 10, "model_calls": model_calls, "tool_calls": 0, "models_used": [],
              "fallback_used": False}
     add("turn.completed", final=final, usage=usage, end_reason=end_reason, replayed=False)
     tr = TurnResult(index=index, kind=kind, input=input or ({"text": "hello"} if kind == "text" else {}), status_code=200,

@@ -5,8 +5,9 @@ Inputs: env (COMPOSE_PROJECT_NAME, DEMO_FAULTS_ENABLED), EVALS_AGENT_URL, the co
 Output: reseed_command (the argv), guarded_reseed (none), last_reseed_ts; ReseedRefused and ReseedError.
 Side effects: `docker compose -p <project> port caddy 80` (read-only), the reseed (TRUNCATE of core tables except
 audit_events in that project), SELECTs on audit_events.
-Role: the reseed must never reach the VM's demo or another lane's stack. It refuses unless COMPOSE_PROJECT_NAME is
-a lane name (`cs-...`, never naming production), DEMO_FAULTS_ENABLED=true, the checkout has no `.deploy` (the VM
+Role: the reseed must never reach the VM's demo, the owner's local cs-demo stack (port 3000) or another lane's stack.
+It refuses unless COMPOSE_PROJECT_NAME is a lane name (`cs-...`, never naming production or demo), a `cs-smoke-*`
+project carries this run's marker from scripts/live_smoke.sh, the agent port is not 3000, DEMO_FAULTS_ENABLED=true, the checkout has no `.deploy` (the VM
 marker: deploy.sh's state dir), EVALS_AGENT_URL is http on loopback with a port, and that project's Caddy publishes
 that port on loopback (the VM publishes 80 and 443 on all interfaces, with no override).
 """
@@ -26,6 +27,32 @@ RESEED_ARGS = ["--profile", "seed", "run", "--rm", "-e", "DEMO_RESEED=true", "se
 LANE_PROJECT = re.compile(r"cs-[a-z0-9]+(?:-[a-z0-9]+)*")
 LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
 LOOPBACK_BIND = frozenset({"127.0.0.1", "[::1]", "::1"})
+OWNER_DEMO_PORT = 3000  # cs-demo's edge port on the owner's machine (compose.override.yaml default EDGE_PORT)
+SMOKE_PREFIX = "cs-smoke-"
+
+
+def smoke_marker(root: Path, project: str) -> Path:
+    """What: the run marker scripts/live_smoke.sh writes for the project it created (content: SMOKE_RUN_NONCE).
+    Use when: the guard checks a cs-smoke-* project; tests write one. Inputs: repo root, project. Output: path.
+    Side effects: none. Role: proves the stack was created by the smoke script in this run."""
+    return root / ".tmp" / "live-smoke" / f"{project}.run"
+
+
+def smoke_run_refusal(env: Mapping[str, str], root: Path) -> str | None:
+    """What: why env does not name a throwaway stack created by scripts/live_smoke.sh in this run, or None.
+    Use when: the smoke entry point (always) and the reseed guard (cs-smoke-* projects). Inputs: env, repo root.
+    Output: reason or None. Side effects: reads one marker file. Role: PR #73 review I4."""
+    project = env.get("COMPOSE_PROJECT_NAME", "")
+    if not project.startswith(SMOKE_PREFIX) or not LANE_PROJECT.fullmatch(project):
+        return f"COMPOSE_PROJECT_NAME={project!r} is not a throwaway {SMOKE_PREFIX}* stack (run scripts/live_smoke.sh)"
+    nonce = env.get("SMOKE_RUN_NONCE", "")
+    marker = smoke_marker(root, project)
+    try:
+        ok = bool(nonce) and marker.read_text().strip() == nonce
+    except OSError:
+        ok = False
+    return None if ok else (f"{project} has no run marker matching SMOKE_RUN_NONCE ({marker}): "
+                            "only the stack scripts/live_smoke.sh created in this run may be used")
 
 
 class ReseedError(RuntimeError):
@@ -52,6 +79,12 @@ def reseed_command(env: Mapping[str, str], agent_url: str, root: Path,
         raise ReseedRefused(f"COMPOSE_PROJECT_NAME={project!r} is not a lane stack name (cs-...)")
     if "prod" in project:
         raise ReseedRefused(f"COMPOSE_PROJECT_NAME={project!r} names production; never reseed it")
+    if "demo" in project:
+        raise ReseedRefused(f"COMPOSE_PROJECT_NAME={project!r} names a demo stack (the owner's cs-demo); never reseed it")
+    if project.startswith(SMOKE_PREFIX):
+        why = smoke_run_refusal(env, root)
+        if why:
+            raise ReseedRefused(why)
     if env.get("DEMO_FAULTS_ENABLED", "").lower() != "true":
         raise ReseedRefused("DEMO_FAULTS_ENABLED=true must be set for the stack under test")
     marker = root / ".deploy"
@@ -65,6 +98,8 @@ def reseed_command(env: Mapping[str, str], agent_url: str, root: Path,
         raise bad_url from None
     if url.scheme != "http" or url.hostname not in LOOPBACK or port is None:
         raise bad_url
+    if port == OWNER_DEMO_PORT:
+        raise ReseedRefused(f"EVALS_AGENT_URL={agent_url!r} is port {OWNER_DEMO_PORT}, the owner's cs-demo stack; never reseed it")
     r = run(["docker", "compose", "-p", project, "port", "caddy", "80"], cwd=root, capture_output=True, text=True,
             timeout=60)
     published = (r.stdout or "").strip().splitlines()
