@@ -106,6 +106,8 @@ class GroundingMiddleware(AgentMiddleware):
             return {"messages": [removal, line], "grounding_failures": failures + 1, "jump_to": "end"}
         control.route = None  # no route can be pending here: one would have ended the turn before this model call
         control.set_route(Route("escalate", reason=reason))
-        line = await route_message(control, self.open_ticket)
+        if self.open_ticket is not None and control.route is not None and control.route.ticket is None:
+            control.route.ticket = await self.open_ticket(control)
+        line = route_message(control)  # with no hook, agent.escalation opens the ticket after the loop
         next_failures = 0 if reason == "grounding_failed" else failures
         return {"messages": [removal, line], "grounding_failures": next_failures, "jump_to": "end"}

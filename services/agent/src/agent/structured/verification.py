@@ -85,6 +85,8 @@ async def verify_card(stream: TurnStream, control: TurnControl, body: Any, core:
             ticket = err.details.get("ticket")
             step.done("error", "Verification locked")
             stream.emit("verification.result", status="locked", attempts_left=0, ticket=ticket)
+            # L1 s7 "verification fails 3 times": core owns this ticket (doc 07 s3.4), so origin core, no agent ticket
+            stream.emit("escalated", reason="verify_locked", ticket=ticket, origin="core", offer_ticket_button=False)
             text = (LOCKED_LINE.format(display=ticket.get("display") or f"ticket ending {ticket.get('short_id')}")
                     if ticket else LOCKED_NO_TICKET_LINE)
             return _fixed(stream, control, text, "escalated", ticket=ticket, escalated=True)

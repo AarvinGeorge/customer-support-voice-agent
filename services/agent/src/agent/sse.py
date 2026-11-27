@@ -33,11 +33,13 @@ log = logging.getLogger("agent.sse")
 
 FLUSH_CHARS = 40
 LIMIT_PREFIX = "Model call limits exceeded:"  # ModelCallLimitMiddleware(exit_behavior="end") text (spike 17a)
-# Placeholder wording until the escalation module (CS-E-03.S4.T1) adds the limit_reached ticket.
-LIMIT_LINE = "I couldn't finish that within the steps I'm allowed for one message. Could you ask again in a simpler way?"
+# The thread line until the escalation module (agent.escalation, CS-E-03.S4.T1) rewrites it with the limit_reached
+# ticket after the loop (same message id, limit-{turn_id}).
+LIMIT_LINE = "I couldn't finish that within the steps I'm allowed for one message."
 SLOW_LINE = "This is taking a little longer than usual."
 INTERNAL_ERROR_CLASS = "core_unavailable"  # doc 07 s1.3 has no generic server class; closest internal class
 _RUNNING: set[asyncio.Task[Any]] = set()
+
 
 
 def chunk_text(text: str, size: int = FLUSH_CHARS) -> list[str]:
@@ -396,6 +398,8 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
                     attempt["timer"] = asyncio.create_task(slow_timer(step_id))
                 else:
                     stop_timer()
+                    if chunk.get("error") is not None:  # the model node failed (doc 07 s6.7 trigger)
+                        control.model_node_failed = True
                     msgs = _ai_messages(chunk.get("result"))
                     call = token_usage()
                     model_name = "unknown"
@@ -427,5 +431,5 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
     outcome.fallback_used = outcome.usage.fallback_used
     if outcome.end_reason == "limit_reached" and messages:
         # doc 07 s2.4 step 15 / spike 17a: replace the framework line in the thread with ours.
-        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=messages[-1].id), AIMessage(LIMIT_LINE)]})
+        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=messages[-1].id), AIMessage(LIMIT_LINE, id=f"limit-{control.turn_id}")]})
     return outcome

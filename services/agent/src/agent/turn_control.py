@@ -11,13 +11,25 @@ Role: the one channel between tool wrappers and middleware inside a turn. Holds 
 """
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 RouteKind = Literal["verify", "readback", "escalate", "decline_off_topic"]
+
+
+def loop_clock() -> float:
+    """What: the running event loop's clock (time.monotonic() outside a loop). Use when: the default TurnControl
+    clock and the deadline arithmetic of a turn. Inputs: none. Output: seconds. Side effects: none.
+    Role: the injectable clock: a test loop with virtual time (tests/virtual_clock.py) moves every deadline,
+    clamp and asyncio timeout together; the default loop's time() is time.monotonic()."""
+    try:
+        return asyncio.get_running_loop().time()
+    except RuntimeError:
+        return time.monotonic()
 
 
 class EventSink(Protocol):
@@ -62,8 +74,10 @@ class TurnControl:
     """What: one turn's mutable control state: route, model attempt role, tool counters, failure counts.
     Use when: created once per turn by ingress or stream_agent_turn; read and mutated by tools, ToolGuard,
     RouterMiddleware and DeadlineAndFaultMiddleware.
-    Inputs: session_id, turn_id, mode, deadline (time.monotonic() value; None means no deadline),
-    demo_fault (already gated by DEMO_FAULTS_ENABLED at ingress), events (the turn stream or None).
+    Inputs: session_id, turn_id, mode, deadline (a value of `clock`; None means no deadline),
+    demo_fault (already gated by DEMO_FAULTS_ENABLED at ingress), events (the turn stream or None), clock
+    (default loop_clock). `ticket` is the one ticket opened this turn (model tool or escalation code), so a later
+    escalation in the same turn reuses it instead of opening a second one (CS-E-03.S4.T1).
     Output: the object. Side effects: none.
     Gate fields (retrieval, retrieval_chunks, scope_check, grounding, citations, gate_message_id) are written by
     agent.gates and GroundingMiddleware and read by the router,
@@ -84,6 +98,7 @@ class TurnControl:
     attempt_role: str = "primary"
     model_attempts: int = 0          # provider calls actually sent (DeadlineAndFaultMiddleware), for Usage.model_calls
     fallback_used: bool = False      # set when the fallback model ran this turn
+    fallback_unfinished: bool = False  # the last fallback attempt started and did not return (failed, timed out or cut), D-058
     primary_error: BaseException | None = None  # last primary failure, for model.fallback reason
     primary_model: str | None = None  # id of the primary client, for model.fallback from_model
     fault_fired: bool = False        # an injected llm_429 was raised this turn
@@ -103,11 +118,14 @@ class TurnControl:
     grounding: str = "not_run"
     citations: list[dict[str, Any]] = field(default_factory=list)
     gate_message_id: str | None = None
+    ticket: dict[str, Any] | None = None
+    model_node_failed: bool = False  # the agent model node raised (primary and fallback failed or skipped), s6.7
+    clock: Callable[[], float] = loop_clock
 
     def remaining_s(self) -> float:
         """What: seconds left before the turn deadline. Use when: clamping a call. Inputs: none.
-        Output: float (math.inf without a deadline). Side effects: reads the monotonic clock. Role: helper."""
-        return math.inf if self.deadline is None else self.deadline - time.monotonic()
+        Output: float (math.inf without a deadline). Side effects: reads the clock. Role: helper."""
+        return math.inf if self.deadline is None else self.deadline - self.clock()
 
     def set_route(self, route: Route) -> bool:
         """What: set the route unless one is already set (the first decision wins).

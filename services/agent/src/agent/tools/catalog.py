@@ -86,6 +86,24 @@ def charge_ref(charge_id: str | None, ending: str | None, on: Any) -> dict[str, 
     return None
 
 
+MODEL_TICKET_REASONS = {"human_requested": "customer_asked_human", "commitment": "needs_commitment"}
+
+
+def record_model_ticket(control: TurnControl, category: str, result: Any) -> None:
+    """What: record a ticket the model opened (control.ticket, so a later code escalation in the same turn reuses it)
+    and emit `escalated` origin model for the customer_asked_human and needs_commitment rows (doc 07 s3.4, s6.2).
+    Use when: create_ticket succeeded. Inputs: control, the tool's category, core's response. Output: none.
+    Side effects: control.ticket, at most one event. Role: L1 s7 model-owned rows (exactly one ticket per turn)."""
+    ticket = result.get("ticket") if isinstance(result, dict) else None
+    if not isinstance(ticket, dict):
+        return
+    if control.ticket is None:
+        control.ticket = ticket
+    reason = MODEL_TICKET_REASONS.get(category)
+    if reason is not None and control.events is not None:
+        control.events.emit("escalated", reason=reason, ticket=ticket, origin="model", offer_ticket_button=False)
+
+
 def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseTool]:
     """What: the seven thin-slice tools bound to the given clients, with strict JSON schemas and the contract
     descriptions. Use when: once per process (build_agent tools=...). Inputs: core client, knowledge client.
@@ -172,13 +190,15 @@ def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseT
     async def create_ticket(**raw: Any) -> Result:
         """What: open a ticket with origin "model" (s5.1 row 10, s3.4 owners). Use when: the customer asks for
         a human, a commitment is needed, or other model-owned cases. Inputs: category, summary, steps_tried,
-        blocking. Output: ("ok", {ticket, merged, created}). Side effects: one core call (a ticket).
-        Role: tool."""
+        blocking. Output: ("ok", {ticket, merged, created}). Side effects: one core call (a ticket); records the
+        turn's ticket and emits `escalated` origin model (CS-E-03.S4.T1). Role: tool."""
         a = _args(CreateTicketArgs, "create_ticket", raw)
         control, scope = require_control(), _scope()
         body = {"category": a.category, "summary": a.summary, "steps_tried": list(a.steps_tried),
                 "blocking": a.blocking, "origin": "model", "transcript_ref": control.session_id}
-        return "ok", await core.create_ticket(control, body, _key(control, scope))
+        res = await core.create_ticket(control, body, _key(control, scope))
+        record_model_ticket(control, a.category, res)
+        return "ok", res
 
     funcs: dict[str, Callable[..., Awaitable[Result]]] = {
         "search_kb": search_kb, "request_verification": request_verification,
