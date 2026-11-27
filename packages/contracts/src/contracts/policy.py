@@ -12,16 +12,36 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
+from types import MappingProxyType
+from typing import Annotated, Literal, TypeVar, get_args
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import (AfterValidator, BaseModel, ConfigDict, PositiveInt, ValidationError,
+                      field_validator, model_validator)
 
+from contracts.core_api import ContractStatus, Role, TicketCategory
+from contracts.core_api import Tier as TierName
 from contracts.reason_codes import ReasonCode
 
 APPROVAL_QUESTION = "Shall I send this to our team for approval?"
 Decision = Literal["allowed", "needs_approval", "declined"]
+Priority = Literal["P1", "P2", "P3", "P4"]
+Queue = Literal["billing", "technical", "account", "approvals"]
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+
+
+def _freeze(value: Mapping[_K, _V]) -> Mapping[_K, _V]:
+    """What: wrap a parsed dict as a read-only mapping. Use when: a policy field must not change
+    after load. Inputs: mapping. Output: MappingProxyType copy. Side effects: none.
+    Role: deep freeze for dict fields (pydantic frozen blocks attribute assignment only)."""
+    return MappingProxyType(dict(value))
+
+
+FrozenMap = Annotated[dict[_K, _V], AfterValidator(_freeze)]
 
 
 class PolicyError(Exception):
@@ -41,8 +61,8 @@ class Roles(_Frozen):
     """What: role sets. Use when: checking who may touch billing. Inputs: lists. Output: model.
     Side effects: none. Role: L1 s2 roles."""
 
-    billing_roles: list[str]
-    all_roles: list[str]
+    billing_roles: tuple[Role, ...]
+    all_roles: tuple[Role, ...]
 
 
 class Tier(_Frozen):
@@ -51,7 +71,7 @@ class Tier(_Frozen):
 
     price_cents_per_seat_month: int | None
     billing: str
-    seats: tuple[int, int] | None = None
+    seats: tuple[PositiveInt, PositiveInt] | None = None
 
 
 class Tiers(_Frozen):
@@ -77,9 +97,9 @@ class RefundTier(_Frozen):
     Output: model. Side effects: none. Role: L1 s5 A1 table column."""
 
     eligible: bool
-    window_days: int | None = None
-    late_band_days: int | None = None
-    auto_cap_cents: int | None = None
+    window_days: PositiveInt | None = None
+    late_band_days: PositiveInt | None = None
+    auto_cap_cents: PositiveInt | None = None
     approval_only: bool = False
 
 
@@ -98,34 +118,12 @@ class RefundAction(_Frozen):
     Output: model. Side effects: none. Role: L1 s5 A1."""
 
     enabled: bool
-    repeat_window_days: int
+    repeat_window_days: PositiveInt
     tiers: RefundTiers
-    blocked_statuses: list[str]
-    pending_ttl_seconds: int
+    blocked_statuses: tuple[ContractStatus, ...]
+    pending_ttl_seconds: PositiveInt
     readback: Readback
     readback_approval: Readback
-
-
-class BillingEmailAction(_Frozen):
-    """What: A2 billing email settings. Use when: billing email prepare. Inputs: limits and texts.
-    Output: model. Side effects: none. Role: L1 s5 A2."""
-
-    enabled: bool
-    per_account_per_day: int
-    step_up_required_tiers: list[str]
-    approval_tiers: list[str]
-    step_up_valid_seconds: int
-    pending_ttl_seconds: int
-    readback: Readback
-    readback_approval: Readback
-
-
-class NotificationPrefsAction(_Frozen):
-    """What: A2 notification preference settings. Use when: act-alone preference writes.
-    Inputs: allowed keys. Output: model. Side effects: none. Role: L1 s5 A2 act alone."""
-
-    enabled: bool
-    allowed_keys: list[str]
 
 
 class GraceTier(_Frozen):
@@ -133,8 +131,8 @@ class GraceTier(_Frozen):
     Inputs: days, frequency. Output: model. Side effects: none. Role: L1 s5 A4."""
 
     eligible: bool
-    days: int | None = None
-    once_per_months: int | None = None
+    days: PositiveInt | None = None
+    once_per_months: PositiveInt | None = None
     approval_only: bool = False
 
 
@@ -153,20 +151,19 @@ class GraceAction(_Frozen):
     Inputs: rules and texts. Output: model. Side effects: none. Role: L1 s5 A4 (built only if Saturday is green)."""
 
     enabled: bool
-    requires_status: str
+    requires_status: ContractStatus
     tiers: GraceTiers
-    pending_ttl_seconds: int
+    pending_ttl_seconds: PositiveInt
     readback: Readback
     readback_approval: Readback
 
 
 class Actions(_Frozen):
-    """What: all action settings. Use when: any action service. Inputs: four blocks. Output: model.
-    Side effects: none. Role: doc 07 s13.1 actions."""
+    """What: all action settings. Use when: any action service. Inputs: two blocks. Output: model.
+    Side effects: none. Role: doc 07 s13.1 actions. A2 billing email and notification preference
+    blocks are designed only (doc 09 s1.2); extra=forbid rejects them until A2 is built."""
 
     refund: RefundAction
-    billing_email: BillingEmailAction
-    notification_prefs: NotificationPrefsAction
     grace_extension: GraceAction
 
 
@@ -174,38 +171,38 @@ class AccountLock(_Frozen):
     """What: account lockout rule. Use when: verify. Inputs: failures and minutes. Output: model.
     Side effects: none. Role: doc 07 s3.1 lockout."""
 
-    failures: int
-    window_minutes: int
-    lock_minutes: int
+    failures: PositiveInt
+    window_minutes: PositiveInt
+    lock_minutes: PositiveInt
 
 
 class Identity(_Frozen):
     """What: PIN and session rules. Use when: verify. Inputs: counts and minutes. Output: model.
     Side effects: none. Role: L1 s10."""
 
-    pin_digits: int
-    max_failures_per_session: int
+    pin_digits: PositiveInt
+    max_failures_per_session: PositiveInt
     account_lock: AccountLock
-    session_ttl_minutes: int
+    session_ttl_minutes: PositiveInt
 
 
 class TicketLimits(_Frozen):
     """What: ticket caps. Use when: ticket create. Inputs: two ints. Output: model.
     Side effects: none. Role: L1 s5 A3."""
 
-    verified_per_account_per_day: int
-    unverified_per_session: int
+    verified_per_account_per_day: PositiveInt
+    unverified_per_session: PositiveInt
 
 
 class Tickets(_Frozen):
     """What: ticket priority, queue and cap rules. Use when: ticket create. Inputs: maps and lists.
     Output: model. Side effects: none. Role: L1 s5 A3."""
 
-    priority_by_tier: dict[str, str]
-    enterprise_blocking_priority: str
-    target_label: dict[str, str]
-    queues: list[str]
-    category_queue: dict[str, str]
+    priority_by_tier: FrozenMap[Literal["free", "pro", "business", "enterprise", "unverified"], Priority]
+    enterprise_blocking_priority: Priority
+    target_label: FrozenMap[Literal["P1", "P2_enterprise", "P2", "P3", "P4"], str]
+    queues: tuple[Queue, ...]
+    category_queue: FrozenMap[TicketCategory, Queue]
     limits: TicketLimits
 
     @model_validator(mode="after")
@@ -215,6 +212,9 @@ class Tickets(_Frozen):
         bad = set(self.category_queue.values()) - set(self.queues)
         if bad:
             raise ValueError(f"category_queue names unknown queues: {sorted(bad)}")
+        missing = set(get_args(TicketCategory)) - set(self.category_queue)
+        if missing:
+            raise ValueError(f"category_queue is missing categories: {sorted(missing)}")
         return self
 
 
@@ -233,7 +233,7 @@ class ReasonCodeCfg(_Frozen):
     decision: Decision
     policy_ref: PolicyRefCfg
     message: str | None = None
-    followup_queue: str | None = None
+    followup_queue: Queue | None = None
     requires_step_up: bool = False
 
     @model_validator(mode="after")
@@ -259,24 +259,59 @@ class PolicyConfig(_Frozen):
     actions: Actions
     identity: Identity
     tickets: Tickets
-    reason_codes: dict[str, ReasonCodeCfg]
+    reason_codes: FrozenMap[ReasonCode, ReasonCodeCfg]
     policy_version: str = ""
+
+    @field_validator("timezone")
+    @classmethod
+    def _timezone_known(cls, value: str) -> str:
+        """What: the timezone is a real IANA name. Use when: validation. Inputs: the string.
+        Output: the string. Side effects: reads the tz database. Role: catches a typo at startup."""
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"unknown timezone: {value}") from exc
+        return value
 
     @model_validator(mode="after")
     def _checks(self) -> PolicyConfig:
         """What: reason codes equal the enum; every readback_approval ends with the fixed question.
         Use when: validation. Inputs: self. Output: self. Side effects: none.
         Role: Done-when items of CS-E-09.S2.T1."""
-        have, want = set(self.reason_codes), {c.value for c in ReasonCode}
+        have, want = {str(c) for c in self.reason_codes}, {c.value for c in ReasonCode}
         if have != want:
             raise ValueError(f"reason_codes differ from ReasonCode: missing {sorted(want - have)}, "
                              f"extra {sorted(have - want)}")
-        for name in ("refund", "billing_email", "grace_extension"):
+        for name in ("refund", "grace_extension"):
             ra = getattr(self.actions, name).readback_approval
             for channel in ("chat", "voice"):
                 if not getattr(ra, channel).endswith(APPROVAL_QUESTION):
                     raise ValueError(f"readback_approval {name}.{channel} must end with: {APPROVAL_QUESTION}")
         return self
+
+
+class _StrictLoader(yaml.SafeLoader):
+    """What: a SafeLoader that rejects duplicate mapping keys. Use when: reading policy.yaml.
+    Inputs: YAML text. Output: parsed data. Side effects: none.
+    Role: PyYAML keeps the last duplicate silently; a policy limit must never be overridden that way."""
+
+    def construct_mapping(self, node, deep=False):  # type: ignore[no-untyped-def]
+        """What: build a dict, failing on a repeated key. Use when: the parser meets a mapping.
+        Inputs: node, deep flag. Output: dict. Side effects: none. Role: duplicate-key guard."""
+        seen: set = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=True)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    None, None, f"duplicate key: {key}", key_node.start_mark)
+            seen.add(key)
+        return super().construct_mapping(node, deep)
+
+
+def _parse(data: bytes) -> object:
+    """What: parse policy YAML strictly. Use when: loading or hashing the file. Inputs: bytes.
+    Output: parsed data. Side effects: none. Role: one parser, duplicate keys rejected."""
+    return yaml.load(data, Loader=_StrictLoader)  # noqa: S506 (SafeLoader subclass)
 
 
 def default_path() -> Path:
@@ -292,7 +327,7 @@ def policy_version(path: Path | str | None = None) -> str:
     Output: str. Side effects: reads a file. Role: detects any change to the file, even one byte."""
     p = Path(path) if path else default_path()
     data = p.read_bytes()
-    label = yaml.safe_load(data).get("version_label", "unlabelled")
+    label = _parse(data).get("version_label", "unlabelled")
     return f"{label}+{hashlib.sha256(data).hexdigest()[:12]}"
 
 
@@ -303,7 +338,7 @@ def load_policy(path: Path | str | None = None) -> PolicyConfig:
     Side effects: reads a file. Role: the single loader both core and knowledge call."""
     p = Path(path) if path else default_path()
     try:
-        raw = yaml.safe_load(p.read_bytes())
+        raw = _parse(p.read_bytes())
         cfg = PolicyConfig.model_validate(raw)
     except (OSError, yaml.YAMLError, ValidationError, AttributeError) as exc:
         raise PolicyError(f"invalid policy file {p}: {exc}") from exc
@@ -318,14 +353,16 @@ def render_placeholder(cfg: PolicyConfig, expr: str) -> str:
     key, _, fmt = expr.partition("|")
     node: object = cfg
     for part in key.split("."):
-        if isinstance(node, dict) and part in node:
+        if isinstance(node, Mapping) and part in node:
             node = node[part]
         elif isinstance(node, BaseModel) and part in type(node).model_fields:
             node = getattr(node, part)
         else:
             raise PolicyError(f"unknown policy key: {key}")
-    if isinstance(node, (BaseModel, dict, list)) or node is None:
+    if isinstance(node, (BaseModel, Mapping, list, tuple)) or node is None:
         raise PolicyError(f"policy key is not a scalar: {key}")
+    if fmt in ("dollars", "days") and (isinstance(node, bool) or not isinstance(node, int)):
+        raise PolicyError(f"|{fmt} needs an integer value: {key}")
     if fmt == "dollars":
         return f"${int(node) // 100:,}" if int(node) % 100 == 0 else f"${int(node) / 100:,.2f}"
     if fmt == "days":

@@ -3,6 +3,7 @@ Use when: CI (contracts suite). Inputs: the committed data/policy.yaml and temp 
 Output: pass or fail. Side effects: writes temp files only.
 Role: proves each Done-when item and that policy numbers equal L1 s5 and s6."""
 import copy
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,21 @@ from contracts.reason_codes import ReasonCode
 REPO = Path(__file__).resolve().parents[3]
 POLICY = REPO / "data" / "policy.yaml"
 APPROVAL_TAIL = "Shall I send this to our team for approval?"
+
+
+def _articles_dir() -> Path:
+    """What: data/articles, or an explicit named skip (fail when REQUIRE_ARTICLES=1).
+    Use when: the two article agreement tests. Inputs: env REQUIRE_ARTICLES. Output: Path.
+    Side effects: skips or fails the calling test. Role: the Help Center articles land in PR #10
+    (branch cs-e-09-s3-articles, CS-E-09.S3.T5); until that merges these tests are skipped by name,
+    after it they run on every CI pass."""
+    art = REPO / "data" / "articles"
+    if art.is_dir() and any(art.glob("*.md")):
+        return art
+    msg = "SKIPPED until PR #10 (cs-e-09-s3-articles, CS-E-09.S3.T5) adds data/articles"
+    if os.environ.get("REQUIRE_ARTICLES") == "1":
+        pytest.fail(msg.replace("SKIPPED", "FAILED"))
+    pytest.skip(msg)
 
 
 def _raw() -> dict:
@@ -101,12 +117,12 @@ def test_every_approval_readback_ends_with_the_question(tmp_path):
     Role: Done-when readback rule, with a failing variant."""
     cfg = load_policy(POLICY)
     seen = 0
-    for name in ("refund", "billing_email", "grace_extension"):
+    for name in ("refund", "grace_extension"):
         act = getattr(cfg.actions, name)
         for text in (act.readback_approval.chat, act.readback_approval.voice):
             assert text.endswith(APPROVAL_TAIL), (name, text)
             seen += 1
-    assert seen == 6
+    assert seen == 4
     d = _raw()
     d["actions"]["refund"]["readback_approval"]["voice"] = "Okay to send? Shall I send it?"
     with pytest.raises(PolicyError, match="readback_approval"):
@@ -126,7 +142,7 @@ def test_policy_version_stable_and_sensitive(tmp_path):
 
 
 def test_numbers_equal_l1_s5_s6():
-    """What: every number equals L1 s5 (A1, A3, A4), s6, s10 and s5 A2. Use when: CI.
+    """What: every number equals L1 s5 (A1, A3, A4), s6 and s10. Use when: CI.
     Inputs: none. Output: assertion. Side effects: none. Role: L1 is the value authority."""
     c = load_policy(POLICY)
     r = c.actions.refund
@@ -134,10 +150,7 @@ def test_numbers_equal_l1_s5_s6():
     assert (r.tiers.pro.window_days, r.tiers.pro.late_band_days, r.tiers.pro.auto_cap_cents) == (14, 7, 15000)
     assert r.tiers.business.window_days == 30 and r.tiers.business.approval_only
     assert r.tiers.enterprise.approval_only and not r.tiers.free.eligible
-    assert r.blocked_statuses == ["trialing", "past_due"]
-    e = c.actions.billing_email
-    assert (e.per_account_per_day, e.step_up_valid_seconds) == (1, 300)
-    assert e.step_up_required_tiers == ["pro", "business"] and e.approval_tiers == ["enterprise"]
+    assert tuple(r.blocked_statuses) == ("trialing", "past_due")
     g = c.actions.grace_extension
     assert g.enabled is False and g.requires_status == "past_due"
     assert (g.tiers.pro.days, g.tiers.pro.once_per_months) == (7, 12)
@@ -147,12 +160,12 @@ def test_numbers_equal_l1_s5_s6():
     assert c.identity.pin_digits == 4 and c.identity.max_failures_per_session == 3
     t = c.tickets
     assert (t.limits.verified_per_account_per_day, t.limits.unverified_per_session) == (5, 2)
-    assert t.priority_by_tier == {"enterprise": "P2", "business": "P2", "pro": "P3", "free": "P4",
+    assert dict(t.priority_by_tier) == {"enterprise": "P2", "business": "P2", "pro": "P3", "free": "P4",
                                   "unverified": "P4"}
     assert t.enterprise_blocking_priority == "P1"
-    assert t.target_label == {"P1": "1 hour", "P2_enterprise": "4 hours", "P2": "8 hours",
+    assert dict(t.target_label) == {"P1": "1 hour", "P2_enterprise": "4 hours", "P2": "8 hours",
                               "P3": "24 hours", "P4": "72 hours"}
-    assert t.queues == ["billing", "technical", "account", "approvals"]
+    assert tuple(t.queues) == ("billing", "technical", "account", "approvals")
     assert c.timezone == "America/New_York" and c.currency == "USD"
 
 
@@ -181,12 +194,10 @@ def test_declined_codes_have_safe_messages():
 
 
 def test_article_refs_match_staged_articles():
-    """What: every policy_ref article and section slug exists in the staged articles, when the
-    staging folder is present. Use when: CI in the full repo. Inputs: build-log/articles-staging.
-    Output: assertion or skip. Side effects: none. Role: keeps refs citable."""
-    staging = REPO.parent / "build-log" / "articles-staging"
-    if not staging.exists():
-        pytest.skip("articles staging not present in this checkout")
+    """What: every policy_ref article and section slug exists in data/articles.
+    Use when: CI once data/articles exists (PR #10, CS-E-09.S3.T5); set REQUIRE_ARTICLES=1 to fail
+    instead of skip. Inputs: data/articles. Output: assertion or named skip. Side effects: none. Role: keeps refs citable."""
+    staging = _articles_dir()
     import re
     c = load_policy(POLICY)
     for code, rc in c.reason_codes.items():
@@ -209,11 +220,9 @@ def test_render_placeholder_formatters():
 
 def test_numbers_appear_in_staged_articles():
     """What: each policy number is stated in its staged article. Use when: CI in the full repo.
-    Inputs: build-log/articles-staging. Output: assertion or skip. Side effects: none.
+    Inputs: data/articles. Output: assertion or named skip. Side effects: none.
     Role: L1 s6 consistency check for the staged corpus (full checker lands with CS-E-02.S1.T3)."""
-    staging = REPO.parent / "build-log" / "articles-staging"
-    if not staging.exists():
-        pytest.skip("articles staging not present in this checkout")
+    staging = _articles_dir()
     c = load_policy(POLICY)
     facts = {
         "refund-policy": ["within 14 days of the charge", "up to $150", "90 days", "7 days after",
@@ -232,3 +241,156 @@ def test_numbers_appear_in_staged_articles():
     assert render_placeholder(c, "tiers.business.price_cents_per_seat_month|dollars") == "$16"
     bogus = "within 15 days of the charge"
     assert bogus not in (staging / "refund-policy.md").read_text()
+
+
+# ---- fix round 1 (review of PR #7) ----
+
+DECISION_TABLE = [
+    ("ROLE_NOT_PERMITTED", "declined", "roles-and-permissions", "billing-permissions"),
+    ("FREE_NOTHING_CHARGED", "declined", "refund-policy", "free-plan"),
+    ("TRIAL_NOTHING_TO_REFUND", "declined", "refund-policy", "trials"),
+    ("PAST_DUE", "declined", "refund-policy", "past-due-accounts"),
+    ("ALREADY_REFUNDED", "declined", "refund-policy", "how-refunds-work"),
+    ("CHARGE_NOT_REFUNDABLE", "declined", "refund-policy", "how-refunds-work"),
+    ("PRO_PAST_LATE_BAND", "declined", "refund-policy", "pro-plan-refunds"),
+    ("OUTSIDE_WINDOW", "declined", "refund-policy", "business-plan-refunds"),
+    ("PRO_LATE_IN_BAND", "needs_approval", "refund-policy", "pro-plan-refunds"),
+    ("PRO_OVER_CAP", "needs_approval", "refund-policy", "pro-plan-refunds"),
+    ("PRO_SECOND_IN_REPEAT_WINDOW", "needs_approval", "refund-policy", "pro-plan-refunds"),
+    ("BUSINESS_APPROVAL_REQUIRED", "needs_approval", "refund-policy", "business-plan-refunds"),
+    ("ENTERPRISE_HUMAN_DECIDES", "needs_approval", "support-and-escalation", "approvals"),
+    ("PRO_WITHIN_LIMITS", "allowed", "refund-policy", "pro-plan-refunds"),
+    ("EMAIL_DAILY_LIMIT", "declined", "billing-invoices-payments", "billing-contact"),
+    ("EMAIL_NO_CHANGE", "declined", "billing-invoices-payments", "billing-contact"),
+    ("EMAIL_STEP_UP", "allowed", "billing-invoices-payments", "billing-contact"),
+    ("EMAIL_ENTERPRISE_APPROVAL", "needs_approval", "billing-invoices-payments", "billing-contact"),
+    ("NO_BILLING_ON_PLAN", "declined", "plans-pricing-contracts", "free-plan"),
+    ("GRACE_NOT_PAST_DUE", "declined", "billing-invoices-payments", "grace-extension"),
+    ("GRACE_ALREADY_USED", "declined", "billing-invoices-payments", "grace-extension"),
+    ("GRACE_WITHIN_LIMITS", "allowed", "billing-invoices-payments", "grace-extension"),
+    ("GRACE_ENTERPRISE_APPROVAL", "needs_approval", "billing-invoices-payments", "grace-extension"),
+]
+
+
+def test_a2_blocks_are_designed_only():
+    """What: the A2 billing email and notification preference blocks are absent (doc 09 s1.2).
+    Use when: CI. Inputs: YAML and model. Output: assertion. Side effects: none.
+    Role: spec gap S1: designed-only items must not ship; extra=forbid rejects them if added back."""
+    assert set(type(load_policy(POLICY).actions).model_fields) == {"refund", "grace_extension"}
+    assert set(_raw()["actions"]) == {"refund", "grace_extension"}
+
+
+def test_a2_block_in_yaml_is_rejected(tmp_path):
+    """What: a billing_email block fails the load until A2 is built. Use when: CI.
+    Inputs: mutated YAML. Output: assertion. Side effects: temp file. Role: spec gap S1 guard."""
+    d = _raw()
+    d["actions"]["billing_email"] = {"enabled": True}
+    with pytest.raises(PolicyError, match="billing_email"):
+        load_policy(_write(tmp_path, d))
+
+
+def test_decision_table_is_frozen():
+    """What: all 23 reason codes keep decision, article and section (doc 07 s13.1 table).
+    Use when: CI. Inputs: none. Output: assertion. Side effects: none. Role: pins review I2."""
+    c = load_policy(POLICY)
+    got = [(k, v.decision, v.policy_ref.article, v.policy_ref.section) for k, v in c.reason_codes.items()]
+    assert sorted(got) == sorted(DECISION_TABLE)
+    assert len(DECISION_TABLE) == 23
+
+
+def test_pinned_values():
+    """What: roles, lock rule, TTLs, seats and read-back texts are pinned. Use when: CI.
+    Inputs: none. Output: assertion. Side effects: none. Role: kills review mutations Y10 to Y13, Y18."""
+    c = load_policy(POLICY)
+    assert tuple(c.roles.billing_roles) == ("owner", "billing_admin")
+    assert tuple(c.roles.all_roles) == ("owner", "billing_admin", "member")
+    a = c.identity.account_lock
+    assert (a.failures, a.window_minutes, a.lock_minutes, c.identity.session_ttl_minutes) == (5, 15, 15, 120)
+    assert c.tiers.pro.seats == (3, 30) and c.tiers.business.seats == (30, 300)
+    assert c.actions.grace_extension.pending_ttl_seconds == 600
+    r = c.actions.refund
+    for rb, ph in ((r.readback, ("{amount}", "{charge_label")), (r.readback_approval, ("{amount}",)),
+                   (c.actions.grace_extension.readback, ("{days}", "{grace_until"))):
+        for text in (rb.chat, rb.voice):
+            assert text and all(p in text for p in ph), text
+    assert "{charge_date}" in r.readback.chat and "{charge_date_spoken}" in r.readback.voice
+
+
+def test_loaded_config_is_deeply_frozen():
+    """What: lists and maps cannot be changed after load. Use when: CI. Inputs: loaded config.
+    Output: assertion. Side effects: none. Role: review I3; core holds one instance per process."""
+    c = load_policy(POLICY)
+    with pytest.raises(AttributeError):
+        c.roles.billing_roles.append("member")  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        c.reason_codes["PAST_DUE"] = None  # type: ignore[index]
+    with pytest.raises(TypeError):
+        c.tickets.priority_by_tier["pro"] = "P1"  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        c.tickets.queues.append("x")  # type: ignore[attr-defined]
+
+
+def test_grace_readback_ending_enforced(tmp_path):
+    """What: the approval-question rule applies to grace_extension, to both channels, as a suffix.
+    Use when: CI. Inputs: mutated YAML. Output: assertion. Side effects: temp files.
+    Role: kills review mutations L4 and L12."""
+    for ch in ("chat", "voice"):
+        d = _raw()
+        d["actions"]["grace_extension"]["readback_approval"][ch] = "Send it? Shall I."
+        with pytest.raises(PolicyError, match="readback_approval grace_extension"):
+            load_policy(_write(tmp_path, d))
+    d = _raw()
+    d["actions"]["grace_extension"]["readback_approval"]["chat"] += " Thanks."
+    with pytest.raises(PolicyError, match="readback_approval"):
+        load_policy(_write(tmp_path, d))
+
+
+def test_declined_code_without_message_and_unknown_queue_rejected(tmp_path):
+    """What: a declined code needs a message; an unknown queue fails. Use when: CI.
+    Inputs: mutated YAML. Output: assertion. Side effects: temp files. Role: kills L9 and L13."""
+    d = _raw()
+    del d["reason_codes"]["PAST_DUE"]["message"]
+    with pytest.raises(PolicyError, match="needs a message"):
+        load_policy(_write(tmp_path, d))
+    d = _raw()
+    d["tickets"]["category_queue"]["billing"] = "biling"
+    with pytest.raises(PolicyError, match="biling"):
+        load_policy(_write(tmp_path, d))
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda d: d["actions"]["refund"]["tiers"]["pro"].update(window_days=-14), "window_days"),
+    (lambda d: d["roles"]["billing_roles"].append("membre"), "membre"),
+    (lambda d: d["tickets"]["priority_by_tier"].update(pro="P9"), "P9"),
+    (lambda d: d["tickets"]["queues"].append("biling"), "biling"),
+    (lambda d: d.update(timezone="America/New_Yrok"), "timezone"),
+    (lambda d: d["actions"]["refund"]["blocked_statuses"].append("pastdue"), "pastdue"),
+    (lambda d: d["tickets"]["category_queue"].pop("bug"), "bug"),
+], ids=["negative-days", "bad-role", "bad-priority", "bad-queue", "bad-timezone", "bad-status", "missing-category"])
+def test_loose_types_rejected(tmp_path, edit, needle):
+    """What: bad enum-like and numeric values fail the load. Use when: CI. Inputs: mutated YAML.
+    Output: assertion. Side effects: temp files. Role: review M2 typed fields."""
+    d = _raw()
+    edit(d)
+    with pytest.raises(PolicyError, match=needle):
+        load_policy(_write(tmp_path, d))
+
+
+def test_duplicate_yaml_key_rejected(tmp_path):
+    """What: a repeated key fails instead of the last one winning. Use when: CI.
+    Inputs: raw YAML text. Output: assertion. Side effects: temp file. Role: review M2."""
+    text = POLICY.read_text().replace("pin_digits: 4", "pin_digits: 4\n  pin_digits: 6", 1)
+    p = tmp_path / "policy.yaml"
+    p.write_text(text)
+    with pytest.raises(PolicyError, match="pin_digits"):
+        load_policy(p)
+
+
+def test_dollars_and_days_reject_non_integers():
+    """What: |dollars and |days refuse booleans and strings. Use when: CI. Inputs: config.
+    Output: assertion. Side effects: none. Role: review M7."""
+    c = load_policy(POLICY)
+    with pytest.raises(PolicyError, match="integer"):
+        render_placeholder(c, "actions.refund.enabled|dollars")
+    with pytest.raises(PolicyError, match="integer"):
+        render_placeholder(c, "timezone|days")
