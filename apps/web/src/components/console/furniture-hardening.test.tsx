@@ -54,8 +54,17 @@ describe.each([false, true])("hostile answer markdown (streaming %s)", (streamin
   it("loads no image, from markdown or raw HTML", () => {
     const { container } = render(<AnswerMarkdown text={HOSTILE} streaming={streaming} />);
     expect(container.querySelectorAll("img, picture, source, video, audio, iframe, object, embed")).toHaveLength(0);
-    expect(container.innerHTML).not.toContain("evil.example/track.png");
-    expect(container.innerHTML).not.toContain("evil.example/raw.png");
+    const srcs = [...container.querySelectorAll("*")].flatMap((el) => [el.getAttribute("src"), el.getAttribute("srcset"), el.getAttribute("poster")]);
+    expect(srcs.filter((v) => v !== null)).toHaveLength(0);
+  });
+
+  it("never turns raw HTML into DOM: a raw https anchor is no link, the markup shows as text", () => {
+    const raw = 'See <a href="https://evil.example/raw">raw link</a> and <b>bold</b> <img src="https://evil.example/raw.png">';
+    const { container } = render(<AnswerMarkdown text={raw} streaming={streaming} />);
+    expect(container.querySelectorAll("a, b, img")).toHaveLength(0);
+    expect(screen.queryByRole("link", { name: "raw link" })).toBeNull();
+    expect(container.textContent).toContain('<a href="https://evil.example/raw">raw link</a>');
+    expect(container.textContent).toContain("<b>bold</b>");
   });
 
   it("keeps only http(s) links live; everything else is plain text", () => {
@@ -63,6 +72,7 @@ describe.each([false, true])("hostile answer markdown (streaming %s)", (streamin
     const hrefs = [...container.querySelectorAll("a")].map((a) => a.getAttribute("href"));
     expect(hrefs.every((h) => h !== null && /^https?:\/\//.test(h))).toBe(true);
     expect(hrefs).toContain("https://quillstack.example/help");
+    expect(hrefs).not.toContain("https://evil.example/raw");
     for (const word of ["mail", "phone", "local", "proto", "js", "data"]) {
       expect(screen.queryByRole("link", { name: word })).toBeNull();
     }
