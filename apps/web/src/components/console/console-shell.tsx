@@ -17,7 +17,9 @@ import type { ConfirmInput, TurnRequest, VerificationInput, VerifiedPerson } fro
 
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
-import { turnStore, type TurnStoreState } from "@/lib/turns/store";
+import type { TurnView } from "@/lib/turns/reducer";
+import { turnStore, type ThreadItem, type TurnStoreState } from "@/lib/turns/store";
+import { trailSummary } from "@/lib/turns/trail";
 
 import { ConversationLog, type CardActions } from "./conversation-log";
 import { InputBar } from "./input-bar";
@@ -80,6 +82,27 @@ export function IdentityChip({ person }: { person: VerifiedPerson | null }) {
 }
 
 /**
+ * What: the sentence the console's one polite status region announces for the latest thread item:
+ *   a running turn's live line, a settled turn's summary and answer, a failure, or a send error.
+ * Use when: ConsoleShell renders its status region.
+ * Inputs: the thread and turns.
+ * Output: a string ("" when there is nothing to say).
+ * Side effects: none.
+ * Role: single announcer (review PR #20, M3), so trails and streamed text are not read twice.
+ */
+export function announcement(thread: readonly ThreadItem[], turns: Readonly<Record<string, TurnView>>): string {
+  const last = thread.at(-1);
+  if (last === undefined || last.kind === "user") return "";
+  if (last.kind === "error") return `Couldn't send. ${last.message}`;
+  const turn = turns[last.turnId];
+  if (turn === undefined) return "";
+  const summary = trailSummary(turn);
+  if (turn.phase === "failed") return `Couldn't finish. ${turn.failure?.message ?? ""}`.trim();
+  if (summary.state === "running") return summary.text;
+  return summary.stepCount > 0 ? `${summary.text}. ${turn.text}` : turn.text;
+}
+
+/**
  * What: props of ConsoleShell.
  * Use when: typing the component.
  * Inputs: none (type).
@@ -109,6 +132,7 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
   const inflight = useRef<AbortController | null>(null);
 
   useEffect(() => () => inflight.current?.abort(), []);
+  useEffect(() => () => inflight.current?.abort(), [sessionId]);
 
   /**
    * What: sends one turn: a chat message, or a card's verification or confirm body.
@@ -157,6 +181,30 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
     [busy, run],
   );
 
+  /**
+   * What: sends a failed message again from its error row.
+   * Use when: the Retry button.
+   * Inputs: the error item id.
+   * Output: none.
+   * Side effects: one streamed request (store.retry removes the error row and its bubble first).
+   * Role: handler.
+   */
+  const retry = useCallback(
+    (errorId: string) => {
+      if (sessionId === null) return;
+      const ctrl = new AbortController();
+      inflight.current = ctrl;
+      store
+        .getState()
+        .retry(errorId, sessionId, { signal: ctrl.signal })
+        .catch(() => undefined)
+        .finally(() => {
+          if (inflight.current === ctrl) inflight.current = null;
+        });
+    },
+    [sessionId, store],
+  );
+
   return (
     <MotionConfig reducedMotion="user">
       <div className="flex min-h-dvh flex-col bg-paper">
@@ -180,7 +228,10 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
         </header>
         <main className="mx-auto flex w-full max-w-[45rem] flex-1 flex-col px-4 pt-10 pb-6 sm:px-0">
           <div className="flex flex-1 flex-col">
-            <ConversationLog thread={thread} conversation={conversation} cards={cards} />
+            <ConversationLog thread={thread} conversation={conversation} cards={cards} onRetry={retry} />
+            <div role="status" aria-live="polite" className="sr-only">
+              {announcement(thread, conversation.turns)}
+            </div>
           </div>
           <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
             <InputBar onSend={send} busy={busy} disabled={sessionId === null} />

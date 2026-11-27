@@ -143,6 +143,25 @@ describe("verification card", () => {
     expect(JSON.stringify(store.getState())).not.toContain(PIN);
   });
 
+  it("a verification send that fails before any event keeps no PIN in the store or DOM, and offers no retry of it", async () => {
+    const body = { class: "unavailable", code: "UPSTREAM_UNAVAILABLE", message: "Our service is busy.", retryable: true, changed: false };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status: 503, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const store = storeWith(c1);
+    render(<ConsoleShell sessionId={SID} store={store} />);
+    fireEvent.change(screen.getByLabelText("Account ID"), { target: { value: "QS-10423" } });
+    fireEvent.change(screen.getByLabelText("Support PIN"), { target: { value: PIN } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+    await act(async () => {
+      await vi.waitFor(() => expect(store.getState().connection.phase).toBe("idle"));
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(store.getState())).not.toContain(PIN);
+    expect(domText()).not.toContain(PIN);
+    expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+    expect(screen.getByRole("region", { name: "Verify your account" })).toBeTruthy();
+  });
+
   it("strips non-digits from the PIN and keeps at most 4", () => {
     render(<ConsoleShell sessionId="s" store={storeWith(c1)} />);
     const pin = screen.getByLabelText("Support PIN") as HTMLInputElement;
@@ -295,7 +314,10 @@ describe("confirmation card", () => {
       ...fields,
     };
     render(<ConsoleShell sessionId="s" store={storeWith([...upToC2, result])} />);
-    const receipt = screen.getByRole("status", { name: title });
+    const receipts = document.querySelectorAll('[data-slot="receipt"]');
+    expect(receipts).toHaveLength(1);
+    const receipt = receipts[0] as HTMLElement;
+    expect(within(receipt).getByText(title)).toBeTruthy();
     if (detail !== null) expect(within(receipt).getByText(detail)).toBeTruthy();
     const card = screen.getByRole("region", { name: "Refund $96.00 for the charge on 21 November" });
     expect(within(card).queryByRole("button")).toBeNull();

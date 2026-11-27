@@ -6,7 +6,7 @@
  *   against the thresholds in words and a small meter).
  * Use when: rendering any agent turn, chat or voice, that has steps.
  * Inputs: { turn: TurnView }.
- * Output: JSX, or null for a finished turn with no steps.
+ * Output: JSX, or null for a finished or failed turn with no steps.
  * Side effects: a 100 ms timer while the turn runs (elapsed seconds).
  * Role: CS-E-04.S5.T1 (doc 06 s16, F1 s4, DESIGN.md "Step trail"); copy rules live in
  *   lib/turns/trail.ts.
@@ -29,7 +29,7 @@ import {
   Wallet,
   type LucideIcon,
 } from "lucide-react";
-import { AnimatePresence, motion } from "motion/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useId, useState } from "react";
 
 import type { TurnView } from "@/lib/turns/reducer";
@@ -166,10 +166,11 @@ function StepRow({ row }: { row: StepRowView }) {
       </span>
       <span className="flex min-w-0 items-center gap-2 max-sm:col-span-2 max-sm:col-start-2 max-sm:row-start-2">
         {row.detail && (
-          <span aria-label={row.detailLabel ?? undefined} className={cn("truncate font-mono text-mono-sm tabular", TONE_TEXT[row.tone])}>
+          <span aria-hidden={row.detailLabel ? true : undefined} className={cn("truncate font-mono text-mono-sm tabular", TONE_TEXT[row.tone])}>
             {row.detail}
           </span>
         )}
+        {row.detail && row.detailLabel && <span className="sr-only">{row.detailLabel}</span>}
         {row.meter && <GateMeterBar meter={row.meter} />}
       </span>
       <span className="shrink-0 text-right font-mono text-mono-sm text-muted tabular max-sm:col-start-3 max-sm:row-start-1">{row.latency}</span>
@@ -184,6 +185,8 @@ function StepRow({ row }: { row: StepRowView }) {
  * Output: JSX or null.
  * Side effects: see module.
  * Role: see module. The open state is per turn and survives new events; collapsed by default.
+ *   Announcements come from the console's single status region (review PR #20, M3). Under reduced
+ *   motion the height change is instant (Motion's reducedMotion keeps height animations, M4).
  */
 export function StepTrajectory({ turn }: { turn: TurnView }) {
   const [open, setOpen] = useState(false);
@@ -191,13 +194,14 @@ export function StepTrajectory({ turn }: { turn: TurnView }) {
   const summary = trailSummary(turn);
   const running = summary.state === "running";
   const elapsed = useElapsed(running);
-  if (summary.state === "done" && summary.stepCount === 0) return null;
+  const reduce = useReducedMotion() === true;
+  if (summary.state !== "running" && summary.stepCount === 0) return null;
 
   const rows = turn.stepOrder.flatMap((id) => {
     const step = turn.steps[id];
     return step ? [stepRow(step, turn)] : [];
   });
-  const alert = summary.state === "failed" || summary.failedCount > 0;
+  const alert = summary.state === "failed" || summary.failedCount > 0 || turn.completed?.end_reason === "error";
   const Chevron = open ? ChevronDown : ChevronRight;
 
   return (
@@ -205,16 +209,16 @@ export function StepTrajectory({ turn }: { turn: TurnView }) {
       <button
         type="button"
         aria-expanded={open}
-        aria-controls={panelId}
+        aria-controls={open ? panelId : undefined}
         onClick={() => setOpen((v) => !v)}
         className="-mx-1 inline-flex max-w-full items-center gap-2 self-start rounded-sm px-1 text-left outline-none transition-colors duration-150 ease-out-expo hover:text-ink focus-visible:ring-2 focus-visible:ring-ring"
       >
         {running ? (
-          <span aria-hidden className="size-2 shrink-0 rounded-full bg-ember motion-safe:animate-pulse" />
+          <span aria-hidden data-icon="live" className="size-2 shrink-0 rounded-full bg-ember motion-safe:animate-pulse" />
         ) : alert ? (
-          <CircleAlert aria-hidden className="size-3.5 shrink-0 text-error" />
+          <CircleAlert aria-hidden data-icon="alert" className="size-3.5 shrink-0 text-error" />
         ) : (
-          <Check aria-hidden className="size-3.5 shrink-0 text-muted" />
+          <Check aria-hidden data-icon="check" className="size-3.5 shrink-0 text-muted" />
         )}
         <span className={cn("truncate text-label", running ? "text-ink" : "text-muted")}>{summary.text}</span>
         {running && (
@@ -224,17 +228,14 @@ export function StepTrajectory({ turn }: { turn: TurnView }) {
         )}
         <Chevron aria-hidden className="size-3.5 shrink-0 text-muted" />
       </button>
-      <div role="status" aria-live="polite" className="sr-only">
-        {summary.text}
-      </div>
       <AnimatePresence initial={false}>
         {open && (
           <motion.div
             id={panelId}
             key="panel"
             initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1, transition: { duration: 0.2, ease: EASE_OUT_EXPO } }}
-            exit={{ height: 0, opacity: 0, transition: { duration: 0.15, ease: EASE_OUT_EXPO } }}
+            animate={{ height: "auto", opacity: 1, transition: { duration: reduce ? 0 : 0.2, ease: EASE_OUT_EXPO } }}
+            exit={{ height: 0, opacity: 0, transition: { duration: reduce ? 0 : 0.15, ease: EASE_OUT_EXPO } }}
             className="w-full overflow-hidden"
           >
             <ol className="flex w-full flex-col rounded-[12px] bg-margin py-1.5" aria-label="Steps">

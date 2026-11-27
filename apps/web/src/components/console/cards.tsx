@@ -110,7 +110,7 @@ const VERIFY_ICONS: Readonly<Record<VerificationResultEvent["status"], LucideIco
  * What: one line under a turn for a verification.result (Figma "Verification result").
  * Use when: a turn carries verification.result.
  * Inputs: { result }.
- * Output: a status paragraph.
+ * Output: a paragraph (no live role: the console's one status region announces, review PR #20 M3).
  * Side effects: none.
  * Role: result line.
  */
@@ -118,7 +118,7 @@ export function VerificationResultLine({ result }: { result: VerificationResultE
   const n = verificationNotice(result);
   const Icon = VERIFY_ICONS[n.status];
   return (
-    <p role="status" className="inline-flex items-start gap-2 text-label text-ink">
+    <p data-slot="verification-result" className="inline-flex items-start gap-2 text-label text-ink">
       <Icon aria-hidden className={cn("mt-px size-4 shrink-0", TONE_TEXT[n.tone])} />
       <span>{n.text}</span>
     </p>
@@ -128,19 +128,16 @@ export function VerificationResultLine({ result }: { result: VerificationResultE
 /**
  * What: one receipt line for an action outcome (Figma "Receipt line").
  * Use when: a turn carries action.result, and as the closed card footer.
- * Inputs: { receipt, announce } (announce adds role="status" with the title as its name).
- * Output: a paragraph.
+ * Inputs: { receipt, standalone } (standalone marks the line under its own turn with
+ *   data-slot="receipt"; the closed card footer passes false).
+ * Output: a paragraph (no live role: the console's one status region announces, review PR #20 M3).
  * Side effects: none.
  * Role: receipt line.
  */
-export function ReceiptLine({ receipt, announce = true }: { receipt: Receipt; announce?: boolean }) {
+export function ReceiptLine({ receipt, standalone = true }: { receipt: Receipt; standalone?: boolean }) {
   const Icon = RECEIPT_ICONS[receipt.tone];
   return (
-    <p
-      role={announce ? "status" : undefined}
-      aria-label={announce ? receipt.title : undefined}
-      className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5"
-    >
+    <p data-slot={standalone ? "receipt" : undefined} className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">
       <Icon aria-hidden className={cn("size-4 shrink-0", TONE_TEXT[receipt.tone])} />
       <span className="text-label text-ink">{receipt.title}</span>
       {receipt.detail && <span className="font-mono text-mono-sm text-muted">{receipt.detail}</span>}
@@ -405,7 +402,7 @@ export function ConfirmationCard({ confirmation, turnId, index, ruleTitle, disab
         </div>
       ) : (
         <div className="border-t border-rule pt-3">
-          {state.kind === "resolved" && <ReceiptLine receipt={receiptFor(state.result, pending)} announce={false} />}
+          {state.kind === "resolved" && <ReceiptLine receipt={receiptFor(state.result, pending)} standalone={false} />}
           {state.kind === "superseded" && <p className="text-body-sm text-muted">Replaced by a newer request.</p>}
           {state.kind === "expired" && <p className="text-body-sm text-muted">This request expired. Ask again if you still need it.</p>}
         </div>

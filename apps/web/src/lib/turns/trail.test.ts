@@ -64,6 +64,11 @@ describe("gateWords", () => {
     expect(gateWords(grounding).text).toBe("grounding passed, 1 of 1 claims");
   });
 
+  it("M7: an uncalibrated gate with no thresholds says so in words", () => {
+    const g = { ...(s4.find((e): e is GateEvent => e.type === "gate") as GateEvent), verdict: "uncalibrated", decision: "clarify" as const, top_cosine: 0.5, tau_low: null, tau_high: null };
+    expect(gateWords(g).text).toBe("0.50, uncalibrated, clarify");
+  });
+
   it("a skipped grounding gate", () => {
     const g = edge.find((e): e is GateEvent => e.type === "gate") as GateEvent;
     expect(gateWords(g).text).toBe("grounding skipped");

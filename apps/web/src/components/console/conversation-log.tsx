@@ -3,15 +3,18 @@
  * What: the conversation log: one thread of user items and agent turns, chat and voice together,
  *   each agent turn with its StepTrajectory, answer text, failure row and footer.
  * Use when: the console renders the store's thread.
- * Inputs: { thread, conversation, cards? }.
- * Output: a role="log" region of <article> items, or the empty state.
+ * Inputs: { thread, conversation, cards?, onRetry? }.
+ * Output: a role="log" region of <article> items (aria-live off: the console's one status region
+ *   announces, review PR #20 M3), or the empty state.
  * Side effects: none (card presses go to the `cards` callbacks).
  * Role: CS-E-04.S5.T1 unified thread (doc 06 s16, D-002); CS-E-04.S6.T1 adds the verification
  *   result line, receipts and the two cards. Citations, tickets and markdown arrive with
  *   CS-E-04.S5.T3.
  */
-import { CircleAlert, Mic } from "lucide-react";
+import { CircleAlert, Mic, RotateCcw } from "lucide-react";
 import type { ConfirmInput, VerificationInput } from "@contracts/contracts";
+
+import { Button } from "@/components/ui/button";
 
 import { cardIndex, receiptFor, ruleTitle, verificationCardState, type CardIndex } from "@/lib/turns/cards";
 import type { ConversationState, TurnView } from "@/lib/turns/reducer";
@@ -155,9 +158,39 @@ function AssistantMessage({
 }
 
 /**
+ * What: the row for a send that failed before any reply event: what happened in words, and Retry
+ *   when the failure is retryable and the text was kept.
+ * Use when: an error thread item (review PR #20, I2).
+ * Inputs: { item, onRetry? }.
+ * Output: an <article>.
+ * Side effects: Retry calls onRetry with the item id.
+ * Role: error row (doc 07 s8.1: the browser never retries on its own; the customer may).
+ */
+function SendError({ item, onRetry }: { item: Extract<ThreadItem, { kind: "error" }>; onRetry?: (id: string) => void }) {
+  const canRetry = item.retryable && item.text !== null && onRetry !== undefined;
+  return (
+    <article aria-label="Assistant" className="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <p className="inline-flex items-start gap-2 text-body-sm text-ink">
+        <CircleAlert aria-hidden className="mt-0.5 size-4 shrink-0 text-error" />
+        <span>
+          <span className="font-medium text-error">Couldn&apos;t send. </span>
+          <span>{item.message}</span>
+        </span>
+      </p>
+      {canRetry && (
+        <Button variant="quiet" size="sm" onClick={() => onRetry(item.id)}>
+          <RotateCcw aria-hidden className="size-3.5" />
+          Retry
+        </Button>
+      )}
+    </article>
+  );
+}
+
+/**
  * What: the conversation log component.
  * Use when: see module.
- * Inputs: { thread, conversation } from the turn store, and the card actions.
+ * Inputs: { thread, conversation } from the turn store, the card actions, onRetry for error rows.
  * Output: JSX.
  * Side effects: none.
  * Role: see module.
@@ -166,10 +199,12 @@ export function ConversationLog({
   thread,
   conversation,
   cards = NO_ACTIONS,
+  onRetry,
 }: {
   thread: readonly ThreadItem[];
   conversation: ConversationState;
   cards?: CardActions;
+  onRetry?: (errorId: string) => void;
 }) {
   const turns = conversation.turns;
   const index = cardIndex(conversation);
@@ -185,9 +220,10 @@ export function ConversationLog({
     );
   }
   return (
-    <div role="log" aria-label="Conversation" className="flex flex-col gap-7">
+    <div role="log" aria-label="Conversation" aria-live="off" className="flex flex-col gap-7">
       {thread.map((item) => {
         if (item.kind === "user") return <UserMessage key={item.id} text={item.text} mode={item.mode} />;
+        if (item.kind === "error") return <SendError key={item.id} item={item} onRetry={onRetry} />;
         const turn = turns[item.turnId];
         return turn ? <AssistantMessage key={item.id} turn={turn} conversation={conversation} index={index} cards={cards} /> : null;
       })}

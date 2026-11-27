@@ -325,6 +325,18 @@ export function replayEvents(events: readonly SseEvent[], start: ConversationSta
 }
 
 /**
+ * What: the plain words for a failure reason.
+ * Use when: a turn failed (failTurn) or a send failed before its first event (the store's error item).
+ * Inputs: the reason.
+ * Output: a sentence.
+ * Side effects: none.
+ * Role: one copy source for both failure paths.
+ */
+export function failureMessage(reason: TurnFailureReason): string {
+  return FAILURE_MESSAGES[reason];
+}
+
+/**
  * What: moves a turn whose stream ended without turn.completed to the terminal "failed" phase.
  * Use when: sendTurn (or the voice relay) rejects after the turn started: drop, abort, watchdog
  *   expiry or an unreadable event (review PR #16, I1).
