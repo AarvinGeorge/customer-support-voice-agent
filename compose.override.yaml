@@ -1,6 +1,8 @@
 # Local dev conveniences (picked up automatically by `docker compose up`; the VM uses `-f compose.yaml` only).
 # Source is mounted and uvicorn reloads on change; Caddy is published on localhost:${EDGE_PORT:-3000} (SITE_ORIGIN; set EDGE_PORT per lane stack).
-# Migrations are baked into the image: after adding a SQL or hook file run `docker compose up -d --build`.
+# Migrations are baked into the image. After adding or changing a SQL or hook file on an EXISTING stack run
+# `scripts/migrate.sh` (rebuilds and reruns migrate_core, migrate_knowledge, migrate_agent; applied files are skipped).
+# `docker compose up -d --build` also reruns a migrate job whose image changed, but do not rely on it; the script is explicit.
 # SERVICE and FORWARDED_ALLOW_IPS are read inside the container (the image sets SERVICE), hence the doubled dollar.
 x-dev-python: &dev-python
   command: ["sh", "-c", "exec uvicorn $${SERVICE}.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/src --proxy-headers --forwarded-allow-ips \"$${FORWARDED_ALLOW_IPS:-127.0.0.1}\""]
