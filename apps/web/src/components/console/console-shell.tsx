@@ -8,8 +8,10 @@
  * Output: the full-height console frame.
  * Side effects: sending a message or pressing a card calls store.sendTurn (one network request);
  *   an in-flight turn is aborted on unmount (its turn ends in the failed state, review PR #16 I1).
- *   The mic button starts or ends a voice call (useVoice); voice turns land in the same thread.
- *   Closing the drawer returns focus to the Inspector button. A 429 or 503 notice shows the
+ *   The mic button starts a voice call (useVoice); while it is open the voice dock replaces the
+ *   input bar; voice turns land in the same thread.
+ *   Closing the drawer returns focus to the Inspector button; ending a call returns focus to
+ *   the message box (review PR #55 M4). A 429 or 503 notice shows the
  *   limit banner with a countdown, pauses Send and the cards, and keeps the draft.
  * Role: CS-E-04.S5.T1 shell, laid out from the Figma page "Console, chat (S1)"; the drawer is
  *   CS-E-06.S3.T1 (Figma "Observability drawer"); limit banner and Create ticket are
@@ -30,12 +32,13 @@ import { inputPlaceholder } from "@/lib/turns/furniture";
 import { limitWords } from "@/lib/turns/limits";
 import { trailSummary } from "@/lib/turns/trail";
 import { isLive } from "@/lib/voice/machine";
-import { useVoice } from "@/lib/voice/use-voice";
+import { useVoice, type VoiceController } from "@/lib/voice/use-voice";
 
 import { ConversationLog, type CardActions } from "./conversation-log";
 import { InputBar } from "./input-bar";
 import { InspectorDrawer } from "./inspector-drawer";
 import { LimitBanner, useSecondsLeft } from "./limit-banner";
+import { VoiceDock } from "./voice-dock";
 
 /**
  * What: words for a verified person's role.
@@ -107,6 +110,7 @@ export function announcement(thread: readonly ThreadItem[], turns: Readonly<Reco
   const last = thread.at(-1);
   if (last === undefined || last.kind === "user") return "";
   if (last.kind === "error") return `Couldn't send. ${last.message}`;
+  if (last.kind === "agent-voice") return "";
   const turn = turns[last.turnId];
   if (turn === undefined) return "";
   const summary = trailSummary(turn);
@@ -116,13 +120,13 @@ export function announcement(thread: readonly ThreadItem[], turns: Readonly<Reco
 }
 
 /**
- * What: the minimal voice line above the input bar: the state in words, the live caption of what
- *   the customer is saying, and the error words when a call failed.
- * Use when: a call has been started at least once (hidden while idle).
+ * What: the voice line above the input bar after a call: the state in words and the error words
+ *   when a call failed or dropped.
+ * Use when: a call has ended or failed (hidden while idle; the dock shows live calls).
  * Inputs: { state, label, caption, error }.
  * Output: a short line, or nothing.
  * Side effects: none.
- * Role: CS-E-05.S3.T3 placeholder; the voice dock and bars are CS-E-05.S4.T1.
+ * Role: CS-E-05.S3.T3 line, kept by CS-E-05.S4.T1 for the after-call state.
  */
 export function VoiceLine({ state, label, caption, error }: { state: string; label: string; caption: string | null; error: string | null }) {
   if (state === "idle") return null;
@@ -150,6 +154,8 @@ export interface ConsoleShellProps {
   onNewConversation?: () => void;
   langsmithProjectUrl?: string;
   demoControls?: ReactNode;
+  /** A stand-in voice controller (tests, the dev replay); the default is useVoice for the session. */
+  voice?: VoiceController;
 }
 
 /**
@@ -166,6 +172,7 @@ export function ConsoleShell({
   onNewConversation,
   langsmithProjectUrl = publicConfig.langsmithProjectUrl,
   demoControls,
+  voice: voiceOverride,
 }: ConsoleShellProps) {
   const thread = useStore(store, (s) => s.thread);
   const conversation = useStore(store, (s) => s.conversation);
@@ -193,7 +200,22 @@ export function ConsoleShell({
   const messageRef = useRef<HTMLTextAreaElement | null>(null);
   const pinRef = useRef<HTMLInputElement | null>(null);
   const [account, setAccount] = useState("");
-  const { voice, toggle, available } = useVoice(sessionId, store);
+  const ownVoice = useVoice(voiceOverride === undefined ? sessionId : null, store);
+  const vc = voiceOverride ?? ownVoice;
+  const { voice, toggle, available } = vc;
+  const live = isLive(voice.state);
+  const wasLive = useRef(false);
+  useEffect(() => {
+    if (wasLive.current && !live) messageRef.current?.focus();
+    wasLive.current = live;
+  }, [live]);
+  const step = useStore(store, (s) => {
+    const last = s.conversation.turnOrder.at(-1);
+    const turn = last === undefined ? undefined : s.conversation.turns[last];
+    if (turn === undefined) return null;
+    const summary = trailSummary(turn);
+    return summary.state === "running" ? summary.text : null;
+  });
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [pickedTurnId, setPickedTurnId] = useState<string | null>(null);
   const inspectorRef = useRef<HTMLButtonElement | null>(null);
@@ -375,18 +397,24 @@ export function ConsoleShell({
           </div>
           <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
             {limit !== null && <LimitBanner notice={limit} seconds={secondsLeft} />}
-            <VoiceLine state={voice.state} label={voice.label} caption={voice.caption?.text ?? null} error={voice.error} />
-            <InputBar
-              locked={locked}
-              restore={limit?.draft ? { id: limit.id, text: limit.draft } : null}
-              caption={limit ? limitWords(limit).caption : null}
-              onSend={send}
-              busy={busy}
-              disabled={sessionId === null}
-              placeholder={inputPlaceholder(conversation, sessionId === null)}
-              inputRef={messageRef}
-              voice={available ? { live: isLive(voice.state), onToggle: toggle } : undefined}
-            />
+            {live ? (
+              <VoiceDock voice={voice} levels={vc.levels} step={step} agentLine={voice.agentLine} onMute={vc.mute} onStopSpeaking={vc.stopSpeaking} onEnd={vc.end} />
+            ) : (
+              <>
+                <VoiceLine state={voice.state} label={voice.label} caption={null} error={voice.error} />
+                <InputBar
+                  locked={locked}
+                  restore={limit?.draft ? { id: limit.id, text: limit.draft } : null}
+                  caption={limit ? limitWords(limit).caption : null}
+                  onSend={send}
+                  busy={busy}
+                  disabled={sessionId === null}
+                  placeholder={inputPlaceholder(conversation, sessionId === null)}
+                  inputRef={messageRef}
+                  voice={available ? { live: false, onToggle: toggle } : undefined}
+                />
+              </>
+            )}
           </div>
         </main>
         {inspectorOpen && (

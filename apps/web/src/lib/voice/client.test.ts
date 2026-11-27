@@ -109,7 +109,7 @@ const TOKEN: VoiceToken = { client_secret: "ek_test_secret", expires_at: "2026-1
  */
 function harness(over: Partial<VoiceClientDeps> = {}, tokenResponse?: () => Response) {
   const log: string[] = [];
-  const track = { stop: vi.fn(() => log.push("track.stop")), kind: "audio" };
+  const track = { stop: vi.fn(() => log.push("track.stop")), kind: "audio", enabled: true };
   const stream = { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream;
   let peer: FakePeer | null = null;
   const fetchMock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
@@ -127,6 +127,12 @@ function harness(over: Partial<VoiceClientDeps> = {}, tokenResponse?: () => Resp
     return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
   });
   const audio = { srcObject: null as unknown, autoplay: false, play: vi.fn(async () => {}), pause: vi.fn() };
+  const attached: string[] = [];
+  const levels = {
+    attach: vi.fn((src: "mic" | "agent") => attached.push(src)),
+    level: vi.fn((src: "mic" | "agent") => (src === "mic" ? 0.4 : 0.7)),
+    close: vi.fn(),
+  };
   const deps: VoiceClientDeps = {
     getUserMedia: vi.fn(async () => {
       log.push("getUserMedia");
@@ -137,6 +143,7 @@ function harness(over: Partial<VoiceClientDeps> = {}, tokenResponse?: () => Resp
       return peer as unknown as RTCPeerConnection;
     },
     createAudio: () => audio as unknown as HTMLAudioElement,
+    createLevels: () => levels,
     fetch: fetchMock as unknown as typeof fetch,
     ...over,
   };
@@ -147,7 +154,7 @@ function harness(over: Partial<VoiceClientDeps> = {}, tokenResponse?: () => Resp
     const s = client.getSnapshot().state;
     if (states.at(-1) !== s) states.push(s);
   });
-  return { client, log, peer: () => peer as FakePeer, track, fetchMock, states, deps, audio, store };
+  return { client, log, peer: () => peer as FakePeer, track, fetchMock, states, deps, audio, store, levels, attached, stream };
 }
 
 /**
@@ -308,5 +315,64 @@ describe("VoiceClient", () => {
     h.client.end();
     expect(tracks[1]?.stop).toHaveBeenCalled();
     expect(h.client.getSnapshot().state).toBe("ended");
+  });
+
+  it("feeds the mic and the remote track into one level meter, reads both, and closes it at End", async () => {
+    const h = harness();
+    await connectLive(h);
+    expect(h.attached).toEqual(["mic"]);
+    const remote = { id: "remote" };
+    h.peer().ontrack?.({ streams: [remote] });
+    expect(h.attached).toEqual(["mic", "agent"]);
+    expect(h.client.getLevels()).toEqual({ mic: 0.4, agent: 0.7 });
+    h.client.end();
+    expect(h.levels.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("Mute disables the mic track and Unmute enables it; the snapshot says which", async () => {
+    const h = harness();
+    await connectLive(h);
+    h.client.toggleMute();
+    expect(h.track.enabled).toBe(false);
+    expect(h.client.getSnapshot().muted).toBe(true);
+    expect(h.client.getLevels().mic).toBe(0);
+    h.client.toggleMute();
+    expect(h.track.enabled).toBe(true);
+    expect(h.client.getSnapshot().muted).toBe(false);
+  });
+
+  it("records when the call ends (endsAt) from the token's max_session_s", async () => {
+    vi.setSystemTime(new Date("2026-11-27T12:00:00Z"));
+    const h = harness();
+    await connectLive(h);
+    expect(h.client.getSnapshot().endsAt).toBe(Date.parse("2026-11-27T12:10:00Z"));
+    h.client.end();
+    expect(h.client.getSnapshot().endsAt).toBeNull();
+  });
+
+  it("Stop speaking sends output_audio_buffer.clear on the data channel and nothing else", async () => {
+    const h = harness();
+    const ch = await connectLive(h);
+    h.client.stopSpeaking();
+    expect(ch.sent.map((m) => JSON.parse(m) as { type: string })).toEqual([{ type: "output_audio_buffer.clear" }]);
+  });
+
+  it("posts finished transcript items to /transcript when the call ends, and shows what the agent says", async () => {
+    const h = harness();
+    const ch = await connectLive(h);
+    ch.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: "u1", transcript: "Hello" });
+    ch.emit({ type: "response.created", response: { id: "r1", status: "in_progress", output: [] } });
+    ch.emit({ type: "response.output_audio_transcript.delta", response_id: "r1", item_id: "a1", delta: "Hi there." });
+    ch.emit({ type: "output_audio_buffer.started", response_id: "r1" });
+    expect(h.client.getSnapshot().agentLine).toBe("Hi there.");
+    ch.emit({ type: "output_audio_buffer.stopped", response_id: "r1" });
+    expect(h.client.getSnapshot().agentLine).toBeNull();
+    h.client.end();
+    await vi.advanceTimersByTimeAsync(0);
+    const call = h.fetchMock.mock.calls.find(([u]) => String(u) === `/api/sessions/${SID}/transcript`);
+    expect(call).toBeDefined();
+    const body = JSON.parse(String((call?.[1] as RequestInit).body)) as { voice_session_id: string; items: Array<{ realtime_item_id: string }> };
+    expect(body.voice_session_id).toBe("vs-1");
+    expect(body.items.map((i) => i.realtime_item_id)).toEqual(["u1"]);
   });
 });

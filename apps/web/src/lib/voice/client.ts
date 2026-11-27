@@ -7,17 +7,19 @@
  * Output: a VoiceClient (connect, end, subscribe, getSnapshot, settled).
  * Side effects: microphone capture; one POST voice/token (agent mints the secret, doc 07 s6.6);
  *   one POST to api.openai.com with the ephemeral secret; a peer connection, data channel and
- *   audio element; a 10-minute timer (doc 07 s8.1). The secret stays in a local variable: it is
+ *   audio element; a 10-minute timer (doc 07 s8.1); POST transcript of finished items (through
+ *   the relay, CS-E-05.S4.T3). The secret stays in a local variable: it is
  *   never stored, logged or put in the snapshot.
  * Role: CS-E-05.S3.T3 VoiceClient. The browser never sets instructions or tools (they are in the
  *   minted session). A dropped call returns to chat with the thread intact (06 s17).
  */
-import { LIMITS, type VoiceToken } from "@contracts/contracts";
+import { LIMITS, type TranscriptPost, type VoiceToken } from "@contracts/contracts";
 import type { StoreApi } from "zustand";
 import { ApiError, apiFetch, type ApiDeps } from "@/lib/api/client";
 import type { TurnStoreState } from "@/lib/turns/store";
 
 import { VOICE_LABELS, isLive, nextVoiceState, type VoiceEvent, type VoiceState } from "./machine";
+import { createAudioLevels, type AudioLevels } from "./levels";
 import { createVoiceRelay, type Caption, type VoiceRelay } from "./relay";
 
 /**
@@ -59,6 +61,12 @@ export interface VoiceSnapshot {
   label: string;
   caption: Caption | null;
   error: string | null;
+  /** The mic track is disabled (Mute). */
+  muted: boolean;
+  /** Epoch ms when the 10-minute cap ends the call; null when no call is open. */
+  endsAt: number | null;
+  /** What the agent is saying now (live transcript), or null. */
+  agentLine: string | null;
 }
 
 /**
@@ -73,6 +81,7 @@ export interface VoiceClientDeps {
   getUserMedia?: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
   createPeer?: () => RTCPeerConnection;
   createAudio?: () => HTMLAudioElement;
+  createLevels?: () => AudioLevels;
   fetch?: typeof fetch;
 }
 
@@ -101,6 +110,12 @@ export interface VoiceClientOptions {
 export interface VoiceClient {
   connect: () => Promise<void>;
   end: () => void;
+  /** Disables or enables the mic track. */
+  toggleMute: () => void;
+  /** Stops the agent's audio (output_audio_buffer.clear); never cancels the backend turn. */
+  stopSpeaking: () => void;
+  /** Current loudness 0..1 of the mic and the agent audio (0 when muted or no call). */
+  getLevels: () => { mic: number; agent: number };
   subscribe: (listener: () => void) => () => void;
   getSnapshot: () => VoiceSnapshot;
   settled: () => Promise<void>;
@@ -134,6 +149,7 @@ function browserDeps(): Required<VoiceClientDeps> {
     getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
     createPeer: () => new RTCPeerConnection(),
     createAudio: () => new Audio(),
+    createLevels: () => createAudioLevels(),
     fetch: (...args) => fetch(...args),
   };
 }
@@ -152,13 +168,14 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
   const d: Required<VoiceClientDeps> = { ...browserDeps(), ...deps };
   const api: ApiDeps = { fetch: d.fetch };
   const listeners = new Set<() => void>();
-  let snap: VoiceSnapshot = { state: "idle", label: VOICE_LABELS.idle, caption: null, error: null };
+  let snap: VoiceSnapshot = { state: "idle", label: VOICE_LABELS.idle, caption: null, error: null, muted: false, endsAt: null, agentLine: null };
   let epoch = 0;
   let media: MediaStream | null = null;
   let pc: RTCPeerConnection | null = null;
   let dc: RTCDataChannel | null = null;
   let audio: HTMLAudioElement | null = null;
   let relay: VoiceRelay | null = null;
+  let levels: AudioLevels | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   /**
@@ -195,7 +212,8 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
    * Inputs: none.
    * Output: none.
    * Side effects: stops mic tracks, closes the channel and the peer, clears the audio element and
-   *   the timer, closes the relay (an in-flight voice/ask still finishes into the thread).
+   *   the timer and the level meter, closes the relay (an in-flight voice/ask still finishes into
+   *   the thread).
    * Role: helper; safe to call twice.
    */
   const teardown = () => {
@@ -217,6 +235,8 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
       audio.pause?.();
       audio.srcObject = null;
     }
+    levels?.close();
+    levels = null;
     media = null;
     pc = null;
     dc = null;
@@ -234,7 +254,7 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
     epoch += 1;
     teardown();
     const state = nextVoiceState(snap.state, "fail");
-    update({ state, error: words, caption: null });
+    update({ state, error: words, caption: null, muted: false, endsAt: null, agentLine: null });
   };
 
   /**
@@ -249,7 +269,7 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
     epoch += 1;
     teardown();
     const state = nextVoiceState(snap.state, "end");
-    if (state !== snap.state) update({ state, caption: null });
+    if (state !== snap.state || snap.endsAt !== null) update({ state, caption: null, muted: false, endsAt: null, agentLine: null });
   };
 
   /**
@@ -277,11 +297,15 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
       return;
     }
     media = stream;
+    const meter = d.createLevels();
+    levels = meter;
+    meter.attach("mic", stream);
     try {
       const token = await apiFetch<VoiceToken>(`/api/sessions/${encodeURIComponent(sessionId)}/voice/token`, { method: "POST", body: {} }, api);
       if (run !== epoch) return;
       const maxS = Math.min(token.max_session_s || LIMITS.VOICE_SESSION_MAX_S, LIMITS.VOICE_SESSION_MAX_S);
       timer = setTimeout(end, maxS * 1000);
+      update({ endsAt: Date.now() + maxS * 1000 });
 
       const peer = d.createPeer();
       pc = peer;
@@ -290,6 +314,7 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
       audio = out;
       peer.ontrack = (e) => {
         out.srcObject = e.streams[0] ?? null;
+        if (e.streams[0]) meter.attach("agent", e.streams[0]);
         void out.play?.()?.catch(() => undefined);
       };
       peer.onconnectionstatechange = () => {
@@ -307,6 +332,12 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
         },
         onMachine: dispatch,
         onCaption: (caption) => update({ caption }),
+        onAgentLine: (agentLine) => {
+          if (agentLine !== snap.agentLine) update({ agentLine });
+        },
+        postTranscript: async (body: TranscriptPost) => {
+          await apiFetch<void>(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`, { method: "POST", body }, api);
+        },
         deps: api,
       });
       relay = r;
@@ -345,9 +376,28 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
     }
   };
 
+  /**
+   * What: mutes or unmutes the mic.
+   * Use when: the Mute button.
+   * Inputs: none.
+   * Output: none.
+   * Side effects: flips enabled on every mic track (a disabled track sends silence, so Realtime
+   *   hears nothing); update.
+   * Role: public action; does nothing without a call.
+   */
+  const toggleMute = () => {
+    if (media === null) return;
+    const muted = !snap.muted;
+    for (const t of media.getAudioTracks()) t.enabled = !muted;
+    update({ muted });
+  };
+
   return {
     connect,
     end,
+    toggleMute,
+    stopSpeaking: () => relay?.stopSpeaking(),
+    getLevels: () => ({ mic: snap.muted || levels === null ? 0 : levels.level("mic"), agent: levels?.level("agent") ?? 0 }),
     subscribe: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);

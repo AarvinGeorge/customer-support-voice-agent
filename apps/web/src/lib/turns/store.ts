@@ -38,6 +38,19 @@ export type TurnError = ApiError | ContractViolationError | NetworkError;
  */
 export type ThreadItem =
   | { kind: "user"; id: string; text: string; mode: "chat" | "voice" }
+  | {
+      /** What the voice agent said aloud, keyed by its Realtime item id (CS-E-05.S4.T3). */
+      kind: "agent-voice";
+      id: string;
+      itemId: string;
+      /** The spoken transcript received so far (the whole utterance once done). */
+      text: string;
+      /** What the customer heard: `text` unless interrupted, then cut where the audio stopped. */
+      heard: string;
+      interrupted: boolean;
+      /** The voice/ask turn this utterance read back (its `say`), or null for other speech. */
+      turnId: string | null;
+    }
   | { kind: "turn"; id: string; turnId: string }
   | {
       kind: "error";
@@ -153,7 +166,10 @@ export interface TurnStoreState {
   limit: LimitNotice | null;
   clearLimit: () => void;
   apply: (event: SseEvent) => void;
-  addUserMessage: (text: string, mode: "chat" | "voice") => void;
+  /** Adds a user bubble; a voice final passes its Realtime item id, so a repeat is ignored. */
+  addUserMessage: (text: string, mode: "chat" | "voice", itemId?: string) => void;
+  /** Adds or replaces the assistant voice item with this item id (same place in the thread). */
+  upsertAgentVoice: (item: Omit<Extract<ThreadItem, { kind: "agent-voice" }>, "kind" | "id">) => void;
   reset: () => void;
   retry: (errorId: string, sessionId: string, opts?: SendTurnOptions) => Promise<StreamResult | null>;
   armFault: (fault: DemoFault | null) => void;
@@ -273,7 +289,22 @@ export function createTurnStore(): StoreApi<TurnStoreState> {
       const added = next.turnOrder.slice(prev.turnOrder.length).map((turnId): ThreadItem => ({ kind: "turn", id: turnId, turnId }));
       set(added.length > 0 ? { conversation: next, thread: [...get().thread, ...added] } : { conversation: next });
     },
-    addUserMessage: (text, mode) => set({ thread: [...get().thread, userItem(text, mode)] }),
+    addUserMessage: (text, mode, itemId) => {
+      if (itemId === undefined) {
+        set({ thread: [...get().thread, userItem(text, mode)] });
+        return;
+      }
+      const id = `voice-${itemId}`;
+      if (get().thread.some((i) => i.id === id)) return;
+      set({ thread: [...get().thread, { kind: "user", id, text, mode }] });
+    },
+    upsertAgentVoice: (item) => {
+      const id = `voice-${item.itemId}`;
+      const next: ThreadItem = { kind: "agent-voice", id, ...item };
+      const thread = get().thread;
+      const at = thread.findIndex((i) => i.id === id);
+      set({ thread: at < 0 ? [...thread, next] : thread.map((i, n) => (n === at ? next : i)) });
+    },
     reset: () => {
       epoch += 1;
       for (const ctrl of inflight) ctrl.abort();
