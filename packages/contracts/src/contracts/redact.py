@@ -10,6 +10,7 @@ models, dataclasses and sets. hide_for_langsmith is the LangSmith hide_inputs an
 """
 import json
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime, time
@@ -43,103 +44,175 @@ def mask_email(email: str) -> str:
     return _EMAIL_RE.sub(lambda m: f"{m.group(1)}***@{m.group(2)}", email)
 
 
-# ---- doc 07 s11.1 PIN scanner ----
+# ---- doc 07 s11.1 PIN scanner (fix round 1: review PR #57 I1, I2, M1, M2) ----
 
-_DIGIT_WORDS = {"zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6",
-                "seven": "7", "eight": "8", "nine": "9"}
-_ITEM = r"(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|(?<!\d)\d(?!\d))"
-# A run of two or more spoken digits or single numerals ("four eight two one", "4 8 2 1", "four-eight-two-one"),
-# optionally led by a spoken or typed "QS" ("Q S one zero four two three").
-_RUN_RE = re.compile(rf"(?<![\w$])(?:(?P<qs>q\s?\.?\s?s\.?)[\s,.-]+)?(?P<run>{_ITEM}(?:[\s,.-]+{_ITEM})+)(?!\w)",
-                     re.IGNORECASE)
-_ACCOUNT_RE = re.compile(r"\bQS[-\s]?\d{5}\b", re.IGNORECASE)
+_UNITS = {"zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6",
+          "seven": "7", "eight": "8", "nine": "9"}
+_TEENS = {"ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14", "fifteen": "15",
+          "sixteen": "16", "seventeen": "17", "eighteen": "18", "nineteen": "19"}
+_TENS = {"twenty": "2", "thirty": "3", "forty": "4", "fourty": "4", "fifty": "5", "sixty": "6", "seventy": "7",
+         "eighty": "8", "ninety": "9"}
+_DASHES = "‐‑‒–—―−"
+_W_TENS = "|".join(_TENS)
+_W_UNITS = "one|two|three|four|five|six|seven|eight|nine"
+# One spoken or typed number item: a tens pair ("forty-eight"), a tens word, a teen, a unit word, or a 1 or 2 digit
+# numeral. Items join with spaces, commas or dashes into a run; a full stop ends a run.
+_ITEM = (rf"(?:\b(?:{_W_TENS})(?:[\s{_DASHES}-]?(?:{_W_UNITS})\b)?|\b(?:{'|'.join(_TEENS)})\b|\b(?:zero|oh|{_W_UNITS})\b"
+         r"|(?<!\d)\d{1,2}(?!\d))")
+_SEP = rf"[ \t,{_DASHES}-]+"
+_RUN_RE = re.compile(rf"(?<![\w$€£])(?<!\d[-/.:])(?:(?P<qs>(?<![A-Za-z])q\s?\.?\s?s\.?)[\s,.{_DASHES}-]*)?"
+                     rf"(?P<run>{_ITEM}(?:{_SEP}{_ITEM})+)(?![\w])(?![-/.:]\d)", re.IGNORECASE)
+_ITEM_RE = re.compile(_ITEM, re.IGNORECASE)
+_LONG_OPEN, _LONG_CLOSE = "", ""  # marks a spoken or grouped run longer than 4 digits
+_ACCOUNT_SEP = rf"[\s_#:.{_DASHES}-]*"
+_ACCOUNT_RE = re.compile(rf"(?<![A-Za-z])QS{_ACCOUNT_SEP}\d{{5}}(?!\d)", re.IGNORECASE)
+_GLUED_RE = re.compile(rf"((?<![A-Za-z])QS{_ACCOUNT_SEP}\d{{5}})(\d{{4}})(?!\d)", re.IGNORECASE)
+_PIN_DOTS_RE = re.compile(r"\bp\.\s?i\.\s?n\b\.?", re.IGNORECASE)
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
 _YEAR = r"(?:19|20)\d{2}"
-# Spans that are never a candidate: account id, error code, dates (ISO, slash, month name).
-_NOT_CANDIDATE = (
-    _ACCOUNT_RE,
-    re.compile(r"\bE-[A-Z]+-\d{3}\b"),
-    re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
-    re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b"),
+_DATES = (
+    re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)"),
+    re.compile(r"(?<!\d)\d{1,2}/\d{1,2}/\d{2,4}(?!\d)"),
     re.compile(rf"\b{_MONTH}\s+(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s+)?{_YEAR}\b", re.IGNORECASE),
     re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH},?\s+{_YEAR}\b", re.IGNORECASE),
 )
-_CANDIDATE_RE = re.compile(r"(?<!\d[.,])\b\d{4}\b(?![.,]\d)")
+_CANDIDATE_RE = re.compile(rf"(?<!\d)\d{{4}}(?!\d)|{_LONG_OPEN}\d+{_LONG_CLOSE}")
 _AMOUNT_BEFORE_RE = re.compile(r"[$€£]\s?$")
-_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:'[A-Za-z]+)?")
-_PIN_WORDS = frozenset({"pin", "pins", "pin's"})
-# doc 07 s7.3 fillers plus a few conversational ones ("it's 4821", "um, 4821"): a message of only these and the
-# candidate is a bare PIN (condition 5).
+_TOKEN_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?|\d+")
+_PIN_WORDS = frozenset({"pin", "pins", "pin's", "pincode", "pincodes", "passcode", "passcodes", "passkey", "code",
+                        "codes"})
+# "error code", "promo code" and the like are not credential words.
+_NOT_PIN_CODE = frozenset({"error", "promo", "discount", "coupon", "zip", "postal", "area", "country", "reference",
+                           "tracking", "source", "status", "gift", "voucher"})
+# doc 07 s7.3 fillers plus a few conversational ones: a message of only these and the candidate is a bare PIN.
 _FILLERS = frozenset({"ok", "okay", "sure", "please", "thanks", "thank", "you", "great", "perfect", "alright", "all",
                       "right", "um", "uh", "hi", "hello", "hey", "it", "it's", "its", "is", "my", "here", "the"})
-_PIN_WINDOW = 3
 
 
 @dataclass(frozen=True)
 class PinScan:
     """What: the result of scanning one string. Use when: ingress step 9a decides on the s7.3 typed-PIN refusal.
-    Inputs: text (redacted, spoken digits normalized when something was redacted), redacted (count of candidates
-    replaced), credential_like (a PIN was redacted and the message also has the word PIN, an account id, or is only
-    the PIN and fillers). Output: value. Side effects: none. Role: scanner output."""
+    Inputs: text (redacted and normalized when something was redacted, else the original), redacted (candidates
+    replaced), credential_like (a PIN was redacted and the message has an account id or a PIN word, or is only the
+    PIN and fillers). Output: value. Side effects: none. Role: scanner output."""
 
     text: str
     redacted: int
     credential_like: bool
 
 
+def _ascii_digits(text: str) -> str:
+    """What: NFKC, then every Unicode decimal digit (full-width, Arabic-Indic...) as its ASCII digit.
+    Use when: first step of normalization. Inputs: text. Output: text. Side effects: none. Role: review M1."""
+    norm = unicodedata.normalize("NFKC", text)
+    return "".join(str(unicodedata.decimal(c)) if c.isdecimal() and not c.isascii() else c for c in norm)
+
+
+def _item_digits(item: str) -> str:
+    """What: the digits of one number item. Use when: collapsing a run. Inputs: item text. Output: digits.
+    Side effects: none. Role: helper."""
+    low = item.lower()
+    if low.isdigit():
+        return low
+    if low in _UNITS:
+        return _UNITS[low]
+    if low in _TEENS:
+        return _TEENS[low]
+    parts = re.split(rf"[\s{_DASHES}-]", low)
+    return _TENS[parts[0]] + (_UNITS[parts[-1]] if len(parts) > 1 else "0")
+
+
 def normalize_spoken_digits(text: str) -> str:
-    """What: collapse spoken digit runs: four digits become "4821"; "QS" plus five digits becomes "QS-10423" (plus
-    " 4821" when four more follow). Runs of any other length, and lone number words, are left as they are.
+    """What: collapse number runs: four digits become "4821"; "QS" plus five (or nine) digits becomes "QS-10423"
+    (plus " 4821"); a longer run becomes a marked long run (a candidate only under context or while awaiting); a
+    shorter run stays as written. A leading "oh" is a word, not a zero.
     Use when: scan_pins, before the candidate rule. Inputs: text. Output: text. Side effects: none.
-    Role: doc 07 s11.1 input ("four eight two one" becomes "4821") and the account form of rule V."""
+    Role: doc 07 s11.1 input ("four eight two one" becomes "4821"), pairs ("forty-eight twenty-one", "48 21"),
+    grouped digits ("4-8-2-1") and the account form of rule V."""
 
     def collapse(m: re.Match[str]) -> str:
         """What: replace one run. Use when: re.sub. Inputs: match. Output: text. Side effects: none. Role: helper."""
-        items = re.findall(_ITEM, m.group("run"), flags=re.IGNORECASE)
-        digits = "".join(_DIGIT_WORDS.get(i.lower()) or i for i in items)
+        items = list(_ITEM_RE.finditer(m.group("run")))
+        lead = ""
+        while items and items[0].group().lower() == "oh" and not m.group("qs"):
+            items = items[1:]
+        if len(items) < 2:
+            return m.group(0)
+        lead = m.group(0)[:m.start("run") - m.start() + items[0].start()]
+        digits = "".join(_item_digits(i.group()) for i in items)
         if m.group("qs") and len(digits) in (5, 9):
             return f"QS-{digits[:5]}" + (f" {digits[5:]}" if digits[5:] else "")
         if len(digits) == 4:
-            return (m.group("qs") + " " if m.group("qs") else "") + digits
+            return lead + digits
+        if len(digits) > 4:
+            return lead + _LONG_OPEN + digits + _LONG_CLOSE
         return m.group(0)
 
     return _RUN_RE.sub(collapse, text)
 
 
+def _normalize(text: str) -> str:
+    """What: the full normalization: ASCII digits, "P.I.N." as PIN, an account id glued to four digits split,
+    number runs collapsed. Use when: scan_pins. Inputs: text. Output: text. Side effects: none. Role: helper."""
+    norm = _ascii_digits(text)
+    norm = _PIN_DOTS_RE.sub("PIN", norm)
+    norm = _GLUED_RE.sub(r"\1 \2", norm)
+    return normalize_spoken_digits(norm)
+
+
+def _has_pin_word(tokens: list[str]) -> bool:
+    """What: whether a credential word is present ("code" only when not "error code" and the like).
+    Use when: scan_pins. Inputs: lowercased tokens. Output: bool. Side effects: none. Role: helper."""
+    for i, t in enumerate(tokens):
+        if t in _PIN_WORDS and not (t.startswith("code") and i > 0 and tokens[i - 1] in _NOT_PIN_CODE):
+            return True
+    return False
+
+
 def scan_pins(text: str, context: RedactContext) -> PinScan:
-    """What: the doc 07 s11.1 scanner. A candidate (a standalone 4-digit group that is not in an account id, error
-    code, date, decimal or after a currency sign) becomes "[PIN]" when the session awaits verification, the word PIN
-    is within 3 tokens, the session is unverified and the message has an account id, a step-up is pending, or the
-    message is only the candidate and fillers.
+    """What: the doc 07 s11.1 scanner with the fix round 1 context rule.
+    Context (an account id, or the word PIN, code or passcode, anywhere in the message): every 4-digit group and every
+    long number run is a candidate (with an account id only, amounts and full dates are kept) and the message is
+    credential-looking. No context: a candidate (not in a date, decimal or amount) is redacted when the session awaits
+    verification, a step-up is pending, or the message is only the candidate and fillers.
     Use when: ingress step 9a, POST /transcript, and every string inside redact.
     Inputs: text, context. Output: PinScan (the original text when nothing was redacted). Side effects: none.
     Role: the one free-text PIN rule; ingress applies it, the model only ever sees its output."""
-    norm = normalize_spoken_digits(text)
-    blocked = [m.span() for rx in _NOT_CANDIDATE for m in rx.finditer(norm)]
-    cands = [m for m in _CANDIDATE_RE.finditer(norm)
-             if not any(a <= m.start() < b for a, b in blocked) and not _AMOUNT_BEFORE_RE.search(norm[:m.start()])]
+    norm = _normalize(text)
+    cands = list(_CANDIDATE_RE.finditer(norm))
     if not cands:
         return PinScan(text, 0, False)
-    tokens = [(m.start(), m.group().lower()) for m in _TOKEN_RE.finditer(norm)]
-    cand_starts = {m.start() for m in cands}
-    has_account = bool(_ACCOUNT_RE.search(norm))
-    has_pin_word = any(t in _PIN_WORDS for _, t in tokens)
-    only_fillers = all(s in cand_starts or t in _FILLERS for s, t in tokens)
-    session_rule = (context.awaiting_verification or context.step_up_pending
-                    or (has_account and not context.verified) or only_fillers)
-    index = {s: i for i, (s, _) in enumerate(tokens)}
-    hits = []
-    for m in cands:
-        i = index.get(m.start())
-        near = i is not None and any(t in _PIN_WORDS for _, t in tokens[max(i - _PIN_WINDOW, 0):i + _PIN_WINDOW + 1])
-        if session_rule or near:
-            hits.append(m)
-    if not hits:
+    tokens = [m.group().lower() for m in _TOKEN_RE.finditer(norm)]
+    pin_word = _has_pin_word(tokens)
+    account = bool(_ACCOUNT_RE.search(norm))
+    if not pin_word:
+        dates = [m.span() for rx in _DATES for m in rx.finditer(norm)]
+        keep_decimal = not account
+
+        def excluded(m: re.Match[str]) -> bool:
+            """What: kept shapes outside PIN-word context. Use when: filtering. Inputs: candidate. Output: bool.
+            Side effects: none. Role: amounts, dates (and decimals without an account id) are not PINs."""
+            a, b = m.span()
+            if _AMOUNT_BEFORE_RE.search(norm[:a]) or any(x <= a < y for x, y in dates):
+                return True
+            return keep_decimal and (bool(re.search(r"\d[.,]$", norm[:a])) or bool(re.match(r"[.,]\d", norm[b:])))
+
+        cands = [m for m in cands if not excluded(m)]
+        if not cands:
+            return PinScan(text, 0, False)
+    spans = [m.span() for m in cands]
+    only_fillers = all(t in _FILLERS for t in _TOKEN_RE.findall(_CANDIDATE_RE.sub(" ", norm).lower()))
+    if pin_word or account:
+        hits = cands
+    elif context.awaiting_verification or context.step_up_pending or only_fillers:
+        hits = cands
+    else:
         return PinScan(text, 0, False)
     out = norm
-    for m in reversed(hits):
-        out = out[:m.start()] + PIN_TOKEN + out[m.end():]
-    return PinScan(out, len(hits), has_pin_word or has_account or only_fillers)
+    for a, b in reversed(spans if hits is cands else [m.span() for m in hits]):
+        out = out[:a] + PIN_TOKEN + out[b:]
+    out = out.replace(_LONG_OPEN, "").replace(_LONG_CLOSE, "")
+    return PinScan(out, len(hits), pin_word or account or only_fillers)
 
 
 def scan_text(text: str, context: RedactContext) -> str:

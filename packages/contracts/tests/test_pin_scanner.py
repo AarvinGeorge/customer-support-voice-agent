@@ -26,6 +26,7 @@ STEP_UP = RedactContext(verified=True, step_up_pending=True)
     ("ok 4821 thanks", VERIFIED, "ok [PIN] thanks"),  # condition 5 with fillers
     ("invoice ending 0412", AWAITING, "invoice ending [PIN]"),  # condition 1 redacts every candidate
     ("qs10423 4821", UNVERIFIED, "qs10423 [PIN]"),  # account id without the hyphen, any case
+    ("invoice 0412 for QS-10423", VERIFIED, "invoice [PIN] for QS-10423"),  # fix round 1: an account id is context
 ])
 def test_each_condition_redacts(text: str, ctx: RedactContext, expected: str) -> None:
     assert "4821" in text or "0412" in text  # the secret is in the fixture (a zero is possible)
@@ -44,7 +45,6 @@ def test_each_condition_redacts(text: str, ctx: RedactContext, expected: str) ->
     ("error E-SYNC-042 again", AWAITING),  # error code (three digits, never a candidate)
     ("my account is QS-10423", UNVERIFIED),  # the account id itself is kept (doc 07 s11)
     ("the 12345 order", AWAITING),  # five digits is not a candidate
-    ("invoice 0412 for QS-10423", VERIFIED),  # condition 3 needs an unverified session
 ])
 def test_kept_cases(text: str, ctx: RedactContext) -> None:
     scan = scan_pins(text, ctx)

@@ -41,6 +41,7 @@ from agent.sessions import PgSessionStore
 from agent.settings import Settings
 from agent.tracing import build_langsmith_client
 from agent.trajectory import TrajectoryWriter
+from agent.structured.confirm import CoreCommitClient
 from agent.turn_body import PgSessionFlags
 from agent.voice import PgVoiceStore, TranscriptMerger, VoiceDeps, VoiceSessionRow
 
@@ -53,7 +54,29 @@ VISITOR = "pg-sink-visitor"
 KEY = "k" * 32
 ORIGIN = "https://test"
 # The raw PIN as a standalone group: not inside a uuid group, a hex digest or a timestamp.
-SECRET = re.compile(r"(?<![0-9A-Za-z-])4821(?![0-9A-Za-z])|four eight two one", re.IGNORECASE)
+# Hex-led or hex-trailed digits are uuid groups or timestamps; every spoken, grouped and Unicode form is listed.
+SECRET = re.compile(r"(?<![0-9a-f-])4821(?![0-9a-f])|104234821|10423-4821|four[ ,.-]+eight[ ,.-]+two[ ,.-]+(?:one|oh)"
+                    r"|forty[ -]?eight|twenty[ -]?one|48 21|4[ -]8[ -]2[ -]1|\uff14\uff18\uff12\uff11"
+                    r"|\u0664\u0668\u0662\u0661", re.IGNORECASE)
+# The review PR #57 bypass list (same strings as packages/contracts/tests/test_pin_bypasses.py BYPASSES).
+BYPASSES = [
+    "QS-10423,4821", "QS-10423.4821", "my PIN is four eight two one. One more thing",
+    "oh, four eight two one is my pin", "I have 2, four eight two one is my PIN", "forty-eight twenty-one is my pin",
+    "my pin is 48 21", "my PIN is \uff14\uff18\uff12\uff11", "my PIN is \u0664\u0668\u0662\u0661", "pin4821",
+    "QS - 10423 4821", "my passcode is 4821", "the code is 4821",
+    "QS\u201310423 4821", "QS_10423 4821", "QS#10423 4821", "pincode 4821", "my P.I.N. is 4821",
+    "my PIN, which I set up last year when I first opened the account, is 4821", "my pin is $4821",
+    "PIN: 4821", "PIN:4821", "_4821_ is my pin",
+    "QS-10423/4821", "QS-10423:4821", "QS-10423-4821", "QS-104234821", "QS-10423   4821", "QS-10423\t4821",
+    "4821,QS-10423", "4821.QS-10423", "4821QS-10423", "4821 QS-10423", "4821 / QS-10423", "qs10423,4821",
+    "QS-10423 forty-eight twenty-one", "QS-10423 forty eight, twenty one", "QS-10423 48 21", "QS-10423 4-8-2-1",
+    "my pin is 4-8-2-1", "my pin is forty eight twenty one", "Customer QS-10423: pin is four, eight, two, one.",
+    "my PIN is four eight two one one", "my pin is four eight two oh", "code: 4 8 2 1",
+    "Q S one zero four two three four eight two one", "my PIN is 4821 and my account is QS-10423",
+    "pin number four-eight-two-one", "my passcode: forty eight twenty one",
+]
+SPOKEN_BYPASSES = ["my PIN is four eight two one. One more thing", "oh, four eight two one is my pin",
+                   "I have 2, four eight two one is my PIN"]
 
 
 class Echo(GenericFakeChatModel):
@@ -75,7 +98,12 @@ class Echo(GenericFakeChatModel):
         self.seen.append(list(messages))
         human = [m for m in messages if isinstance(m, HumanMessage)][-1]
         said = str(human.content)[-300:]
-        if not messages or not getattr(messages[-1], "tool_call_id", None):
+        first = not messages or not getattr(messages[-1], "tool_call_id", None)
+        if first and "check my account" in said:  # I3: the model asks for verification
+            msg = AIMessage(content="", tool_calls=[{"name": "request_verification",
+                                                     "args": {"reason": "account_lookup"},
+                                                     "id": f"call_{uuid.uuid4().hex[:8]}", "type": "tool_call"}])
+        elif first:
             msg = AIMessage(content="", tool_calls=[{"name": "search_kb", "args": {"query": said},
                                                      "id": f"call_{uuid.uuid4().hex[:8]}", "type": "tool_call"}])
         else:
@@ -142,6 +170,11 @@ class Registry:
         """What: the model for any role. Use when: assembly. Inputs: role. Output: model. Side effects: none.
         Role: fake."""
         return self.model
+
+    def cost_for_model(self, model: str, usage: Any) -> float:
+        """What: zero cost. Use when: TurnRunner usage. Inputs: model, usage. Output: 0.0. Side effects: none.
+        Role: fake."""
+        return 0.0
 
 
 class Capture(requests.Session):
@@ -235,19 +268,34 @@ async def rows_text(pool: Any, sid: str) -> dict[str, str]:
     return out
 
 
-async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixture) -> None:
+async def new_session(pool: Any, sids: list[str]) -> tuple[str, str]:
+    """What: insert a session and a live voice session. Use when: each phase. Inputs: pool, the id list (appended).
+    Output: (session id, voice session id). Side effects: INSERTs. Role: helper (a session holds 40 turns at most)."""
     sid = str(uuid.uuid4())
-    vs_id = f"vs-{sid}"
     async with pool.connection() as conn:
         await conn.execute("INSERT INTO agent.sessions (session_id, visitor_id) VALUES (%s, %s)", (sid, VISITOR))
     now = datetime.now(UTC)
-    await PgVoiceStore(pool).create_voice_session(VoiceSessionRow(vs_id, sid, now, now + timedelta(seconds=600)))
+    await PgVoiceStore(pool).create_voice_session(VoiceSessionRow(f"vs-{sid}", sid, now, now + timedelta(seconds=600)))
+    sids.append(sid)
+    return sid, f"vs-{sid}"
 
+
+async def awaiting(pool: Any, sid: str) -> bool:
+    """What: agent.sessions.awaiting_verification. Use when: asserting. Inputs: pool, id. Output: bool.
+    Side effects: SELECT. Role: helper."""
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT awaiting_verification FROM agent.sessions WHERE session_id = %s", (sid,))
+        row = await cur.fetchone()
+    return bool(row and row[0])
+
+
+async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixture) -> None:
+    sids: list[str] = []
     outbound: list[bytes] = []
 
     def services(request: httpx.Request) -> httpx.Response:
-        """What: fake core and knowledge. Use when: tool calls. Inputs: request. Output: response.
-        Side effects: records the body. Role: the outbound HTTP sink."""
+        """What: fake core and knowledge. Use when: tool calls and memory refresh. Inputs: request.
+        Output: response. Side effects: records the body. Role: the outbound HTTP sink."""
         outbound.append(str(request.url).encode() + b" " + request.content)
         return httpx.Response(200, json=search_body())
 
@@ -262,16 +310,17 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                    demo_faults_enabled=False, site_origin=ORIGIN, session_signing_key=KEY, demo_access_code="c",
                    core_token_agent="core-agent-tok", knowledge_token_agent="knowledge-agent-tok")
     registry = Registry()
-    bodies: list[dict[str, Any]] = []
+    bodies: list[Any] = []
+    refused: list[str] = []
     try:
         trajectory = TrajectoryWriter(pool=pool)
         async with postgres_checkpointer_factory(os.environ["AGENT_PG_TEST_URL"])() as saver:
             async with httpx.AsyncClient(transport=httpx.MockTransport(services)) as http:
                 runtime = composition.build_agent_runtime(cfg, http=http, checkpointer=saver, registry=registry)
-                ingress = composition.build_ingress(
-                    runtime.agent, store=PgTurnStore(pool), lock=Lock(), served_by="agent_pg",
-                    call_keys=Keys(), merge_transcript=TranscriptMerger(PgVoiceStore(pool)),
-                    flags=PgSessionFlags(pool), trajectory=trajectory)
+                ingress = composition.build_ingress(  # the production wiring: TurnRunner, StructuredInput (PR #58)
+                    runtime, store=PgTurnStore(pool), lock=Lock(), served_by="agent_pg", call_keys=Keys(),
+                    merge_transcript=TranscriptMerger(PgVoiceStore(pool)), flags=PgSessionFlags(pool),
+                    commit=CoreCommitClient(cfg.core_url, "commit-tok", http=http), trajectory=trajectory)
 
                 async def summary(_: str, ctx: Any = None) -> SessionSummary:
                     """What: empty summary. Use when: never (no token mint here). Inputs: sid, ctx.
@@ -291,68 +340,115 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN) as c:
                     c.cookies.set("qs_access", sign_cookie(KEY, visitor_id=VISITOR))
 
-                    async def post(path: str, body: dict[str, Any]) -> httpx.Response:
+                    async def post(sid: str, path: str, body: dict[str, Any]) -> httpx.Response:
                         """What: one request, its body kept for the fixture check. Use when: below.
-                        Inputs: path, body. Output: response. Side effects: a request. Role: helper."""
+                        Inputs: session, path, body. Output: response. Side effects: a request. Role: helper."""
                         bodies.append(body)
                         return await c.post(f"/api/sessions/{sid}{path}", json=body)
 
+                    async def chat(sid: str, text: str) -> list[Any]:
+                        """What: one chat turn. Use when: below. Inputs: session, text. Output: events.
+                        Side effects: a turn. Role: helper."""
+                        r = await post(sid, "/turns", {"client_turn_id": str(uuid.uuid4()), "text": text})
+                        assert r.status_code == 200, r.text
+                        return events_of(r)
+
+                    def voice_body(vs_id: str, question: str, said: str, item: str) -> dict[str, Any]:
+                        """What: a voice/ask body. Use when: below. Inputs: ids, texts. Output: body.
+                        Side effects: none. Role: helper."""
+                        return {"client_turn_id": str(uuid.uuid4()), "voice_session_id": vs_id,
+                                "realtime_call_id": f"call_{uuid.uuid4().hex[:8]}", "question": question,
+                                "user_item_id": item, "user_transcript": said, "transcript_final": True,
+                                "last_assistant_interrupted": False}
+
                     # 1. Chat, first turn: refused with the fixed line (the Done-when of T9).
-                    r1 = await post("/turns", {"client_turn_id": str(uuid.uuid4()), "text": RAW})
-                    e1 = events_of(r1)
+                    sid, vs_id = await new_session(pool, sids)
+                    e1 = await chat(sid, RAW)
                     assert e1[-1].final.text == TYPED_PIN_LINE and e1[-1].end_reason == "verification_requested"
                     assert [e.reason for e in e1 if e.type == "verification.required"] == ["typed_pin_rejected"]
                     assert registry.model.seen == []  # no model call
                     # 2. Voice: the PIN in the question and spoken in the final transcript; goes to the model.
-                    r2 = await post("/voice/ask", {
-                        "client_turn_id": str(uuid.uuid4()), "voice_session_id": vs_id,
-                        "realtime_call_id": "call_pg1", "question": f"Customer says {RAW}",
-                        "user_item_id": "item_pg1", "user_transcript": SPOKEN, "transcript_final": True,
-                        "last_assistant_interrupted": False})
-                    e2 = events_of(r2)
+                    e2 = events_of(await post(sid, "/voice/ask", voice_body(vs_id, f"Customer says {RAW}", SPOKEN,
+                                                                             "item_pg1")))
                     assert e2[-1].type == "turn.completed" and e2[-1].final.text.startswith("You said:")
                     # 3. Voice chatter posted outside ask_support_agent, then merged by the next chat turn.
-                    t = await post("/transcript", {"voice_session_id": vs_id, "items": [
+                    t = await post(sid, "/transcript", {"voice_session_id": vs_id, "items": [
                         {"realtime_item_id": "item_pg2", "role": "user", "text": f"again {SPOKEN}",
                          "interrupted": False, "client_ts": "2026-11-28T13:00:00Z"},
                         {"realtime_item_id": "item_pg3", "role": "user", "text": f"my PIN is 4821 and I am {KEPT}",
                          "interrupted": False, "client_ts": "2026-11-28T13:00:01Z"}]})
                     assert t.status_code == 204, t.text
-                    r3 = await post("/turns", {"client_turn_id": str(uuid.uuid4()), "text": "thanks, any update?"})
-                    e3 = events_of(r3)
-                    assert e3[-1].type == "turn.completed"
+                    assert (await chat(sid, "thanks, any update?"))[-1].type == "turn.completed"
+
+                    # 4. I3: the model asks for verification through the wired TurnRunner; the row flag is set, so a
+                    # PIN with no context word is redacted and a bare PIN is refused.
+                    sid, _ = await new_session(pool, sids)
+                    ev = await chat(sid, "please check my account balance")
+                    assert ev[-1].end_reason == "verification_requested", ev[-1]
+                    assert [e.reason for e in ev if e.type == "verification.required"] == ["account_lookup"]
+                    assert await awaiting(pool, sid), "request_verification did not set agent.sessions.awaiting"
+                    calls = len(registry.model.seen)
+                    ev = await chat(sid, "it is 4 8 2 1 I think")
+                    assert ev[-1].type == "turn.completed" and len(registry.model.seen) > calls
+                    assert "[PIN]" in repr(registry.model.seen[-1])
+                    ev = await chat(sid, "4821")
+                    assert ev[-1].final.text == TYPED_PIN_LINE
+
+                    # 5. Every review bypass as the first turn of a fresh session (unverified, not awaiting): each
+                    # one is refused.
+                    for text in BYPASSES:
+                        sid, vs_id = await new_session(pool, sids)
+                        ev = await chat(sid, text)
+                        if ev[-1].final.text == TYPED_PIN_LINE:
+                            refused.append(text)
+                    # 6. Every bypass as posted voice chatter, then merged; the spoken ones also as voice/ask.
+                    sid, vs_id = await new_session(pool, sids)
+                    items = [{"realtime_item_id": f"item_b{n}", "role": "user", "text": text, "interrupted": False,
+                              "client_ts": "2026-11-28T13:00:00Z"} for n, text in enumerate(BYPASSES)]
+                    assert (await post(sid, "/transcript", {"voice_session_id": vs_id, "items": items})).status_code == 204
+                    assert (await chat(sid, "thanks, any update?"))[-1].type == "turn.completed"
+                    for n, text in enumerate(SPOKEN_BYPASSES):
+                        r = await post(sid, "/voice/ask", voice_body(vs_id, "customer gave a number", text, f"item_s{n}"))
+                        assert events_of(r)[-1].type == "turn.completed"
         tracer_client.flush()
         await trajectory.flush()
         assert trajectory.pending() == 0
 
-        # Proof that a zero is possible: the secret is in the fixture, and the search finds it in raw form.
-        fixture = json.dumps(bodies)
+        assert sorted(set(BYPASSES) - set(refused)) == [], "bypasses not refused"
+        # Proof that a zero is possible: every secret form is in the fixture, and the search finds it in raw form.
+        fixture = json.dumps(bodies, ensure_ascii=False)
         assert SECRET.search(fixture) and SECRET.search(RAW) and SECRET.search(SPOKEN)
+        missed = [b for b in BYPASSES if not SECRET.search(b)]
+        assert missed == [], f"the leak search cannot see these raw forms: {missed}"
         from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
         _, raw_blob = JsonPlusSerializer().dumps_typed([HumanMessage(RAW)])
         assert SECRET.search(text_of(raw_blob))  # the byte search works on the checkpoint encoding
 
-        sinks = await rows_text(pool, sid)
+        per_session = [await rows_text(pool, sid) for sid in sids]
+        sinks = {table: "\n".join(rows[table] for rows in per_session) for table in per_session[0]}
         sinks["outbound core and knowledge requests"] = text_of(b"\n".join(outbound))
         sinks["model inputs"] = repr(registry.model.seen)
-        sinks["langsmith payloads"] = text_of(b"\n".join(capture.bodies))
+        sinks["langsmith payloads"] = b"\n".join(capture.bodies).decode("utf-8", "replace")
         formatter = RedactingFormatter(LOG_FORMAT)
         sinks["application logs (formatted)"] = "\n".join(formatter.format(r) for r in caplog.records)
         sinks["application logs (raw messages)"] = "\n".join(r.getMessage() for r in caplog.records)
 
         # Positive control: every sink that holds message text holds the kept account id, so the search below
         # looks at real content (the logs hold no message text by design, doc 07 s11 "never in logs").
-        for name in ("checkpoint_blobs", "checkpoint_writes", "turn_events", "transcript_items",
+        for name in ("checkpoint_blobs", "checkpoint_writes", "turns", "turn_events", "transcript_items",
                      "outbound core and knowledge requests", "model inputs", "langsmith payloads"):
             assert KEPT in sinks[name], f"{name} holds no message text, so its search would prove nothing"
         assert caplog.records, "no log records were captured"
-        assert sinks["sessions"] and "True" in sinks["sessions"]  # awaiting_verification set by the refusal
 
-        leaks = {name: SECRET.findall(text) for name, text in sinks.items() if SECRET.search(text)}
-        assert leaks == {}, f"raw PIN found in: {sorted(leaks)}"
+        # checkpoint blobs are msgpack: decode them as UTF-8 too, so Unicode digits are searched in both forms.
+        sinks["checkpoint_blobs (utf-8)"] = sinks["checkpoint_blobs"].encode("latin-1").decode("utf-8", "replace")
+        sinks["checkpoint_writes (utf-8)"] = sinks["checkpoint_writes"].encode("latin-1").decode("utf-8", "replace")
+        leaks = {name: SECRET.findall(text)[:5] for name, text in sinks.items() if SECRET.search(text)}
+        assert leaks == {}, f"raw PIN found in: {leaks}"
     finally:
         run_trees.configure(client=previous_client, enabled=None)
         async with pool.connection() as conn:
-            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
-                await conn.execute(f"DELETE FROM agent.{table} WHERE thread_id = %s", (sid,))
-            await conn.execute("DELETE FROM agent.sessions WHERE session_id = %s", (sid,))
+            for sid in sids:
+                for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                    await conn.execute(f"DELETE FROM agent.{table} WHERE thread_id = %s", (sid,))
+                await conn.execute("DELETE FROM agent.sessions WHERE session_id = %s", (sid,))
