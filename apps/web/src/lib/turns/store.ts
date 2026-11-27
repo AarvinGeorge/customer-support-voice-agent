@@ -8,12 +8,13 @@
  * Output: store state and actions.
  * Side effects: sendTurn makes one network request; apply reads the clock (the receipt time
  *   of a confirmation card); nothing is persisted.
- * Role: the only stateful wrapper around the pure reducer; chat now, the voice relay later.
+ * Role: the only stateful wrapper around the pure reducer, for chat turns and voice relay turns
+ *   (sendVoiceAsk), so the thread is one (D-002).
  */
 import { createStore, useStore, type StoreApi } from "zustand";
-import type { SseEvent, TurnRequest } from "@contracts/contracts";
+import type { SseEvent, TurnRequest, VoiceAskRequest } from "@contracts/contracts";
 import { ApiError, NetworkError, type ApiDeps, type ContractViolationError } from "@/lib/api/client";
-import { streamTurn, type DemoFault, type StreamResult } from "@/lib/api/stream";
+import { streamSse, streamTurn, type DemoFault, type StreamOptions, type StreamResult } from "@/lib/api/stream";
 import { failTurn, failureMessage, initialConversationState, reduceEvent, type ConversationState } from "./reducer";
 
 /**
@@ -158,6 +159,8 @@ export interface TurnStoreState {
   armFault: (fault: DemoFault | null) => void;
   takeFault: () => DemoFault | null;
   sendTurn: (sessionId: string, request: TurnRequest, opts?: SendTurnOptions) => Promise<StreamResult>;
+  /** Posts one voice relay turn to voice/ask; same reducer, failure handling and thread as sendTurn. */
+  sendVoiceAsk: (sessionId: string, request: VoiceAskRequest, opts?: SendTurnOptions) => Promise<StreamResult>;
 }
 
 /**
@@ -190,7 +193,72 @@ export function createTurnStore(): StoreApi<TurnStoreState> {
     userSeq += 1;
     return { kind: "user", id: `user-${userSeq}`, text, mode };
   };
-  return createStore<TurnStoreState>()((set, get) => ({
+  /**
+   * What: streams one turn into the store and applies the shared failure handling.
+   * Use when: sendTurn (chat) and sendVoiceAsk (voice relay).
+   * Inputs: session id; start (opens the stream with the given StreamOptions); text (the typed
+   *   text: added to the thread and kept for Retry, or null); chat (true for /turns: a pre-stream
+   *   429 or 503 raises the limit banner; a voice relay keeps the error item, Realtime speaks the
+   *   fixed line); the caller's options. Both paths take the one-shot armed fault (doc 07 s10).
+   * Output: the StreamResult, or the transport's typed rejection (rethrown).
+   * Side effects: see createTurnStore's Role; network through start.
+   * Role: one copy of the failure rules (failTurn on every seen turn, else an error item), so a
+   *   voice turn fails exactly like a chat turn (CS-E-05.S3.T3).
+   */
+  const runStream = async (
+    sessionId: string,
+    start: (o: StreamOptions) => Promise<StreamResult>,
+    text: string | null,
+    chat: boolean,
+    opts: SendTurnOptions,
+  ): Promise<StreamResult> => {
+    const get = api.getState;
+    const set = api.setState;
+    const fault = get().takeFault();
+    const mine = epoch;
+    const ctrl = new AbortController();
+    const outer = opts.signal;
+    if (outer?.aborted) ctrl.abort();
+    else outer?.addEventListener("abort", () => ctrl.abort(), { once: true });
+    inflight.add(ctrl);
+    const user = text ? userItem(text, "chat") : null;
+    set({ thread: user ? [...get().thread, user] : get().thread, connection: { phase: "streaming", error: null }, lastFault: fault, limit: null });
+    const seen = new Set<string>();
+    try {
+      const result = await start({
+        ...opts,
+        signal: ctrl.signal,
+        fault,
+        onEvent: (e) => {
+          if (epoch !== mine || e.session_id !== sessionId) return;
+          seen.add(e.turn_id);
+          get().apply(e);
+        },
+      });
+      if (epoch === mine) set({ connection: { phase: "idle", error: null } });
+      return result;
+    } catch (err) {
+      if (epoch !== mine) throw err;
+      if (err instanceof NetworkError && err.turnId !== null && get().conversation.turns[err.turnId]) seen.add(err.turnId);
+      const reason = err instanceof NetworkError ? err.reason : "contract";
+      let conversation = get().conversation;
+      for (const turnId of seen) conversation = failTurn(conversation, turnId, reason);
+      let thread = get().thread;
+      userSeq += 1;
+      const limit = chat && seen.size === 0 ? limitNotice(err, text, userSeq, Date.now()) : null;
+      if (limit !== null) {
+        thread = thread.filter((i) => i.id !== user?.id);
+      } else if (seen.size === 0 && reason !== "aborted") {
+        const { message, retryable } = preTurnError(err);
+        thread = [...thread, { kind: "error", id: `error-${userSeq}`, text, userItemId: user?.id ?? null, message, retryable }];
+      }
+      set({ conversation, thread, limit, connection: { phase: "idle", error: err as TurnError } });
+      throw err;
+    } finally {
+      inflight.delete(ctrl);
+    }
+  };
+  const api = createStore<TurnStoreState>()((set, get) => ({
     conversation: initialConversationState,
     thread: [],
     connection: { phase: "idle", error: null },
@@ -224,52 +292,12 @@ export function createTurnStore(): StoreApi<TurnStoreState> {
       if (fault !== null) set({ armedFault: null });
       return fault;
     },
-    sendTurn: async (sessionId, request, opts = {}) => {
-      const fault = get().takeFault();
-      const mine = epoch;
-      const ctrl = new AbortController();
-      const outer = opts.signal;
-      if (outer?.aborted) ctrl.abort();
-      else outer?.addEventListener("abort", () => ctrl.abort(), { once: true });
-      inflight.add(ctrl);
-      const user = request.text ? userItem(request.text, "chat") : null;
-      set({ thread: user ? [...get().thread, user] : get().thread, connection: { phase: "streaming", error: null }, lastFault: fault, limit: null });
-      const seen = new Set<string>();
-      try {
-        const result = await streamTurn(sessionId, request, {
-          ...opts,
-          signal: ctrl.signal,
-          fault,
-          onEvent: (e) => {
-            if (epoch !== mine || e.session_id !== sessionId) return;
-            seen.add(e.turn_id);
-            get().apply(e);
-          },
-        });
-        if (epoch === mine) set({ connection: { phase: "idle", error: null } });
-        return result;
-      } catch (err) {
-        if (epoch !== mine) throw err;
-        if (err instanceof NetworkError && err.turnId !== null && get().conversation.turns[err.turnId]) seen.add(err.turnId);
-        const reason = err instanceof NetworkError ? err.reason : "contract";
-        let conversation = get().conversation;
-        for (const turnId of seen) conversation = failTurn(conversation, turnId, reason);
-        let thread = get().thread;
-        userSeq += 1;
-        const limit = seen.size === 0 ? limitNotice(err, request.text ?? null, userSeq, Date.now()) : null;
-        if (limit !== null) {
-          thread = thread.filter((i) => i.id !== user?.id);
-        } else if (seen.size === 0 && reason !== "aborted") {
-          const { message, retryable } = preTurnError(err);
-          thread = [...thread, { kind: "error", id: `error-${userSeq}`, text: request.text ?? null, userItemId: user?.id ?? null, message, retryable }];
-        }
-        set({ conversation, thread, limit, connection: { phase: "idle", error: err as TurnError } });
-        throw err;
-      } finally {
-        inflight.delete(ctrl);
-      }
-    },
+    sendTurn: (sessionId, request, opts = {}) =>
+      runStream(sessionId, (o) => streamTurn(sessionId, request, o), request.text ?? null, true, opts),
+    sendVoiceAsk: (sessionId, request, opts = {}) =>
+      runStream(sessionId, (o) => streamSse(`/api/sessions/${encodeURIComponent(sessionId)}/voice/ask`, request, o), null, false, opts),
   }));
+  return api;
 }
 
 /**
