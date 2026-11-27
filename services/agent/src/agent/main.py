@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 
 from agent.access import install_access_gate, install_not_owned_handler
 from agent.api import install_api
-from agent.composition import wire_app
+from agent.composition import assert_wired, wire_app
 from agent.assembly import CheckpointerFactory, postgres_checkpointer_factory
 from agent.ingress import PgTurnStore
 from agent.readiness import Probe, build_probes, readiness
@@ -93,7 +93,8 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
         if voice is None:
             app.state.voice = _voice_deps(app, pool, http)
         if ingress is None:
-            wire_app(app, cfg)
+            wire_app(app, cfg)  # after trajectory.start(), so the Ingress gets the writer (review PR #48 I2)
+            assert_wired(app)   # a missing hook stops startup instead of failing silently
         app.state.probes = build_probes(pg_pool=pool, redis_client=rds, http=http, core_url=cfg.core_url,
                                         knowledge_url=cfg.knowledge_url)
         try:

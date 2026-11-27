@@ -121,9 +121,10 @@ class World:
     Use when: each test. Inputs: primary replies; wire (False: no Ingress, the route answers 503).
     Output: attributes. Side effects: none. Role: test harness."""
 
-    def __init__(self, *replies: AIMessage, wire: bool = True) -> None:
-        """What: build. Use when: tests. Inputs: see class. Output: none. Side effects: none. Role: harness."""
-        self.cfg = settings()
+    def __init__(self, *replies: AIMessage, wire: bool = True, **cfg: Any) -> None:
+        """What: build. Use when: tests. Inputs: see class; settings overrides. Output: none. Side effects: none.
+        Role: harness."""
+        self.cfg = settings(**cfg)
         self.turns = Sessions(SessionRow(session_id=SID, visitor_id=VISITOR),
                               SessionRow(session_id=OTHER_SID, visitor_id="visitor-2"))
         self.lock, self.keys, self.vstore = MemoryTurnLock(), MemoryCallKeys(), MemoryVoiceStore()
@@ -453,3 +454,110 @@ def test_wire_app_passes_the_trajectory_writer_when_the_app_has_one(monkeypatch:
                             trajectory=sentinel)
     composition.wire_app(SimpleNamespace(state=state), settings())  # type: ignore[arg-type]
     assert got["trajectory"] is sentinel
+
+
+# ---- wiring part 1 (CS-E-08.S5): demo fault and startup wiring check ----
+
+class SpyIngress:
+    """What: records the IngressInput a route hands over and answers 404. Use when: demo fault tests.
+    Inputs: none. Output: handle. Side effects: records. Role: spy."""
+
+    def __init__(self) -> None:
+        """What: empty log. Use when: tests. Inputs: none. Output: none. Side effects: none. Role: spy."""
+        self.inputs: list[IngressInput] = []
+        self.call_keys, self.merge_transcript = object(), object()  # voice/ask checks the relay hooks exist
+
+    async def handle(self, inp: IngressInput) -> Any:
+        """What: record. Use when: the route. Inputs: input. Output: IngressError. Side effects: records. Role: spy."""
+        from agent.ingress import IngressError
+        self.inputs.append(inp)
+        return IngressError(404, "not_found", "NOT_FOUND", "Not found.")
+
+
+@pytest.mark.parametrize("enabled,header,expected", [
+    (True, "llm_429", "llm_429"), (True, "tool_error", "tool_error"), (True, "bogus", None),
+    (False, "llm_429", None), (True, None, None)])
+async def test_turn_route_passes_the_gated_demo_fault_on_ingress_input(enabled: bool, header: str | None,
+                                                                       expected: str | None) -> None:
+    w = World(demo_faults_enabled=enabled)
+    spy = SpyIngress()
+    w.app.state.ingress = spy
+    headers = {"X-Demo-Fault": header} if header else {}
+    async with w.client() as c:
+        await c.post(f"/api/sessions/{SID}/turns", json={"client_turn_id": str(uuid.uuid4()), "text": "hi"},
+                     headers=headers)
+    (inp,) = spy.inputs
+    assert inp.demo_fault == expected
+
+
+async def test_voice_ask_passes_the_gated_demo_fault_on_ingress_input() -> None:
+    w = World(demo_faults_enabled=True)
+    spy = SpyIngress()
+    w.voice.ingress = spy  # type: ignore[assignment]
+    w.vstore.voice["vs-1"] = VoiceSessionRow("vs-1", SID, w.voice.now(), w.voice.now())
+    body = {"client_turn_id": str(uuid.uuid4()), "voice_session_id": "vs-1", "realtime_call_id": "call_9",
+            "question": "q", "user_item_id": None, "user_transcript": None, "transcript_final": False,
+            "last_assistant_interrupted": False}
+    async with w.client() as c:
+        r = await c.post(f"/api/sessions/{SID}/voice/ask", json=body, headers={"X-Demo-Fault": "llm_429"})
+    assert r.status_code != 503, r.text
+    (inp,) = spy.inputs
+    assert inp.demo_fault == "llm_429"
+
+
+def wired_state(**over: Any) -> Any:
+    """What: an app whose state looks like the production lifespan after wire_app. Use when: wiring checks.
+    Inputs: overrides. Output: namespace app. Side effects: none. Role: fixture."""
+    w = World()
+    w.ingress.trajectory = object()
+    w.voice.ingress = w.ingress
+    state = SimpleNamespace(ingress=w.ingress, voice=w.voice, trajectory=w.ingress.trajectory)
+    for k, v in over.items():
+        setattr(state, k, v)
+    return SimpleNamespace(state=state)
+
+
+def test_wiring_gaps_is_empty_for_the_production_shape_apart_from_the_named_pending_pieces() -> None:
+    gaps, pending = composition.wiring_gaps(wired_state())
+    assert gaps == []
+    assert set(pending) == set(composition.PENDING_HOOKS)
+
+
+@pytest.mark.parametrize("over,gap", [
+    ({"ingress": None}, "ingress"),
+    ({"trajectory": None}, "trajectory"),
+])
+def test_wiring_gaps_names_each_missing_hook(over: dict[str, Any], gap: str) -> None:
+    app = wired_state(**over)
+    if gap == "trajectory":
+        app.state.ingress.trajectory = None
+    gaps, _ = composition.wiring_gaps(app)
+    assert any(g.startswith(gap) for g in gaps), gaps
+
+
+def test_wiring_gaps_flags_an_ingress_without_the_voice_relay_hooks() -> None:
+    app = wired_state()
+    app.state.ingress.call_keys = None
+    gaps, _ = composition.wiring_gaps(app)
+    assert any(g.startswith("voice relay") for g in gaps), gaps
+
+
+def test_wiring_gaps_flags_voice_without_the_shared_ingress() -> None:
+    app = wired_state()
+    app.state.voice.ingress = None
+    gaps, _ = composition.wiring_gaps(app)
+    assert any(g.startswith("voice.ingress") for g in gaps), gaps
+
+
+def test_assert_wired_raises_naming_the_gap() -> None:
+    with pytest.raises(RuntimeError, match="trajectory"):
+        app = wired_state()
+        app.state.ingress.trajectory = None
+        composition.assert_wired(app)
+
+
+def test_pending_list_is_current_so_part_2_must_remove_entries() -> None:
+    from agent.middleware.stubs import STUB_NAMES
+    # Every pending hook must still be a placeholder; once its PR lands this fails until the entry is removed.
+    assert ("GroundingMiddleware" in STUB_NAMES) == ("GroundingMiddleware" in composition.PENDING_HOOKS)
+    assert ("turn_body" in composition.PENDING_HOOKS) == (composition.default_body_factory() is composition.AgentTurnBody)

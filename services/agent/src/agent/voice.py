@@ -35,6 +35,7 @@ from agent.models.config import RoleSpec
 from agent.prompt import _escape_frame  # pyright: ignore[reportPrivateUsage]  (the frame-tag escaper, M5)
 from agent.realtime import MintedSecret, MintError, SessionSummary, build_session_config, render_instructions, \
     summary_from_thread
+from agent.routes.turns import request_demo_fault
 from agent.web import error_response
 
 log = logging.getLogger("agent.voice")
@@ -334,7 +335,7 @@ def install_voice(app: FastAPI) -> None:
         result = await deps.ingress.handle(IngressInput(
             session_id=sid, visitor_id=request.state.visitor_id, client_turn_id=str(body.client_turn_id),
             mode="voice", input_kind="voice", text=body.question, realtime_call_id=body.realtime_call_id,
-            body=body, redact_context=_redact_context(owned)))
+            body=body, redact_context=_redact_context(owned), demo_fault=request_demo_fault(request)))
         return to_response(request, result)
 
     @app.post("/api/sessions/{sid}/transcript", status_code=204)

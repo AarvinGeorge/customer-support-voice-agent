@@ -7,7 +7,7 @@ call build_agent_runtime and build_ingress with fakes.
 Inputs: Settings (CORE_URL, KNOWLEDGE_URL, CORE_TOKEN_AGENT, KNOWLEDGE_TOKEN_AGENT, models path, replica name),
 app.state (pg_pool, redis, http, checkpointer, voice).
 Output: AgentRuntime, AgentTurnBody, voice_user_text, build_agent_runtime, build_ingress, wire_app,
-UNSUPPORTED_INPUT_LINE.
+UNSUPPORTED_INPUT_LINE, PENDING_HOOKS, default_body_factory, wiring_gaps, assert_wired.
 Side effects: wire_app sets app.state.ingress and app.state.voice.ingress; reads models.yaml; nothing connects.
 Role: wiring only. The turn body here is the minimal step 14 path (turn message, TurnControl, the SSE adapter);
 CS-E-03.S7.T5 and T8 (TurnRunner: repair, memory refresh, structured input) replace it through the
@@ -106,6 +106,21 @@ class AgentTurnBody:
         return await stream_agent_turn(stream, self.agent, {"messages": messages}, config, control=control)
 
 
+# Placeholders still in the production path, by design until their PRs merge (wiring part 2). The startup check
+# logs these as warnings; any other gap fails startup. A test keeps this list honest in both directions.
+PENDING_HOOKS: dict[str, str] = {
+    "turn_body": "AgentTurnBody until TurnRunner (CS-E-03.S7.T5 and T8, PR #47) replaces it",
+    "GroundingMiddleware": "Gate 2 stub until CS-E-02.S4.T2 (PR #52)",
+}
+
+
+def default_body_factory() -> Callable[[Any], AgentBody]:
+    """What: the turn body factory the production Ingress uses. Use when: build_ingress, the pending-list test.
+    Inputs: none. Output: a callable agent -> AgentBody (AgentTurnBody today). Side effects: none.
+    Role: the one line wiring part 2 changes to TurnRunner."""
+    return AgentTurnBody
+
+
 def build_agent_runtime(cfg: Settings, *, http: httpx.AsyncClient, checkpointer: Any,
                         registry: Any = None) -> AgentRuntime:
     """What: clients, tools and the compiled agent. Use when: wire_app; tests with a fake registry.
@@ -124,12 +139,13 @@ def build_agent_runtime(cfg: Settings, *, http: httpx.AsyncClient, checkpointer:
 
 def build_ingress(agent: Any, *, store: TurnStore, lock: TurnLock, served_by: str, call_keys: CallKeys | None = None,
                   merge_transcript: MergeTranscript | None = None,
-                  body_factory: Callable[[Any], AgentBody] = AgentTurnBody, **extra: Any) -> Ingress:
+                  body_factory: Callable[[Any], AgentBody] | None = None, **extra: Any) -> Ingress:
     """What: the one Ingress for chat and voice. Use when: wire_app; tests with memory stores.
     Inputs: agent, turn store, turn lock, replica name, voice call keys, transcript merger, body factory (seam for
     TurnRunner), extra Ingress keyword arguments (for example trajectory, CS-E-03.S8.T8). Output: Ingress.
     Side effects: none. Role: wiring."""
-    return Ingress(store, lock, served_by=served_by, run_agent=body_factory(agent), call_keys=call_keys,
+    factory = body_factory or default_body_factory()
+    return Ingress(store, lock, served_by=served_by, run_agent=factory(agent), call_keys=call_keys,
                    merge_transcript=merge_transcript, **extra)
 
 
@@ -163,3 +179,41 @@ def wire_app(app: FastAPI, cfg: Settings) -> Ingress | None:
     if getattr(state, "voice", None) is not None:
         state.voice.ingress = ingress
     return ingress
+
+
+def wiring_gaps(app: Any) -> tuple[list[str], list[str]]:
+    """What: list what the turn path is missing: (gaps, pending). Gaps are real wiring faults (no Ingress, no
+    trajectory writer on it, voice without the shared Ingress); pending are the named PENDING_HOOKS still present.
+    Use when: assert_wired at startup; tests. Inputs: app (state.ingress, state.voice). Output: two lists of
+    messages. Side effects: none. Role: the startup tripwire (review PR #48 I2: nothing fails silently)."""
+    from agent.middleware.stubs import STUB_NAMES
+    state = app.state
+    ingress = getattr(state, "ingress", None)
+    gaps: list[str] = []
+    if ingress is None:
+        gaps.append("ingress: POST /turns and voice/ask would answer 503")
+    else:
+        if getattr(ingress, "trajectory", None) is None:
+            gaps.append("trajectory: no TrajectoryWriter on the Ingress, agent.turn_events would stay empty")
+        if ingress.call_keys is None or ingress.merge_transcript is None:
+            gaps.append("voice relay: the Ingress has no call keys or transcript merger, voice/ask would answer 503")
+        voice = getattr(state, "voice", None)
+        if voice is not None and voice.ingress is not ingress:
+            gaps.append("voice.ingress: voice/ask is not on the shared Ingress")
+    body_placeholder = (isinstance(ingress.run_agent, AgentTurnBody) if ingress is not None
+                        else default_body_factory() is AgentTurnBody)
+    pending = [name for name in PENDING_HOOKS if (name == "turn_body" and body_placeholder) or name in STUB_NAMES]
+    return gaps, pending
+
+
+def assert_wired(app: Any) -> None:
+    """What: fail startup when a turn-path hook is not wired; log each named pending placeholder.
+    Use when: the app lifespan, right after wire_app (production path only). Inputs: app.
+    Output: none; raises RuntimeError naming every gap. Side effects: logs. Role: fail loudly in dev, CI and VM."""
+    gaps, pending = wiring_gaps(app)
+    for name in pending:
+        log.warning("wiring pending: %s (%s)", name, PENDING_HOOKS[name])
+    if gaps:
+        for g in gaps:
+            log.error("wiring gap: %s", g)
+        raise RuntimeError("turn path not wired: " + "; ".join(gaps))
