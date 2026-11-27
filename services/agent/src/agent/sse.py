@@ -33,11 +33,20 @@ log = logging.getLogger("agent.sse")
 
 FLUSH_CHARS = 40
 LIMIT_PREFIX = "Model call limits exceeded:"  # ModelCallLimitMiddleware(exit_behavior="end") text (spike 17a)
-# Placeholder wording until the escalation module (CS-E-03.S4.T1) adds the limit_reached ticket.
-LIMIT_LINE = "I couldn't finish that within the steps I'm allowed for one message. Could you ask again in a simpler way?"
+# The thread line until the escalation module (agent.escalation, CS-E-03.S4.T1) rewrites it with the limit_reached
+# ticket after the loop (same message id, limit-{turn_id}).
+LIMIT_LINE = "I couldn't finish that within the steps I'm allowed for one message."
 SLOW_LINE = "This is taking a little longer than usual."
 INTERNAL_ERROR_CLASS = "core_unavailable"  # doc 07 s1.3 has no generic server class; closest internal class
 _RUNNING: set[asyncio.Task[Any]] = set()
+
+
+class ModelUnavailable(Exception):
+    """What: the agent model node failed: the primary (after its retry, or at once on 429, spend cap, auth, 400) and
+    the fallback both failed, or the fallback was skipped (ModelFallbackMiddleware re-raises the last error).
+    Use when: raised by stream_agent_turn when the run raised after a model task reported an error; TurnRunner turns
+    it into the doc 07 s6.7 apology. Inputs: the original error as __cause__. Output: exception. Side effects: none.
+    Role: separates "both models unavailable" from other failures (those stay the internal error)."""
 
 
 def chunk_text(text: str, size: int = FLUSH_CHARS) -> list[str]:
@@ -332,6 +341,7 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
     model_used: str | None = None
     values: dict[str, Any] = {}
     attempt: dict[str, Any] = {}
+    model_failed = False
 
     async def slow_timer(step_id: str) -> None:
         """What: emit status slow once if the attempt shows no chunk in time. Use when: a model task starts.
@@ -366,6 +376,7 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
                     attempt["timer"] = asyncio.create_task(slow_timer(step_id))
                 else:
                     stop_timer()
+                    model_failed = model_failed or chunk.get("error") is not None
                     msgs = _ai_messages(chunk.get("result"))
                     call = token_usage()
                     model_name = "unknown"
@@ -383,11 +394,15 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
                                 cache_read_tokens=call.cache_read_tokens)
             elif mode == "tasks" and chunk.get("name") == "tools" and "result" in chunk:
                 usage = usage.model_copy(update={"tool_calls": usage.tool_calls + _tool_messages(chunk["result"])})
+    except Exception as exc:
+        if model_failed:  # the model node itself failed: both models unavailable (doc 07 s6.7)
+            raise ModelUnavailable(str(exc)) from exc
+        raise
     finally:
         stop_timer()
     messages = list(values.get("messages") or [])
     outcome = classify_final(stream, messages, model_ids, usage, model_used, control)
     if outcome.end_reason == "limit_reached" and messages:
         # doc 07 s2.4 step 15 / spike 17a: replace the framework line in the thread with ours.
-        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=messages[-1].id), AIMessage(LIMIT_LINE)]})
+        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=messages[-1].id), AIMessage(LIMIT_LINE, id=f"limit-{control.turn_id}")]})
     return outcome

@@ -8,8 +8,9 @@ Output: IngressError (HTTP error) or IngressStream (SSE stream plus the backgrou
 Side effects: rows in agent.turns, user_turns, lock:turn:{sid} in Redis, the turn task.
 Role: plain code before and after the model (doc 07 s2.4). Not here yet, by plan: rate limits (CS-E-07.S2.T1),
 voice expiry and call-key dedupe (CS-E-05.S3.T2), admission semaphore (designed only), PIN scan (CS-E-03.S7.T9),
-repair, memory and transcript merge (CS-E-03.S7.T5), structured input (CS-E-03.S7.T8), tickets on the
-deadline and limit paths (CS-E-03.S4.T1).
+repair, memory and transcript merge (CS-E-03.S7.T5), structured input (CS-E-03.S7.T8). Tickets on the
+deadline and limit paths live in the body (agent.turn_body, agent.escalation, CS-E-03.S4.T1); ingress only keeps
+a hard net at the full deadline.
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ from agent.sse import TurnMeta, TurnOutcome, TurnStream, start_turn
 
 CAP_LINE = ("This conversation is getting long. Please start a new conversation; your tickets and account "
             "history are kept.")
-# doc 07 fixture edge_turns e3 error body; the deadline ticket and its line arrive with CS-E-03.S4.T1.
+# doc 07 fixture edge_turns e3 error body (hard net only; the deadline ticket and line are in agent.escalation).
 DEADLINE_MESSAGE = "I couldn't finish that in time."
 TURN_DEADLINE_S = {"chat": limits.CHAT_TURN_DEADLINE_S, "voice": limits.VOICE_TURN_DEADLINE_S}
 # A swept turn (its process died mid-turn) replays as a failed, retryable deadline (doc 07 s2.4 step 4, s8.1).
@@ -264,12 +265,16 @@ class Ingress:
             return _conflict()
         await self.store.count_turn(inp.session_id)
         stream = TurnStream(TurnMeta(inp.session_id, row.turn_id, inp.mode, self.served_by, inp.input_kind))
-        loop_budget = max(budget - self.reserve_s, 0.0)  # the reserve is kept for the escalation ticket
+        # The hard net is the whole deadline: the body itself stops its agent loop 3 s early and spends the reserve
+        # on the escalation ticket (TurnRunner, CS-E-03.S4.T1); cutting the body at deadline - 3 s here would cancel
+        # that ticket. self.reserve_s is kept for callers; the body owns the reserve.
+        hard_net = budget
 
         async def body(s: TurnStream) -> TurnOutcome:
-            """What: the agent loop under asyncio.timeout. Use when: the turn task. Inputs: stream.
-            Output: outcome (deadline outcome on timeout). Side effects: model and tools. Role: step 14."""
-            cm = asyncio.timeout(loop_budget)
+            """What: the turn body under the hard deadline. Use when: the turn task. Inputs: stream.
+            Output: outcome (deadline outcome on timeout, no ticket: nothing is left). Side effects: model and
+            tools. Role: step 14 safety net."""
+            cm = asyncio.timeout(hard_net)
             try:
                 async with cm:
                     return await self.run_agent(s, inp, row)

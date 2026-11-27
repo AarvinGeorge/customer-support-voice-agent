@@ -1,7 +1,8 @@
-"""What: ingress step 13 in the doc 07 s2.4 order: the verification body, the ticket_offer body (CS-E-03.S4.T1), the
-confirm body, then a strict yes or no on typed text against the current pending action (s7.3).
+"""What: ingress step 13 in the doc 07 s2.4 order: the verification body, the ticket_offer body (s6.7, via
+agent.escalation), the confirm body, then a strict yes or no on typed text against the current pending action (s7.3);
+in voice, a strict yes right after the both-models-unavailable apology is the ticket_offer (s6.7).
 Use when: TurnRunner(structured=StructuredInput(core, confirmer, flags)).
-Inputs: the agent-token core client, the Confirmer, optional session flags; per turn the stream, the IngressInput
+Inputs: the agent-token core client, the Confirmer, optional session flags and escalator; per turn the stream, the IngressInput
 (its `body` is the parsed TurnRequest) and the TurnPrep (thread values and the step 11 refresh).
 Output: StructuredInput, the fixed lines.
 Side effects: core calls through verification and the Confirmer; verification.*, confirmation.required and
@@ -17,6 +18,7 @@ from contracts.events import FinalAnswer
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agent.clients.core_agent import CoreAgentClient
+from agent.escalation import Escalator, apology_is_last
 from agent.prompt import TurnContext, build_turn_message
 from agent.sse import TurnOutcome, TurnStream
 from agent.structured.confirm import ActionReply, Confirmer
@@ -26,7 +28,7 @@ from agent.structured.verification import verify_card
 from agent.turn_body import SessionFlags, StructuredResult, TurnPrep
 
 NOT_CURRENT_LINE = "That request is no longer active. Ask me again if you still need it."
-TICKET_OFFER_LINE = "I can't open that ticket from here just now. Please send your question again and I'll help."
+TICKET_OFFER_PRESSED = "[customer pressed Create ticket]"
 CONFIRM_PRESSED = "[customer pressed Confirm]"
 CANCEL_PRESSED = "[customer pressed Cancel]"
 
@@ -35,10 +37,12 @@ class StructuredInput:
     """What: the step 13 handler. Use when: one per app. Inputs: core client, confirmer, flags.
     Output: __call__(stream, inp, prep) -> StructuredResult. Side effects: see module. Role: s7.3 dispatcher."""
 
-    def __init__(self, core: CoreAgentClient, confirmer: Confirmer, *, flags: SessionFlags | None = None) -> None:
-        """What: keep dependencies. Use when: app start or tests. Inputs: see class. Output: none.
-        Side effects: none. Role: constructor."""
+    def __init__(self, core: CoreAgentClient, confirmer: Confirmer, *, flags: SessionFlags | None = None,
+                 escalator: Escalator | None = None) -> None:
+        """What: keep dependencies. Use when: app start or tests. Inputs: see class (escalator defaults to one on
+        the same core client). Output: none. Side effects: none. Role: constructor."""
         self.core, self.confirmer, self.flags = core, confirmer, flags
+        self.escalator = escalator or Escalator(core)
 
     async def __call__(self, stream: TurnStream, inp: Any, prep: TurnPrep) -> StructuredResult:
         """What: apply the s2.4 step 13 order. Use when: TurnRunner. Inputs: stream, IngressInput, TurnPrep.
@@ -46,8 +50,8 @@ class StructuredInput:
         body = getattr(inp, "body", None)
         if body is not None and getattr(body, "verification", None) is not None:
             return await verify_card(stream, prep.control, body.verification, self.core, self.flags)
-        if body is not None and getattr(body, "ticket_offer", None) is not None:  # CS-E-03.S4.T1 owns this flow
-            return self._reply(stream, prep, "[customer pressed Create ticket]", TICKET_OFFER_LINE, "answered")
+        if body is not None and getattr(body, "ticket_offer", None) is not None:  # s6.7 Create ticket button
+            return await self._ticket_offer(stream, prep, TICKET_OFFER_PRESSED)
         pending = prep.memory.current_pending
         confirm = getattr(body, "confirm", None) if body is not None else None
         if confirm is not None:
@@ -58,6 +62,10 @@ class StructuredInput:
                 return self._action(stream, prep, human, pending, await self.confirmer.confirm(prep.control, pending))
             return self._action(stream, prep, human, pending, await self.confirmer.cancel(prep.control, pending))
         text = inp.text
+        if (text is not None and pending is None and inp.mode == "voice" and is_strict_yes(text)
+                and apology_is_last(list(prep.values.get("messages") or []))):  # s6.7 voice yes to the offer
+            return await self._ticket_offer(stream, prep, build_turn_message(text, TurnContext(
+                mode="voice", verified=bool(prep.values.get("verified")))))
         if text is None or pending is None:  # a yes or no with no current pending answers something else
             return StructuredResult()
         yes, no = is_strict_yes(text), is_strict_no(text)
@@ -91,6 +99,14 @@ class StructuredInput:
         msg = AIMessage(say if voice else text, id=ingress_message_id(prep.control.turn_id))
         return StructuredResult(outcome=outcome, messages=[self._human(human), msg], state=state or {})
 
+    async def _ticket_offer(self, stream: TurnStream, prep: TurnPrep, human: Any) -> StructuredResult:
+        """What: the s6.7 ticket offer accepted: one code ticket (reason model_unavailable) and its line, no model.
+        Use when: the ticket_offer body, or a voice strict yes right after the apology. Inputs: stream, prep, human
+        line. Output: result. Side effects: at most one ticket and one escalated event. Role: s6.7 button flow."""
+        text, end_reason, ticket = await self.escalator.ticket_offer(prep.control, list(prep.values.get("messages") or []))
+        return self._reply(stream, prep, human, text, end_reason,
+                           final_extra={"escalated": end_reason == "escalated", "ticket": ticket})
+
     def _not_current(self, stream: TurnStream, prep: TurnPrep, human: str, pending_id: str) -> StructuredResult:
         """What: a press for a pending that is not the current one: no core call, outcome expired, changed false.
         Use when: confirm body mismatch. Inputs: stream, prep, line, the pressed id. Output: result.
@@ -122,6 +138,8 @@ class StructuredInput:
                     action_type=str(pending.get("action_type") or "unknown"), outcome=reply.outcome,
                     changed=reply.changed, reason_codes=reply.reason_codes, policy_refs=reply.policy_refs,
                     result_text=reply.say if voice else reply.text, ticket=reply.ticket)
+        if reply.end_reason == "escalated":  # commit or submit failure ticket (doc 07 fixture s5_failures)
+            self.escalator.emit(prep.control, "tool_failure", reply.ticket)
         state = {} if reply.keep_pending else {"pending": None}
         return self._reply(stream, prep, human, reply.text, reply.end_reason, say=reply.say, state=state,
                            final_extra={"escalated": reply.end_reason == "escalated", "ticket": reply.ticket})
