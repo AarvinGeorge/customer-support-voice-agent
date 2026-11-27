@@ -188,7 +188,8 @@ class NoMinter:
 
 class Fixed(GenericFakeChatModel):
     """What: a fake gate model that records its inputs and replies per the shared mode: the scope classifier "ON"
-    (or "OFF" when mode["scope"] is "OFF"); the grounding verifier zero claims (passes, D-059), or with
+    (or "OFF" when mode["scope"] is "OFF"); the grounding verifier zero claims with no_claims_reason "conversation" (passes; D-069: every empty
+    list needs a reason), or with
     mode["verifier"] == "fail" one unsupported claim quoting its input plus a commitment (escalate with a ticket).
     Use when: the two gates of this test. Inputs: role, shared mode dict. Output: AI message.
     Side effects: records every call in `seen`. Role: gate inputs become a searched sink, and the failing paths run."""
@@ -208,7 +209,7 @@ class Fixed(GenericFakeChatModel):
             reply = json.dumps({"claims": [{"text": quoted, "supported": False, "source_id": "none"}],
                                 "commitment": True})
         else:
-            reply = '{"claims": [], "commitment": false}'
+            reply = '{"claims": [], "commitment": false, "no_claims_reason": "conversation"}'
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=reply))])
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kw):  # type: ignore[override]

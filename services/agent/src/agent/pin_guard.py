@@ -20,6 +20,7 @@ from contracts.agent_api import TurnRequest, VoiceAskRequest
 from contracts.redact import RedactContext, scan_pins
 from langchain_core.messages import AIMessage
 
+from agent.line_ids import INGRESS, line_id
 from agent.assembly import run_config
 from agent.prompt import TurnContext, build_turn_message
 from agent.sse import TurnOutcome, TurnStream
@@ -129,7 +130,7 @@ class TypedPinRefusal:
         values = (await self.agent.aget_state(config)).values or {}
         human = build_turn_message(inp.text or "", TurnContext(mode="chat", verified=bool(values.get("verified"))))
         await self.agent.aupdate_state(config, {"messages": [human, AIMessage(TYPED_PIN_LINE,
-                                                                              id=f"ingress-{row.turn_id}")]})
+                                                                              id=line_id(INGRESS, row.turn_id))]})
         verified = bool(inp.redact_context and inp.redact_context.verified)
         if verified:  # review round 2 N-I2: a verified session is never put back to awaiting
             pass
