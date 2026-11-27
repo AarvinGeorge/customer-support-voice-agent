@@ -26,6 +26,7 @@ def make_hooks(reseed_cmd: str, ingest_cmd: str | None, remove_cmd: str | None, 
     Side effects: the hooks run subprocesses. Role: stack preparation per case."""
 
     def call(cmd: str, what: str) -> None:
+        """What: run one command and raise HookError on failure. Use when: a hook step. Inputs: command text, label. Output: none. Side effects: runs a subprocess. Role: uniform failure handling."""
         try:
             r = run(shlex.split(cmd), capture_output=True, text=True, timeout=300)
         except (OSError, subprocess.TimeoutExpired) as e:
@@ -34,9 +35,11 @@ def make_hooks(reseed_cmd: str, ingest_cmd: str | None, remove_cmd: str | None, 
             raise HookError(f"{what} exited {r.returncode}: {(r.stderr or '')[:200]}")
 
     def fixture_paths(case: dict[str, Any]) -> list[str]:
+        """What: absolute paths of the case's fixture articles. Use when: ingest or remove. Inputs: case. Output: list of paths. Side effects: none. Role: path resolution."""
         return [str(GOLDEN / p) for p in (case.get("fixtures") or {}).get("articles", [])]
 
     def before(case: dict[str, Any]) -> None:
+        """What: reseed core then ingest the case's fixtures. Use when: a case is about to run. Inputs: case. Output: none. Side effects: runs the reseed and ingest commands. Role: clean state per case."""
         call(reseed_cmd, "reseed")
         paths = fixture_paths(case)
         if paths and not ingest_cmd:
@@ -46,6 +49,7 @@ def make_hooks(reseed_cmd: str, ingest_cmd: str | None, remove_cmd: str | None, 
             call(ingest_cmd.replace("{path}", p), "fixture ingest")
 
     def after(case: dict[str, Any]) -> None:
+        """What: remove the case's fixtures. Use when: a case finished. Inputs: case. Output: none. Side effects: runs the remove command. Role: cleanup."""
         if remove_cmd:
             for p in fixture_paths(case):
                 call(remove_cmd.replace("{path}", p), "fixture remove")

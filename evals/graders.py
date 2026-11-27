@@ -239,6 +239,7 @@ def _observed_codes_refs(ctx: Ctx, events: list[Event]) -> tuple[list[str], list
     refs: list[str] = []
 
     def add(lst: list[str], v: str) -> None:
+        """What: append a value once. Use when: collecting codes and refs. Inputs: list, value. Output: none. Side effects: mutates the list. Role: dedupe keeping first-seen order."""
         if v not in lst:
             lst.append(v)
 
