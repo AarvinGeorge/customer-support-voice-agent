@@ -186,7 +186,7 @@ cases:
     persona: Sam Okafor
     mode: chat
     source: L1 s4 S4, s7; 07 s6.5, s3.4 (code ticket, origin code); D-052; D-070 (every ticket has a verified requester)
-    notes: "D-070: core refuses a ticket for an unverified session, so the not_in_docs escalation is held and the card is shown (turn 1 ends verification_requested, no ticket); the card verifies Sam and code opens the held ticket for Sam (turn 2, no model call). The ticket is created by agent code, never by the model."
+    notes: "D-070: core refuses a ticket for an unverified session, so the not_in_docs escalation is held and the card is shown (turn 1 ends verification_requested, no ticket); the card verifies Sam (07 s6.3 step 5, where D-070 makes the held escalation the continued request) and code opens the held ticket for Sam (turn 2, no model call). The ticket is created by agent code, never by the model."
     turns:
       - {kind: text, text: "Do you have an Android app for Quillstack?", expect: {end_reason: verification_requested}}
       - {kind: verification, credentials: persona, expect: {end_reason: escalated}}
