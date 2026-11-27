@@ -123,11 +123,7 @@ jobs:
       - name: Lint
         run: |
           set -euo pipefail
-          if node -e "process.exit(require('./package.json').scripts?.lint ? 0 : 1)"; then
-            pnpm lint
-          else
-            echo "::warning title=web lint::apps/web has no lint script yet; lint skipped on purpose (eslint is not set up)"
-          fi
+          pnpm lint
       - name: Unit tests (vitest)
         run: |
           set -euo pipefail

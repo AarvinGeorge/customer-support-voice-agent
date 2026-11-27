@@ -138,6 +138,7 @@ export function VoiceBars({ levels, reducedMotion, schedule, cancel }: VoiceBars
   const agentRef = useRef<HTMLDivElement | null>(null);
   const youRef = useRef<HTMLDivElement | null>(null);
   const levelsRef = useRef(levels);
+  // eslint-disable-next-line react-hooks/refs -- intentional latest-callback ref written during render; refactor deferred
   levelsRef.current = levels;
   const [meter, setMeter] = useState({ mic: 0, agent: 0 });
 
@@ -147,6 +148,7 @@ export function VoiceBars({ levels, reducedMotion, schedule, cancel }: VoiceBars
     return () => clearInterval(id);
   }, [reducedMotion]);
 
+  // eslint-disable-next-line react-hooks/immutability -- intentional local mutation inside the effect tick loop; refactor deferred
   useEffect(() => {
     if (reducedMotion) return;
     const sched = schedule ?? ((cb: () => void) => requestAnimationFrame(cb));
@@ -190,6 +192,7 @@ export function VoiceBars({ levels, reducedMotion, schedule, cancel }: VoiceBars
       }
       id = sched(tick);
     };
+    // eslint-disable-next-line react-hooks/immutability -- intentional local mutation inside the effect tick loop; refactor deferred
     id = sched(tick);
     return () => stop(id);
   }, [reducedMotion, schedule, cancel]);

@@ -185,6 +185,7 @@ export function ConsoleShell({
     setLimitNote("You can send again.");
   }, [store]);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
     if (busy) setLimitNote("");
   }, [busy]);
   const limitId = limit?.id ?? null;
@@ -192,9 +193,11 @@ export function ConsoleShell({
   useEffect(() => {
     // Announce the wait once per notice, from retry_after_s (not the ticking clock).
     if (limitId === null) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
     setLimitNote(limitS !== null && limitS > 0 ? `You can send again in about ${limitS} second${limitS === 1 ? "" : "s"}.` : "Sending is paused for a moment.");
   }, [limitId]);
   const secondsLeft = useSecondsLeft(limit?.untilMs ?? null, clearLimit);
+  // eslint-disable-next-line react-hooks/purity -- intentional read of the clock at render for the countdown; refactor deferred
   const locked = limit !== null && limit.untilMs !== null && limit.untilMs > Date.now() ? "Send unlocks when the countdown ends" : null;
   const inflight = useRef<AbortController | null>(null);
   const messageRef = useRef<HTMLTextAreaElement | null>(null);
@@ -224,7 +227,9 @@ export function ConsoleShell({
 
   useEffect(() => () => inflight.current?.abort(), []);
   useEffect(() => () => inflight.current?.abort(), [sessionId]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
   useEffect(() => setAccount(""), [sessionId]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
   useEffect(() => setPickedTurnId(null), [sessionId]);
 
   /**

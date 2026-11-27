@@ -62,6 +62,7 @@ export function InputBar({ onSend, busy, disabled, placeholder, inputRef, locked
 
   useEffect(() => {
     if (restore === null) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
     if (text === "") setText(restore.text);
     else setHeld((h) => (h === null ? restore.text : `${h}\n${restore.text}`));
     // Only a new notice id restores; later renders of the same notice keep what the customer typed.

@@ -80,6 +80,7 @@ export function useCountdown(): { remaining: number; start: (seconds: number | n
 
   useEffect(() => {
     if (until === null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
       setRemaining(0);
       return;
     }

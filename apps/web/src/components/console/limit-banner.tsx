@@ -26,6 +26,7 @@ export function useSecondsLeft(untilMs: number | null, onDone: () => void): numb
   const left = (now: number) => (untilMs === null ? 0 : Math.max(0, Math.ceil((untilMs - now) / 1000)));
   const [, setTick] = useState(0);
   const doneRef = useRef(onDone);
+  // eslint-disable-next-line react-hooks/refs -- intentional latest-callback ref written during render; refactor deferred
   doneRef.current = onDone;
   useEffect(() => {
     if (untilMs === null) return;
@@ -40,6 +41,7 @@ export function useSecondsLeft(untilMs: number | null, onDone: () => void): numb
     tick();
     return () => clearInterval(id);
   }, [untilMs]);
+  // eslint-disable-next-line react-hooks/purity -- intentional read of the clock at render for the countdown; refactor deferred
   return left(Date.now());
 }
 

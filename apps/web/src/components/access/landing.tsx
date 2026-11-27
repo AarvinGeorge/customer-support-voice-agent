@@ -68,6 +68,7 @@ export function Landing() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
     void load();
   }, [load]);
 
