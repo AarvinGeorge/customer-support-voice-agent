@@ -1,7 +1,7 @@
 """What: snapshot of every voice-mode verification line plus the realtime and system prompts, asserting that none
 of them asks the customer to say, tell or type a PIN; verification is by the secure card only.
 Use when: pytest (no network, no model calls).
-Inputs: the fixed line constants, REALTIME_PROMPT, render_instructions, SYSTEM_PROMPT.
+Inputs: the fixed line constants, REALTIME_PROMPT, render_instructions, SYSTEM_PROMPT, ASK_SUPPORT_AGENT_TOOL.
 Output: pass or fail.
 Side effects: none.
 Role: guards doc 07 s14 row 18 fallback (card-only verification in voice; rule V spoken verification is designed
@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 
 import pytest
+from contracts.tools import ASK_SUPPORT_AGENT_TOOL
 
 from agent.middleware import router as router_mod
 from agent.middleware.router import VERIFY_LINE, VERIFY_SAY, route_reply
@@ -114,6 +115,17 @@ def test_system_prompt_forbids_a_spoken_or_typed_pin() -> None:
     assert_no_spoken_pin_invite(SYSTEM_PROMPT, allow_negated=True)
     low = SYSTEM_PROMPT.lower()
     assert "say one aloud" in low and "secure card" in low
+
+
+def test_ask_support_agent_tool_description_states_the_card_rule() -> None:
+    # The Realtime model reads this description too (doc 07 s6.6), so it is model-facing instruction text.
+    desc = ASK_SUPPORT_AGENT_TOOL["description"]
+    assert_no_spoken_pin_invite(desc, allow_negated=True)
+    low = desc.lower()
+    assert "pin)" not in low and "account id, pin" not in low  # a PIN is not an expected spoken answer
+    assert "secure card" in low and "never ask" in low
+    arg = ASK_SUPPORT_AGENT_TOOL["parameters"]["properties"]["question"]["description"]
+    assert_no_spoken_pin_invite(arg, allow_negated=True)
 
 
 def test_the_checker_can_fail() -> None:
