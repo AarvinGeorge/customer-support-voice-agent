@@ -1,11 +1,12 @@
 """What: identity for core: normalise an account id and PIN, check the PIN by constant-time HMAC compare, keep the
-per-session and per-account failure counts, lock, open the lockout ticket and build Claims.
+per-session and per-account failure counts, lock and build Claims.
 Use when: POST /v1/identity/verify or GET /v1/sessions/{id}/claims runs, or a read route needs the verified person.
 Inputs: a connection inside the caller's transaction, PolicyConfig, the injected clock, the pepper, ids, the raw PIN.
 Output: normalize_account_id, normalize_pin, permissions_for, attempts_left, load_claims, read_unverified,
 require_claims, verify, VerifyOutcome.
-Side effects: verify takes a transaction advisory lock per session, writes session_claims, verify_attempts, audit_events
-and (at the third session failure) one ticket. Nothing here logs or audits the PIN.
+Side effects: verify takes a transaction advisory lock per session, writes session_claims, verify_attempts and
+audit_events. A lockout opens no ticket (D-070: a ticket needs a known requester, and a locked session has none).
+Nothing here logs or audits the PIN.
 Role: doc 07 s3.1, s8.1 verify rows, L1 s10. Core resolves the person only from session_claims for the session id; the
 tier, role and status are read live from users and accounts, never cached in the claims row. Step-up is designed only."""
 from __future__ import annotations
@@ -18,14 +19,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from contracts.core_api import Claims, Permissions, TicketRef, UnverifiedClaims
+from contracts.core_api import Claims, Permissions, UnverifiedClaims
 from contracts.policy import PolicyConfig
 
 from core.audit import AuditEvent, write_audit
 from core.clock import Clock
 from core.errors import CoreError
 from core.seeds.seed import pin_hmac
-from core.tickets import insert_ticket, queue_for, session_lockout_ticket
 
 _ACCOUNT_DIGITS = re.compile(r"^[0-9]{5}$")
 
@@ -109,13 +109,12 @@ def require_claims(conn: Any, session_id: uuid.UUID | str, now: datetime, policy
 @dataclass(frozen=True)
 class VerifyOutcome:
     """What: the result of verify. Use when: the route turns it into a 200 or an error. Inputs: kind, claims,
-    attempts_left, ticket. Output: frozen value. Side effects: none.
+    attempts_left. Output: frozen value. Side effects: none.
     Role: lets the route commit the counters first and raise afterwards (a raised error would roll them back)."""
 
     kind: Literal["ok", "failed", "locked", "conflict"]
     claims: Claims | None = None
     attempts_left: int = 0
-    ticket: TicketRef | None = None
 
 
 def _match_user(conn: Any, pepper: str, account_id: str, pin: str) -> str | None:
@@ -167,29 +166,12 @@ def _audit(conn: Any, *, policy: PolicyConfig, clock: Clock, event: str, session
         args={"claimed_account_id": account_id, "ok": ok, **(extra or {})}), clock=clock)
 
 
-def _open_lockout_ticket(conn: Any, *, policy: PolicyConfig, clock: Clock, session_id: uuid.UUID | str,
-                         trace_id: str | None, mode: str | None) -> TicketRef | None:
-    """What: open the unverified lockout ticket (P4, category access, no account link) unless the session already has
-    the per-session maximum. Use when: the third failure locks a session. Inputs: connection, policy, clock, session,
-    trace, mode. Output: TicketRef or None. Side effects: an advisory lock shared with POST /v1/tickets, then
-    count and INSERTs. Role: doc 07 s3.1 and s3.4 owners row 1 (core creates it, in the same transaction)."""
-    conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"tickets:session:{session_id}",))
-    count = conn.execute("SELECT count(*) FROM tickets WHERE session_id = %s AND verified = false", (session_id,)).fetchone()[0]
-    if count >= policy.tickets.limits.unverified_per_session:
-        return None
-    return insert_ticket(
-        conn, policy=policy, clock=clock, session_id=session_id, account_id=None, user_id=None, tier=None, stage="open",
-        queue=queue_for(policy, "access"), category="access",
-        summary="The customer could not be verified: too many wrong account ID or PIN attempts in this chat.",
-        origin="core", actor="system", actor_id=None, trace_id=trace_id, mode=mode)
-
-
 def verify(conn: Any, *, policy: PolicyConfig, clock: Clock, pepper: str, session_id: uuid.UUID | str,
            account_id: str, pin: str, trace_id: str | None = None, mode: str | None = None) -> VerifyOutcome:
     """What: check one verification attempt for a session and record the result.
     Use when: POST /v1/identity/verify. Inputs: connection (inside the request transaction), policy, clock, pepper,
     session id, NORMALISED account id and PIN, trace id, mode. Output: VerifyOutcome. Side effects: advisory lock
-    per session, session_claims upsert, verify_attempts and audit rows, the lockout ticket on the third failure.
+    per session, session_claims upsert, verify_attempts and audit rows (no ticket on lockout, D-070).
     Role: doc 07 s3.1. Order: session lock, account lock, credentials. A locked session or account answers `locked`
     without counting. A verified session that sends the same person's credentials gets the same claims; another
     person's valid credentials give `conflict`; wrong credentials fail without counting against the session."""
@@ -207,7 +189,7 @@ def verify(conn: Any, *, policy: PolicyConfig, clock: Clock, pepper: str, sessio
     if locked or _account_locked(conn, policy, account_id, now):
         _audit(conn, event="verify_blocked", ok=False, status=423, extra={"reason": "session" if locked else "account"},
                **common)
-        return VerifyOutcome("locked", ticket=session_lockout_ticket(conn, session_id) if locked else None)
+        return VerifyOutcome("locked")
     matched = _match_user(conn, pepper, account_id, pin)
     if matched is not None:
         _attempt(conn, session_id, account_id, True, now)
@@ -235,5 +217,4 @@ def verify(conn: Any, *, policy: PolicyConfig, clock: Clock, pepper: str, sessio
            extra={"failed_verifies": failed, "locked": lock_now}, **common)
     if not lock_now:
         return VerifyOutcome("failed", attempts_left=attempts_left(policy, failed, False))
-    ticket = _open_lockout_ticket(conn, policy=policy, clock=clock, session_id=session_id, trace_id=trace_id, mode=mode)
-    return VerifyOutcome("locked", ticket=ticket)
+    return VerifyOutcome("locked")

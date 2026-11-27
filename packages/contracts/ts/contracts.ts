@@ -804,7 +804,7 @@ export interface TurnRequest {
   client_turn_id: string;
   text?: string | null;
   confirm?: ConfirmInput | null;
-  verification?: VerificationInput | null;
+  verification?: VerificationInput | VerificationUnavailable | null;
   ticket_offer?: TicketOffer | null;
 }
 
@@ -883,6 +883,11 @@ export interface VerificationResultEvent {
   person?: VerifiedPerson | null;
   attempts_left?: number | null;
   ticket?: TicketRef | null;
+}
+
+/** What: the verification card's "I don't have my PIN" press. Use when: TurnRequest.verification, instead of */
+export interface VerificationUnavailable {
+  no_pin: true;
 }
 
 /** What: who the session is verified as, for display. Use when: verification.result. */
@@ -1090,7 +1095,6 @@ export const LIMITS = {
   "VERIFY_FAILURES_PER_ACCOUNT": 5,
   "VERIFY_ACCOUNT_WINDOW_S": 900,
   "VERIFY_ACCOUNT_LOCK_S": 900,
-  "UNVERIFIED_TICKETS_PER_SESSION": 2,
   "VERIFIED_TICKETS_PER_ACCOUNT_PER_DAY": 5,
   "BILLING_EMAIL_CHANGES_PER_DAY": 1,
   "SESSION_TURNS_PER_MINUTE": 10,
@@ -1106,7 +1110,6 @@ export const LIMITS = {
 
 export const VISIBILITY = {
   "V0": [
-    "create_ticket",
     "request_verification",
     "search_kb"
   ],

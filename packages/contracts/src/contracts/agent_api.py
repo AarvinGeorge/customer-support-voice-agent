@@ -33,6 +33,14 @@ class VerificationInput(StrictModel):
     pin: str = Field(pattern=r"^[0-9]{4}$")
 
 
+class VerificationUnavailable(StrictModel):
+    """What: the verification card's "I don't have my PIN" press. Use when: TurnRequest.verification, instead of
+    the account id and PIN. Inputs: no_pin (only true). Output: model. Side effects: none.
+    Role: D-070 forgotten-PIN path as a structured input (no text matching, no model call; PR #78 review I-4)."""
+
+    no_pin: Literal[True]
+
+
 class TicketOffer(StrictModel):
     """What: the Create ticket button after "both models unavailable".
     Use when: TurnRequest.ticket_offer. Inputs: accept (only true). Output: model.
@@ -50,7 +58,7 @@ class TurnRequest(StrictModel):
     client_turn_id: UUID
     text: str | None = Field(default=None, min_length=1, max_length=2000)
     confirm: ConfirmInput | None = None
-    verification: VerificationInput | None = None
+    verification: VerificationInput | VerificationUnavailable | None = None
     ticket_offer: TicketOffer | None = None
 
     @model_validator(mode="after")

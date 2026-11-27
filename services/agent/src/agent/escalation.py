@@ -1,13 +1,19 @@
 """What: the escalation module (doc 07 s3.4 owners, s6.2 `escalated`, s6.5, s6.7, s8.1 failure-path ticket row, s8.2
 deadline path; L1 s7 trigger table): the one-attempt code ticket with the deterministic key, the `escalated` event,
 the fallback line when the ticket cannot be opened, the deadline path, the limit_reached ticket, the both-models-
-unavailable apology and the ticket_offer flow.
+unavailable apology and the ticket_offer flow; and D-070, the escalation of an unverified session: core refuses
+the ticket (REQUESTER_UNKNOWN), so the code holds the escalation on agent.sessions and asks for the verification
+card (or, when the card is already pending, only points at it; when verification is locked or the PIN is
+unavailable, gives the fixed "How to reach support" line). The verification card opens the held ticket.
 Use when: TurnRunner after the agent loop (route escalations, limit, deadline, model failure), the step 13 handler
-(ticket_offer body, voice yes after the apology, commit or submit failure tickets) and the verify lockout.
-Inputs: the agent-token core client; per call the turn stream, TurnControl, the compiled agent and its run config.
-Output: Escalator, the fixed lines, REASON_CATEGORY, last_customer_text, apology_is_last, model-unavailable ids.
+(ticket_offer body, voice yes after the apology, commit or submit failure tickets, the verification card).
+Inputs: the agent-token core client and an optional EscalationHolds store; per call the turn stream, TurnControl,
+the compiled agent and its run config.
+Output: Escalator, EscalationHolds, NoRequester, the fixed lines, REASON_CATEGORY, last_customer_text,
+apology_is_last, EscalationFacts, model-unavailable ids.
 Side effects: at most one core ticket per turn (POST /v1/tickets, 3 s clamped to the time left, 0 retries),
-escalation step events, `escalated` events, best-effort thread writes inside the time left.
+escalation step events, `escalated` events, verification.required for a hold, hold writes, best-effort thread
+writes inside the time left.
 Role: runs in the 3 s reserve: the loop stops 3 s before the deadline (TurnRunner), so a ticket attempt (at most
 3 s) always fits. L1 s7 rows and their owner:
 
@@ -20,7 +26,8 @@ Role: runs in the 3 s reserve: the loop stops 3 s before the deadline (TurnRunne
 | Customer asks for a human / commitment | customer_asked_human / needs_commitment | model create_ticket |
 | Action needs approval | (submitted) | core, inside submit |
 | Same tool fails twice; commit or submit failure | tool_failure | this module |
-| Verification fails 3 times | verify_locked | core, inside verify |
+| Verification fails 3 times | (no ticket, D-070) | nobody: fixed "How to reach support" line |
+| Any row above while unverified | (held, D-070) | this module, after the verification card succeeds |
 | Model call limit; deadline | limit_reached; deadline | this module |
 | Both models unavailable | model_unavailable | this module, only after the Create ticket button or a voice yes |
 """
@@ -29,7 +36,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from contracts import limits
 from contracts.errors import ErrorBody
@@ -40,7 +48,7 @@ from agent import line_ids
 from agent.clients.core_agent import CoreAgentClient
 from agent.clients.http import ToolCallError
 from agent.memory import dangling_calls
-from agent.middleware.router import ESCALATION_LEADS, NO_TICKET_CLAUSE, TICKET_CLAUSE
+from agent.middleware.router import ESCALATION_LEADS, NO_TICKET_CLAUSE, TICKET_CLAUSE, escalation_lead
 from agent.middleware.tool_guard import clamp_timeout
 from agent.say import speak
 from agent.sse import TurnOutcome, TurnStream, route_outcome
@@ -57,6 +65,15 @@ NOTHING_TO_OFFER_LINE = "There's nothing waiting for a ticket right now. What ca
 DEADLINE_LEAD = ESCALATION_LEADS["deadline"]
 DEADLINE_TICKET_LINE = "I couldn't finish that in time, so I've opened a ticket for our team: {display}."
 UNAVAILABLE_ID_PREFIX = line_ids.UNAVAILABLE
+# D-070: an unverified session cannot get a ticket. These replace the ticket clause after the escalation lead.
+HOLD_LINE = ("To open a ticket for our team, I need to know who you are first. Please enter your account ID and "
+             "support PIN in the secure card.")
+HOLD_SAY = ("To open a ticket for our team, I need to know who you are first. Please enter your account ID and "
+            "support PIN in the secure card on your screen. I can't take them by voice.")
+CARD_PENDING_LINE = "Please finish verifying in the secure card first, then I can open a ticket for our team."
+NO_REQUESTER_LINE = ("I can't open a ticket without verifying who you are, and I can't verify you in this "
+                     "conversation. The How to reach support section of our Support, response times and escalation "
+                     "article explains what to do next.")
 
 REASON_CATEGORY: dict[str, str] = {
     "not_in_docs": "other", "retrieval_unavailable": "other", "grounding_failed": "other",
@@ -75,6 +92,56 @@ REASON_SUMMARY: dict[str, str] = {
     "model_unavailable": "The assistant's models were unavailable; the customer asked for a ticket.",
 }
 _CUSTOMER_RE = re.compile(r"<customer_message>\n?(.*?)\n?</customer_message>", re.S)
+
+
+@dataclass(frozen=True)
+class EscalationFacts:
+    """What: the agent.sessions facts an unverified escalation needs. Use when: returned by EscalationHolds.
+    Inputs: awaiting (agent.sessions.awaiting_verification: the card is on screen; set when it is shown, cleared on
+    verify, dismiss and topic change, doc 07 s6.3 and s7.3), held (the held escalation or None), verified_user_id (who
+    the session last verified as, None if never). Output: value. Side effects: none.
+    Role: explicit state only, never inferred from turn history (PR #78 review I-2)."""
+
+    awaiting: bool = False
+    held: dict[str, Any] | None = None
+    verified_user_id: str | None = None
+
+
+class EscalationHolds(Protocol):
+    """What: the agent.sessions facts an unverified escalation needs (D-070). Use when: typing the Escalator store.
+    Inputs: see methods. Output: see methods. Side effects: database. Role: port (PgSessionFlags implements it)."""
+
+    async def escalation_facts(self, session_id: str) -> EscalationFacts:
+        """What: the session's awaiting flag, held escalation and last verified user.
+        Use when: an escalation was refused for no requester, and on a successful verify. Inputs: session id.
+        Output: EscalationFacts. Side effects: one SELECT. Role: port method."""
+        ...
+
+    async def hold_escalation(self, session_id: str, held: dict[str, Any] | None) -> None:
+        """What: write or clear agent.sessions.held_escalation. Use when: holding, after the held ticket, on lockout
+        or the card's no-PIN press. Inputs: session id, {reason, category, summary, turn_id, prior_user_id} or None.
+        Output: none.
+        Side effects: one UPDATE. Role: port method."""
+        ...
+
+
+@dataclass(frozen=True)
+class NoRequester:
+    """What: how an escalation ends when core refused the ticket for no verified requester.
+    Use when: returned by Escalator.no_requester. Inputs: kind (hold: verification requested and the escalation
+    held; card_pending: the card is already on screen; unavailable: verification is locked), the chat clause, the
+    voice clause. Output: value. Side effects: none. Role: one decision, worded by each caller after its lead."""
+
+    kind: str
+    clause: str
+    say: str
+
+    @property
+    def end_reason(self) -> str:
+        """What: the end reason for a route escalation that ended this way. Use when: finish. Inputs: none.
+        Output: verification_requested while a card is (or now is) on screen, else answered. Side effects: none.
+        Role: D-070 (nothing was escalated)."""
+        return "answered" if self.kind == "unavailable" else "verification_requested"
 
 
 def ticket_key(control: TurnControl, reason: str) -> str:
@@ -145,10 +212,12 @@ class Escalator:
     Output: open_ticket, emit, summary, finish, deadline, model_unavailable, ticket_offer. Side effects: see module.
     Role: escalation code (doc 07 s3.4 "agent code (origin code)" rows)."""
 
-    def __init__(self, core: CoreAgentClient) -> None:
-        """What: keep the client. Use when: app start or tests. Inputs: core client. Output: none.
-        Side effects: none. Role: constructor."""
+    def __init__(self, core: CoreAgentClient, *, holds: EscalationHolds | None = None) -> None:
+        """What: keep the client and the hold store. Use when: app start or tests. Inputs: core client, optional
+        EscalationHolds (None: an unverified escalation still asks for the card but nothing is held).
+        Output: none. Side effects: none. Role: constructor."""
         self.core = core
+        self.holds = holds
 
     async def open_ticket(self, control: TurnControl, reason: str, *, summary: str, category: str | None = None,
                           key_reason: str | None = None) -> dict[str, Any] | None:
@@ -156,7 +225,8 @@ class Escalator:
         {sid}:{turn}:esc:{reason}, origin code; reuses a ticket already opened this turn (exactly one per turn).
         Use when: any code-owned escalation. Inputs: control, escalation reason, summary, category, key reason
         (defaults to reason). Output: TicketRef dict, or None on failure or when under 1 s is left.
-        Side effects: one escalation step and at most one core call; sets control.ticket. Role: s8.1 row."""
+        Side effects: one escalation step and at most one core call; sets control.ticket, or control.requester_refusal
+        when core answers REQUESTER_UNKNOWN (D-070). Role: s8.1 row."""
         if control.ticket is not None:
             return control.ticket
         step = Step.start(control.events, "escalation", "create_ticket", "Opening a ticket")
@@ -171,6 +241,10 @@ class Escalator:
             res = await asyncio.wait_for(self.core.create_ticket(control, body, ticket_key(control, key_reason or reason)),
                                          timeout)
         except (ToolCallError, TimeoutError, asyncio.TimeoutError) as err:
+            if isinstance(err, ToolCallError) and err.code == "REQUESTER_UNKNOWN":  # D-070: core needs a verified customer
+                control.requester_refusal = dict(err.details or {})
+                step.done("blocked", "Needs verification first", detail="A ticket needs a verified customer")
+                return None
             step.done("timeout" if not isinstance(err, ToolCallError) or err.kind == "timeout" else "error",
                       "Couldn't open a ticket", detail="The ticket system did not respond")
             return None
@@ -180,6 +254,91 @@ class Escalator:
             return None
         control.ticket = ticket
         step.done("ok", "Opened a ticket", detail=str(ticket.get("display") or ""))
+        return ticket
+
+    async def no_requester(self, control: TurnControl, reason: str, *, summary: str,
+                           category: str | None = None) -> NoRequester | None:
+        """What: the D-070 decision after core refused the ticket for no verified requester: verification locked
+        gives the "How to reach support" clause (nothing held); a card on screen (agent.sessions.awaiting_verification,
+        or requested this turn) gives the card-pending clause (nothing held, the escalation does not fire while the
+        customer is mid-verification);
+        otherwise the escalation is held on agent.sessions and control.awaiting_verification is set (the caller
+        emits verification.required with its full line, request_card).
+        Use when: right after open_ticket returned None. Inputs: control, reason, summary, category.
+        Output: NoRequester, or None when the ticket failed for another reason (the s8.1 fallback applies).
+        Side effects: at most one read and one write of the hold store.
+        Role: one place for the unverified escalation rule (route, limit, deadline and ticket_offer paths)."""
+        refusal = control.requester_refusal
+        if refusal is None:
+            return None
+        if refusal.get("verify_locked"):
+            return NoRequester("unavailable", NO_REQUESTER_LINE, NO_REQUESTER_LINE)
+        facts = await self.facts(control)
+        if facts.awaiting or control.awaiting_verification:
+            return NoRequester("card_pending", CARD_PENDING_LINE, CARD_PENDING_LINE)
+        # prior_user_id binds the hold to the verification lifetime it was made in (PR #78 review I-3)
+        held = {"reason": reason, "category": category or REASON_CATEGORY.get(reason, "other"),
+                "summary": summary[:500] or reason, "turn_id": control.turn_id,
+                "prior_user_id": facts.verified_user_id}
+        await self.hold(control, held)
+        control.awaiting_verification = True
+        return NoRequester("hold", HOLD_LINE, HOLD_SAY)
+
+    @staticmethod
+    def request_card(control: TurnControl, decision: NoRequester, text: str) -> None:
+        """What: verification.required reason action with the turn's full line as the prompt, for a hold only.
+        Use when: after the caller worded its lead and clause. Inputs: control, decision, line. Output: none.
+        Side effects: at most one event. Role: reuses the existing verification card (doc 07 s6.3)."""
+        if decision.kind == "hold" and control.events is not None:
+            control.events.emit("verification.required", reason="action", prompt_text=text,
+                                attempts_left=control.verify_attempts_left, fields=["account_id", "pin"])
+
+    async def facts(self, control: TurnControl) -> EscalationFacts:
+        """What: the hold store's facts; empty facts without a store or on a failure (logged).
+        Use when: no_requester, and verify_card before it records the new identity. Inputs: control.
+        Output: EscalationFacts. Side effects: one read. Role: a store failure never fails the turn."""
+        if self.holds is None:
+            return EscalationFacts()
+        try:
+            return await self.holds.escalation_facts(control.session_id)
+        except Exception:  # noqa: BLE001 - the reply still goes out; nothing is held
+            log.warning("escalation facts read failed session_id=%s", control.session_id, exc_info=True)
+            return EscalationFacts()
+
+    @staticmethod
+    def hold_is_for(held: dict[str, Any], before: EscalationFacts, user_id: str | None) -> bool:
+        """What: true when a hold may become a ticket for the person who just verified: it was made in the
+        session's current verification lifetime (its prior_user_id is still the session's verified user) and that
+        lifetime was either never verified or belonged to this same person.
+        Use when: verify_card success, with the facts read before the new identity is recorded. Inputs: hold,
+        facts before, the newly verified user id. Output: bool. Side effects: none.
+        Role: PR #78 review I-3: verify as A, expire, verify as B never files A's held escalation under B."""
+        prior = held.get("prior_user_id")
+        return prior == before.verified_user_id and prior in (None, user_id)
+
+    async def hold(self, control: TurnControl, held: dict[str, Any] | None) -> None:
+        """What: write or clear the held escalation (logged on failure). Use when: holding, after the held ticket,
+        on lockout and on a forgotten PIN. Inputs: control, hold or None. Output: none. Side effects: one write.
+        Role: helper."""
+        if self.holds is None:
+            return
+        try:
+            await self.holds.hold_escalation(control.session_id, held)
+        except Exception:  # noqa: BLE001
+            log.warning("escalation hold write failed session_id=%s", control.session_id, exc_info=True)
+
+    async def held_ticket(self, control: TurnControl, held: dict[str, Any]) -> dict[str, Any] | None:
+        """What: open the held escalation's ticket for the person just verified (one attempt, origin code, the held
+        reason and summary), emit `escalated`, and clear the hold (also when the attempt failed, the s8.1 one-attempt
+        rule). Use when: verify_card success after hold_is_for said yes. Inputs: control, hold.
+        Output: the ticket or None. Side effects: at most one ticket, one event, one write.
+        Role: D-070 "once verification completes it creates the ticket for that person"."""
+        reason = str(held.get("reason") or "other")
+        ticket = await self.open_ticket(control, reason, summary=str(held.get("summary") or reason),
+                                        category=held.get("category"))
+        await self.hold(control, None)
+        if ticket is not None:
+            self.emit(control, reason, ticket)
         return ticket
 
     @staticmethod
@@ -244,11 +403,19 @@ class Escalator:
             if reason == "deadline":
                 stream.emit("error", **{k: v for k, v in deadline_error().model_dump(mode="json", by_alias=True).items()
                                         if k != "trace_id"})
+            decision: NoRequester | None = None
             if route.ticket is None:
                 messages = await self._messages(agent, config, control)
                 category = TOOL_CATEGORY.get(route.tool or "") if reason == "tool_failure" else None
-                route.ticket = await self.open_ticket(control, reason, summary=self.summary(reason, messages),
-                                                      category=category)
+                summary = self.summary(reason, messages)
+                route.ticket = await self.open_ticket(control, reason, summary=summary, category=category)
+                if route.ticket is None:
+                    decision = await self.no_requester(control, reason, summary=summary, category=category)
+            if decision is not None:  # D-070: unverified, so no ticket and no `escalated` event
+                return await self._no_requester_outcome(stream, control, outcome, agent, config, decision,
+                                                        lead=escalation_lead(control),
+                                                        end_reason=reason if reason in ("deadline", "limit_reached")
+                                                        else decision.end_reason)
             new = route_outcome(stream, control, outcome.usage, outcome.model_used)
             if reason == "deadline":
                 new.status, new.error = "failed", deadline_error()
@@ -258,7 +425,14 @@ class Escalator:
             return new
         if outcome.end_reason == "limit_reached":
             messages = await self._messages(agent, config, control)
-            ticket = await self.open_ticket(control, "limit_reached", summary=self.summary("limit_reached", messages))
+            summary = self.summary("limit_reached", messages)
+            ticket = await self.open_ticket(control, "limit_reached", summary=summary)
+            decision = None if ticket else await self.no_requester(control, "limit_reached", summary=summary)
+            if decision is not None:
+                control.route_message_id = line_ids.line_id(line_ids.LIMIT, control.turn_id)
+                return await self._no_requester_outcome(stream, control, outcome, agent, config, decision,
+                                                        lead=ESCALATION_LEADS["limit_reached"],
+                                                        end_reason="limit_reached")
             text = f"{ESCALATION_LEADS['limit_reached']} " + (
                 TICKET_CLAUSE.format(display=ticket.get("display") or f"ticket ending {ticket.get('short_id')}")
                 if ticket else fallback_clause(control))
@@ -272,6 +446,25 @@ class Escalator:
                                                         "ticket": control.ticket})
         return outcome
 
+    async def _no_requester_outcome(self, stream: TurnStream, control: TurnControl, outcome: TurnOutcome, agent: Any,
+                                    config: dict[str, Any], decision: NoRequester, *, lead: str,
+                                    end_reason: str) -> TurnOutcome:
+        """What: the reply of a route or limit escalation in an unverified session (D-070): lead plus the decision's
+        clause, verification.required for a hold, no ticket and no `escalated` event; the thread line is replaced.
+        Use when: finish, after no_requester decided. Inputs: stream, control, loop outcome, agent, config,
+        decision, lead, end reason (deadline and limit_reached keep theirs). Output: TurnOutcome.
+        Side effects: at most one event, one thread write. Role: helper."""
+        text, say = f"{lead} {decision.clause}", f"{lead} {decision.say}"
+        self.request_card(control, decision, text)
+        # a deadline route already emitted its error event at the top of finish
+        status, error = ("failed", deadline_error()) if end_reason == "deadline" else ("completed", None)
+        new = TurnOutcome(final=_final(text, escalated=False, ticket=None, say=say), usage=outcome.usage,
+                          end_reason=end_reason, status=status, error=error, model_used=outcome.model_used)
+        msg_id = control.route_message_id or line_ids.line_id(line_ids.ROUTE, control.turn_id)
+        await self._thread(agent, config, control, {"messages": [AIMessage(speak(say) if control.mode == "voice"
+                                                                           else text, id=msg_id)]})
+        return new
+
     async def deadline(self, stream: TurnStream, control: TurnControl, agent: Any, config: dict[str, Any]) -> TurnOutcome:
         """What: the deadline path (doc 07 s8.2): the loop was stopped 3 s before the deadline; emit the error, open
         the deadline ticket (one attempt, in the reserve), say so; then mark dangling tool calls not run and append
@@ -283,7 +476,17 @@ class Escalator:
         err = deadline_error()
         stream.emit("error", **{k: v for k, v in err.model_dump(mode="json", by_alias=True).items() if k != "trace_id"})
         messages = await self._messages(agent, config, control)
-        ticket = await self.open_ticket(control, "deadline", summary=self.summary("deadline", messages))
+        summary = self.summary("deadline", messages)
+        ticket = await self.open_ticket(control, "deadline", summary=summary)
+        decision = None if ticket else await self.no_requester(control, "deadline", summary=summary)
+        if decision is not None:  # D-070: unverified, so the escalation is held or pointed at the card
+            text, say = f"{DEADLINE_LEAD} {decision.clause}", f"{DEADLINE_LEAD} {decision.say}"
+            self.request_card(control, decision, text)
+            repair = [not_run_tool_message(c) for c in dangling_calls(messages)]
+            await self._thread(agent, config, control, {"messages": [
+                *repair, AIMessage(speak(say) if control.mode == "voice" else text, id=line_ids.line_id(line_ids.DEADLINE, control.turn_id))]})
+            return TurnOutcome(final=_final(text, escalated=False, ticket=None, say=say), end_reason="deadline",
+                               status="failed", error=err)
         text = (DEADLINE_TICKET_LINE.format(display=ticket.get("display") or f"ticket ending {ticket.get('short_id')}")
                 if ticket else f"{DEADLINE_LEAD} {fallback_clause(control)}")
         self.emit(control, "deadline", ticket)
@@ -312,7 +515,12 @@ class Escalator:
         Side effects: at most one ticket and one `escalated` event. Role: doc 07 s6.7 button flow."""
         if not apology_is_last(messages):
             return NOTHING_TO_OFFER_LINE, "answered", None
-        ticket = await self.open_ticket(control, "model_unavailable", summary=self.summary("model_unavailable", messages))
+        summary = self.summary("model_unavailable", messages)
+        ticket = await self.open_ticket(control, "model_unavailable", summary=summary)
+        decision = None if ticket else await self.no_requester(control, "model_unavailable", summary=summary)
+        if decision is not None:  # D-070: unverified, held until the card verifies the customer
+            self.request_card(control, decision, decision.clause)
+            return decision.clause, decision.end_reason, None
         self.emit(control, "model_unavailable", ticket)
         if ticket is None:
             return fallback_clause(control), "escalated", None

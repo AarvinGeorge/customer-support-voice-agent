@@ -31,6 +31,7 @@ pytestmark = pytest.mark.pg
 NY = ZoneInfo("America/New_York")
 POLICY_PATH = Path(__file__).resolve().parents[4] / "data" / "policy.yaml"
 POLICY = load_policy(POLICY_PATH)
+MIGRATION_0002 = Path(__file__).resolve().parents[2] / "migrations" / "0002_ticket_requester.sql"
 CATEGORIES = ["billing", "refund", "access", "sso", "integration", "bug", "account_change", "commitment"]
 
 
@@ -185,37 +186,81 @@ def test_sixth_verified_ticket_in_a_day_is_limited_with_existing(app_conn):
     assert rows(app_conn, "SELECT count(*) FROM tickets WHERE account_id=%s", w.account_id)[0][0] == 5
     assert make(app_conn, w.session_id, CATEGORIES[0]).merged  # no new ticket, so no limit
     tomorrow = FixedClock(clock().now() + timedelta(days=1))
-    assert make(app_conn, w.session_id, CATEGORIES[5], clk=tomorrow).created
+    # a session verified tomorrow (this one's claims expire in 2 hours; before D-070 the expired session silently
+    # made an unverified ticket here, so the old assertion passed without testing the next business day)
+    fresh = w.add_session(verified=True, expires_in=timedelta(days=2))
+    assert make(app_conn, fresh, CATEGORIES[5], clk=tomorrow).ref.verified
 
 
-def test_unverified_session_rules(app_conn):
-    """What: an unverified session (no claims row, or a locked one) gets P4, no account or user link, no merge, and
-    is limited to 2 per session with `existing`; another session is independent. Use when: always.
-    Inputs: app_conn. Output: assertions. Side effects: rolled back. Role: L1 s5 A3 unverified rule."""
-    anon = uuid.uuid4()  # no session_claims row at all
-    a = make(app_conn, anon, "sso")
-    b = make(app_conn, anon, "sso")  # same category: still a new ticket
-    assert a.created and b.created and a.ref.ticket_id != b.ref.ticket_id
-    assert (a.ref.priority, a.ref.queue, a.ref.target_label, a.ref.verified) == ("P4", "technical", "72 hours", False)
-    (r,) = rows(app_conn, "SELECT account_id, user_id, verified FROM tickets WHERE id=%s", a.ref.ticket_id)
-    assert r == (None, None, False)
-    with pytest.raises(CoreError) as exc:
-        make(app_conn, anon, "bug")
-    assert exc.value.code == "TICKET_LIMIT_REACHED" and exc.value.details["existing"]["ticket_id"] == b.ref.ticket_id
-    assert make(app_conn, uuid.uuid4(), "bug").created
-    w = World(app_conn, "enterprise")  # a locked, unverified session on a real account stays unverified
-    locked = w.add_session(verified=False)
-    ref = make(app_conn, locked, "access", blocking=True).ref
-    assert (ref.priority, ref.verified) == ("P4", False)
-
-
-def test_expired_claims_are_unverified(app_conn):
-    """What: a session whose claims have expired is treated as unverified. Use when: always. Inputs: app_conn.
-    Output: assertions. Side effects: rolled back. Role: session_ttl_minutes, doc 07 s3.1."""
+def test_unverified_session_is_refused_requester_unknown(app_conn):
+    """What: a session with no claims row, a locked one, or expired claims cannot create a ticket: core raises the
+    typed refusal REQUESTER_UNKNOWN (details reason requester_unknown and verify_locked) and writes nothing.
+    Use when: always. Inputs: app_conn. Output: assertions. Side effects: rolled back.
+    Role: D-070 invariant "every ticket has a known requester", enforced in core (the single authority)."""
     w = World(app_conn, "enterprise")
-    old = w.add_session(verified=True, expires_in=timedelta(minutes=-1))
-    ref = make(app_conn, old, "bug").ref
-    assert (ref.verified, ref.priority) == (False, "P4")
+    anon = uuid.uuid4()  # no session_claims row at all
+    locked = w.add_session(verified=False)
+    expired = w.add_session(verified=True, expires_in=timedelta(minutes=-1))
+    before = rows(app_conn, "SELECT count(*) FROM tickets")[0][0]
+    for sid, was_locked in ((anon, False), (locked, True), (expired, False)):
+        with pytest.raises(CoreError) as exc:
+            make(app_conn, sid, "access", blocking=True)
+        assert exc.value.code == "REQUESTER_UNKNOWN"
+        assert exc.value.details == {"reason": "requester_unknown", "verify_locked": was_locked}
+    assert rows(app_conn, "SELECT count(*) FROM tickets")[0][0] == before
+
+
+def test_requester_comes_from_the_session_claim_never_the_body(app_conn):
+    """What: TicketCreate has no user or account field (extra fields are refused), and the stored requester is the
+    session claim's user and account. Use when: always. Inputs: app_conn. Output: assertions.
+    Side effects: rolled back. Role: D-070 "user_id and account_id taken from the session claim"."""
+    with pytest.raises(ValueError):
+        body("bug", user_id="U-0001", account_id="QS-00001")
+    w = World(app_conn, "pro")
+    ref = make(app_conn, w.session_id, "bug").ref
+    (r,) = rows(app_conn, "SELECT user_id, account_id, verified FROM tickets WHERE id=%s", ref.ticket_id)
+    assert r == (w.user_id, w.account_id, True)
+
+
+def test_database_check_refuses_a_ticket_without_a_requester(app_conn):
+    """What: the tickets_requester_known CHECK rejects a row with no user or no account, even through insert_ticket
+    (the path the core-made tickets use, which skips create_ticket). Use when: always. Inputs: app_conn.
+    Output: assertions. Side effects: rolled back (savepoints). Role: D-070 in the schema, not only in code."""
+    w = World(app_conn, "pro")
+    for account_id, user_id in ((None, None), (w.account_id, None), (None, w.user_id)):
+        with pytest.raises(psycopg.errors.CheckViolation) as exc:
+            with app_conn.transaction():  # savepoint: the outer test transaction survives the error
+                insert_ticket(app_conn, policy=POLICY, clock=clock(), session_id=w.session_id,
+                              account_id=account_id,  # pyright: ignore[reportArgumentType]  (the point of the test)
+                              user_id=user_id,  # pyright: ignore[reportArgumentType]
+                              tier="pro", stage="open", queue="technical", category="bug",
+                              summary="no requester", origin="core", actor="system", actor_id=None)
+        assert exc.value.diag.constraint_name == "tickets_requester_known"
+
+
+def test_migration_0002_removes_old_unattributed_rows_then_adds_the_check(owner_conn):
+    """What: re-running migration 0002 on a table that holds an old unverified ticket (constraint dropped first, as
+    before the migration) deletes that ticket, its events and its stored idempotent response, keeps verified
+    tickets, and leaves the CHECK in place. Use when: always. Inputs: owner_conn. Output: assertions.
+    Side effects: rolled back. Role: the migration cannot fail on data written under the old rule."""
+    w = World(owner_conn, "pro")
+    kept = make(owner_conn, w.session_id, "bug").ref.ticket_id
+    owner_conn.execute("ALTER TABLE tickets DROP CONSTRAINT tickets_requester_known")
+    owner_conn.execute(
+        "INSERT INTO tickets (id, session_id, verified, stage, queue, category, priority, target_label, summary, "
+        "origin, created_date) VALUES ('TCK-26000001', %s, false, 'open', 'technical', 'other', 'P4', '72 hours', "
+        "'old', 'code', '2026-11-27')", (uuid.uuid4(),))
+    owner_conn.execute("INSERT INTO ticket_events (ticket_id, kind, actor) VALUES ('TCK-26000001', 'created', 'agent')")
+    owner_conn.execute(
+        "INSERT INTO idempotency (key, caller, endpoint, request_sha256, status_code, response) VALUES "
+        "('k-old', 'agent_tools', 'POST /v1/tickets', '\\x00'::bytea, 200, %s)",
+        (json.dumps({"ticket": {"ticket_id": "TCK-26000001"}, "merged": False, "created": True}),))
+    owner_conn.execute(MIGRATION_0002.read_text().encode())
+    assert rows(owner_conn, "SELECT count(*) FROM tickets WHERE id='TCK-26000001'")[0][0] == 0
+    assert rows(owner_conn, "SELECT count(*) FROM ticket_events WHERE ticket_id='TCK-26000001'")[0][0] == 0
+    assert rows(owner_conn, "SELECT count(*) FROM idempotency WHERE key='k-old'")[0][0] == 0
+    assert rows(owner_conn, "SELECT count(*) FROM tickets WHERE id=%s", kept)[0][0] == 1
+    assert rows(owner_conn, "SELECT count(*) FROM pg_constraint WHERE conname='tickets_requester_known'")[0][0] == 1
 
 
 def test_ticket_id_collision_is_retried(app_conn):
@@ -363,17 +408,22 @@ def test_http_idempotency_replay_and_key_reuse(http, owner_url):
     assert clash.status_code == 422 and clash.json()["error"]["details"]["reason"] == "idempotency_key_reused"
 
 
-def test_http_unverified_session_limit(http):
-    """What: an anonymous session gets P4 with no account link, two tickets, then 429 with existing.
-    Use when: always. Inputs: http fixture. Output: assertions. Side effects: committed rows, removed.
-    Role: L1 s5 A3 unverified limit."""
+def test_http_unverified_session_gets_403_requester_unknown(http, owner_url):
+    """What: over the wire an anonymous session gets 403 REQUESTER_UNKNOWN (class access_denied, changed false) and
+    nothing is stored for the key; one refusal audit row is written. Use when: always.
+    Inputs: http fixture. Output: assertions. Side effects: committed rows, removed. Role: D-070 typed refusal."""
     _c, _w, post, _ = http
     anon = uuid.uuid4()
     r = post(payload("bug"), key="u1", session=anon)
-    assert r.status_code == 200 and r.json()["ticket"]["priority"] == "P4" and r.json()["ticket"]["verified"] is False
-    assert post(payload("bug"), key="u2", session=anon).json()["created"] is True
-    r3 = post(payload("bug"), key="u3", session=anon)
-    assert r3.status_code == 429 and r3.json()["error"]["details"]["existing"] is not None
+    assert r.status_code == 403, r.text
+    err = r.json()["error"]
+    assert (err["code"], err["class"], err["changed"], err["retryable"]) == ("REQUESTER_UNKNOWN", "access_denied",
+                                                                              False, False)
+    assert err["details"] == {"reason": "requester_unknown", "verify_locked": False}
+    with psycopg.connect(owner_url) as o:  # the refusal is audited in its own transaction (review M-6)
+        (row,) = o.execute("SELECT event, decision, result_status, args_redacted->>'code' FROM audit_events "
+                           "WHERE session_id = %s", (anon,)).fetchall()
+    assert row == ("ticket_create_refused", "error", 403, "REQUESTER_UNKNOWN")
 
 
 def test_http_concurrent_creates_respect_the_daily_limit(http, owner_url):

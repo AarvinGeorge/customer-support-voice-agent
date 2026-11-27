@@ -56,7 +56,7 @@ identity:
   session_ttl_minutes: 120
 
 tickets:
-  priority_by_tier: { enterprise: P2, business: P2, pro: P3, free: P4, unverified: P4 }
+  priority_by_tier: { enterprise: P2, business: P2, pro: P3, free: P4 }
   enterprise_blocking_priority: P1
   target_label: { P1: "1 hour", P2_enterprise: "4 hours", P2: "8 hours", P3: "24 hours", P4: "72 hours" }
   queues: [billing, technical, account, approvals]
@@ -71,7 +71,7 @@ tickets:
     commitment: account
     human_requested: account
     other: technical
-  limits: { verified_per_account_per_day: 5, unverified_per_session: 2 }
+  limits: { verified_per_account_per_day: 5 }   # D-070: no unverified tickets, so no per-session cap
 
 reason_codes:
   ROLE_NOT_PERMITTED:

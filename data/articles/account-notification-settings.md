@@ -27,7 +27,7 @@ Each person has their own 4-digit support PIN. Support uses your account ID and 
 
 - In chat, enter your PIN only in the secure verification box. Never type it into a chat message.
 - In a voice conversation, enter your PIN in the secure card that appears on your screen. Do not say it aloud.
-- If verification fails 3 times in one conversation, support stops asking and opens a ticket so a person can help you.
+- If verification fails 3 times in one conversation, support stops asking. See How to reach support in Support, response times and escalation for what to do next.
 
 ## Account settings support can help with
 

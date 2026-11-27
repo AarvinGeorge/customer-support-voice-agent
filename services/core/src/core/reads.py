@@ -1,12 +1,12 @@
 """What: the account reads behind GET /v1/me/context, /v1/me/charges and /v1/me/tickets: profile, ticket lists
 filtered by role, action history, the open pending action and the charge resolver.
-Use when: a read route runs. Inputs: a connection, PolicyConfig, the clock and the verified Claims (or a session id for
-unverified ticket reads). Output: money, charge_label, action_label, build_profile, list_tickets, recent_actions,
+Use when: a read route runs. Inputs: a connection, PolicyConfig, the clock and the verified Claims (None for an
+unverified session). Output: money, charge_label, action_label, build_profile, list_tickets, recent_actions,
 open_pending, build_context, find_charges.
 Side effects: SELECTs only.
 Role: doc 07 s3.1 MeContext and s3.2. Who the caller is comes only from Claims (session_claims), never from a request
 field. Visibility: owner and billing_admin see the account, a member only their own tickets and actions (no amounts),
-an unverified session only its own session's tickets. Profile and preference reads are designed only (doc 09 s1.2);
+an unverified session none (D-070: it can own no ticket). Profile and preference reads are designed only (doc 09 s1.2);
 Profile is built here only because MeContext embeds it."""
 from __future__ import annotations
 
@@ -83,11 +83,11 @@ def list_tickets(conn: Any, now: datetime, *, claims: Claims | None, session_id:
     """What: the tickets the caller may see, newest first. Use when: GET /v1/me/tickets and the context.
     Inputs: connection, now, Claims (None for an unverified session), session id, status (open means open and
     pending_approval), optional last four digits, limit. Output: list of TicketView. Side effects: one SELECT.
-    Role: verified owner and billing_admin see the account, a verified member their own, an unverified session the
-    session's own unverified tickets."""
+    Role: verified owner and billing_admin see the account, a verified member their own; an unverified session sees
+    none, because every ticket has a verified requester (D-070), so there is nothing that session could own."""
     if claims is None:
-        scope, args = "session_id = %s AND verified = false", [session_id]
-    elif claims.permissions.billing_read:
+        return []
+    if claims.permissions.billing_read:
         scope, args = "account_id = %s", [claims.account_id]
     else:
         scope, args = "account_id = %s AND user_id = %s", [claims.account_id, claims.user_id]

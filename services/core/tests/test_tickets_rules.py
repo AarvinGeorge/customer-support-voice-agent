@@ -31,14 +31,7 @@ CLOCK = FixedClock(datetime(2026, 11, 27, 9, 30, tzinfo=ZoneInfo("America/New_Yo
 def test_priority_by_tier_and_blocking(tier, blocking, want):
     """What: verified priority comes from policy by tier; only Enterprise blocking becomes P1.
     Use when: pytest runs. Inputs: a tier and flag. Output: none. Side effects: none. Role: L1 s5 A3 table."""
-    assert priority_for(POLICY, tier=tier, verified=True, blocking=blocking) == want
-
-
-@pytest.mark.parametrize("tier", ["enterprise", "business", "pro", "free", None])
-def test_unverified_is_always_p4(tier):
-    """What: an unverified session is P4 whatever the claimed tier or the blocking flag. Use when: pytest runs.
-    Inputs: a tier. Output: none. Side effects: none. Role: L1 s5 A3 unverified rule."""
-    assert priority_for(POLICY, tier=tier, verified=False, blocking=True) == "P4"
+    assert priority_for(POLICY, tier=tier, blocking=blocking) == want
 
 
 def test_every_category_maps_to_a_queue_from_policy():
@@ -52,7 +45,7 @@ def test_every_category_maps_to_a_queue_from_policy():
 
 @pytest.mark.parametrize("priority,tier,want", [
     ("P1", "enterprise", "1 hour"), ("P2", "enterprise", "4 hours"), ("P2", "business", "8 hours"),
-    ("P3", "pro", "24 hours"), ("P4", "free", "72 hours"), ("P4", None, "72 hours")])
+    ("P3", "pro", "24 hours"), ("P4", "free", "72 hours")])
 def test_target_label(priority, tier, want):
     """What: the first-response label follows priority and, for P2, the tier. Use when: pytest runs.
     Inputs: priority, tier. Output: none. Side effects: none. Role: L1 s5 A3 first-response targets."""
@@ -103,7 +96,7 @@ def test_missing_idempotency_key_is_422(client):
 
 def test_missing_session_is_422(client):
     """What: no X-Session-Id is 422 (a ticket always belongs to a session). Use when: pytest runs.
-    Inputs: client. Output: none. Side effects: none. Role: unverified tickets are per session."""
+    Inputs: client. Output: none. Side effects: none. Role: the requester comes from the session claim (D-070)."""
     r = _post(client, {"Idempotency-Key": "k1"})
     assert r.status_code == 422
     assert r.json()["error"]["details"]["errors"][0]["loc"] == ["header", "x-session-id"]

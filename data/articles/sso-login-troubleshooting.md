@@ -69,7 +69,7 @@ If your workspace requires SSO, password sign-in is turned off. Sign in through 
 
 Your support PIN is separate from your sign-in password. Support uses your account ID and your 4-digit support PIN to confirm who you are.
 
-- If verification fails 3 times in one conversation, support opens a ticket so a person can help you.
+- If verification fails 3 times in one conversation, verification is locked for that conversation. See How to reach support in Support, response times and escalation.
 - After 5 failed attempts within 15 minutes, verification for the account is paused for 15 minutes.
 
 ## When SSO is broken for your whole company
