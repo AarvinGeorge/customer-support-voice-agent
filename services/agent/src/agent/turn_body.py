@@ -29,7 +29,10 @@ class SessionFlags(Protocol):
     Output: none. Side effects: database. Role: port (agent.sessions is the authority, doc 07 s2.4 Counting)."""
 
     async def set_awaiting_verification(self, session_id: str, awaiting: bool,
-                                        verified_user_id: str | None = None) -> None: ...
+                                        verified_user_id: str | None = None) -> None:
+        """What: set agent.sessions.awaiting_verification (and the verified user). Use when: verification asked, done or lapsed. Inputs: id, flag, user. Output: none.
+        Side effects: UPDATE. Role: port method."""
+        ...
 
 
 class PgSessionFlags:
