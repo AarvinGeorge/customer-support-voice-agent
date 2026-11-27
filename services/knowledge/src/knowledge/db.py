@@ -5,12 +5,14 @@ Side effects: opens a connection per call with a 1 s connect timeout and stateme
 Role: the only module that talks to Postgres; unit tests replace Database with a fake."""
 from __future__ import annotations
 
-from typing import Any
+import time
+from typing import Any, Callable
 
 import psycopg
 from psycopg.rows import dict_row
 
 
+CACHE_TTL_S = 30.0
 _LEG_COLUMNS = ("SELECT c.chunk_id, c.article_slug, a.title AS article_title, c.section_path, c.heading, c.header, "
                 "c.body, c.tiers, c.error_codes, c.policy_keys, c.injection_suspect, c.doc_version, "
                 "c.last_updated::text AS last_updated, c.content_hash, c.source_url")
@@ -25,6 +27,23 @@ class Database:
         """What: store the url. Use when: lifespan start. Inputs: url. Output: none. Side effects: none.
         Role: constructor."""
         self.url = url
+        self._cache: dict[str, tuple[float, Any]] = {}
+
+    def _cached(self, key: str, load: Callable[[], Any]) -> Any:
+        """What: a value kept for CACHE_TTL_S seconds. Use when: vocabulary and corpus_version are read on every
+        search. Inputs: key, loader. Output: the value; a failing refresh returns the stale value if there is one,
+        else re-raises. Side effects: may run the loader (one SELECT). Role: removes two round trips per request."""
+        hit = self._cache.get(key)
+        if hit and time.monotonic() - hit[0] < CACHE_TTL_S:
+            return hit[1]
+        try:
+            value = load()
+        except Exception:
+            if hit:
+                return hit[1]
+            raise
+        self._cache[key] = (time.monotonic(), value)
+        return value
 
     def _connect(self) -> psycopg.Connection[dict[str, Any]]:
         """What: open a connection with short timeouts. Use when: any method. Inputs: none.
@@ -47,10 +66,28 @@ class Database:
 
     def vocabulary(self) -> set[str]:
         """What: every error code found in the corpus (the closed vocabulary). Use when: normalizing a query.
-        Inputs: none. Output: set of codes. Side effects: one SELECT. Role: draft A decision A-8."""
-        with self._connect() as conn:
-            rows = conn.execute("SELECT DISTINCT unnest(error_codes) AS code FROM chunks").fetchall()
-        return {r["code"] for r in rows}
+        Inputs: none. Output: set of codes, cached 30 s. Side effects: one SELECT when the cache is cold.
+        Role: draft A decision A-8."""
+        def load() -> set[str]:
+            """What: read the codes. Use when: cache miss. Inputs: none. Output: set. Side effects: one SELECT.
+            Role: loader."""
+            with self._connect() as conn:
+                rows = conn.execute("SELECT DISTINCT unnest(error_codes) AS code FROM chunks").fetchall()
+            return {r["code"] for r in rows}
+        return self._cached("vocabulary", load)
+
+    def corpus_version(self) -> str:
+        """What: the corpus_version of the latest finished ingest run ("none" before any). Use when: search labels
+        its response. Inputs: none. Output: str, cached 30 s. Side effects: one SELECT when the cache is cold.
+        Role: cheap version read for the hot path (readyz uses status(), uncached)."""
+        def load() -> str:
+            """What: read the version. Use when: cache miss. Inputs: none. Output: str. Side effects: one SELECT.
+            Role: loader."""
+            with self._connect() as conn:
+                run = conn.execute("SELECT corpus_version FROM ingest_runs WHERE corpus_version IS NOT NULL "
+                                   "ORDER BY finished_at DESC LIMIT 1").fetchone()
+            return (run["corpus_version"] if run else None) or "none"
+        return self._cached("corpus_version", load)
 
     def vector_leg(self, vec: list[float], tiers: list[str], limit: int) -> list[dict]:
         """What: nearest chunks by cosine within the allowed tiers. Use when: search has a query vector.

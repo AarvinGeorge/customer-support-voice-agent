@@ -19,7 +19,14 @@ URL = "https://api.openai.com/v1/embeddings"
 
 class EmbeddingError(Exception):
     """What: an embedding call failed or returned bad data. Use when: caught by ingest (abort) or search
-    (keyword-only fallback). Inputs: message. Output: exception. Side effects: none. Role: one error type."""
+    (keyword-only fallback). Inputs: message, optional HTTP status. Output: exception. Side effects: none.
+    Role: one error type; `status` lets search retry only what can succeed on a retry."""
+
+    def __init__(self, message: str, status: int | None = None):
+        """What: keep the message and status. Use when: raising. Inputs: message, HTTP status or None.
+        Output: none. Side effects: none. Role: constructor."""
+        super().__init__(message)
+        self.status = status
 
 
 class OpenAIEmbedder:
@@ -84,7 +91,7 @@ class OpenAIEmbedder:
                 if resp.status_code in (429, 500, 502, 503, 504) and attempt < self.retries:
                     time.sleep(self.retry_sleep)
                     continue
-                raise EmbeddingError(f"embedding request failed with status {resp.status_code}")
+                raise EmbeddingError(f"embedding request failed with status {resp.status_code}", status=resp.status_code)
         return out
 
     async def aembed_one(self, text: str, timeout_s: float) -> list[float]:

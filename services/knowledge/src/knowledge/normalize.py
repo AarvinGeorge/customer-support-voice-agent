@@ -67,7 +67,7 @@ def _items(text: str) -> list[dict]:
     items: list[dict] = []
     for pre, core, post in toks:
         low = core.lower()
-        if "-" in core or "_" in core:
+        if "_" in core:
             comp = None
         elif core.isdigit():
             comp = core
@@ -122,6 +122,8 @@ def _spoken(text: str, vocab: set[str], codes: list[str]) -> str:
         for j in range(min(len(items), i + _MAX_WINDOW), i, -1):
             window = items[i:j]
             if any(w["comp"] is None for w in window):
+                continue
+            if any(re.search(r"[.?!,;:]", w["post"]) for w in window[:-1]):  # a sentence end splits a code
                 continue
             canon = compact.get("".join(w["comp"] for w in window))
             if canon:

@@ -74,6 +74,11 @@ class FakeDb:
         """What: readiness facts. Use when: readyz. Inputs: none. Output: dict. Side effects: none. Role: fake."""
         return {"chunks": 3, "corpus_version": "cv123"}
 
+    def corpus_version(self):
+        """What: the version the search response reports. Use when: search builds the response. Inputs: none.
+        Output: str. Side effects: none. Role: fake."""
+        return "cv123"
+
     def corpus(self):
         """What: empty corpus. Use when: corpus route. Inputs: none. Output: dict. Side effects: none. Role: fake."""
         return {"corpus_version": "cv123", "articles": [], "last_ingest_at": None}
@@ -208,7 +213,7 @@ def test_unknown_code_and_error_code_param(client):
     assert j["query"]["unknown_codes"] == ["E-SSO-999"] and j["query"]["codes"] == []
     j = client.post("/v1/search", json=body(query="login fails", error_code="E-SSO-401"), headers=AUTH).json()
     assert j["query"]["codes"] == ["E-SSO-401"]
-    assert j["query"]["unknown_codes"] == ["E-SSO-401"]  # no returned chunk carries it, so it is reported unknown
+    assert j["query"]["unknown_codes"] == []  # in the vocabulary, so never unknown even when no returned chunk carries it
 
 
 def test_hanging_embedding_returns_keyword_only_within_3s(client):
