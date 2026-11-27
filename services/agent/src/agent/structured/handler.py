@@ -25,6 +25,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from agent.clients.core_agent import CoreAgentClient
 from agent.escalation import Escalator, apology_is_last
 from agent.prompt import TurnContext, build_turn_message
+from agent.say import speak
 from agent.sse import TurnOutcome, TurnStream
 from agent.structured.confirm import ActionReply, Confirmer
 from agent.structured.grammar import is_strict_no, is_strict_yes
@@ -119,7 +120,7 @@ class StructuredInput:
         """What: a deterministic reply: human line plus AI line (id ingress-{turn_id}) go to the thread.
         Use when: every ending of step 13. Inputs: stream, prep, human line, text, end reason, say, final fields,
         state. Output: StructuredResult with an outcome. Side effects: none. Role: s2.4 step 15 append."""
-        say = say if say is not None else text
+        say = speak(say if say is not None else text)
         voice = prep.control.mode == "voice"
         outcome = TurnOutcome.fixed(text, end_reason=end_reason, say=say)
         if final_extra:
@@ -209,7 +210,7 @@ class StructuredInput:
         stream.emit("action.result", pending_action_id=pending.get("pending_action_id"),
                     action_type=str(pending.get("action_type") or "unknown"), outcome=reply.outcome,
                     changed=reply.changed, reason_codes=reply.reason_codes, policy_refs=reply.policy_refs,
-                    result_text=reply.say if voice else reply.text, ticket=reply.ticket)
+                    result_text=speak(reply.say) if voice else reply.text, ticket=reply.ticket)
         if reply.end_reason == "escalated":  # commit or submit failure ticket (doc 07 fixture s5_failures)
             self.escalator.emit(prep.control, "tool_failure", reply.ticket)
         if reply.needs_verification:

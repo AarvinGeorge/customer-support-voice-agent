@@ -431,7 +431,8 @@ def test_structured_input_requires_last_turn() -> None:
 # ---- voice/ask through the same Ingress ----
 
 async def test_voice_ask_returns_a_say_from_the_same_agent() -> None:
-    # Not a policy line: a policy draft with no search this turn is blocked by Gate 2 (review PR #52 I2).
+    # Not a policy line: with no search this turn the fake verifier's claim has no source, so Gate 2 blocks a policy
+    # draft (review PR #52 I2). The spoken-form rewrite is covered by tests/test_say.py.
     w = World(AIMessage(content="Sure, let me look into that for you."))
     w.vstore.voice["vs-1"] = VoiceSessionRow("vs-1", SID, w.voice.now(), w.voice.now())
     body = {"client_turn_id": str(uuid.uuid4()), "voice_session_id": "vs-1", "realtime_call_id": "call_1",

@@ -21,12 +21,14 @@ from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import AIMessage, RemoveMessage
 
 from agent.gates import ScopeClassifier, next_weak_streak, run_scope_check
+from agent.say import speak
 from agent.turn_control import Route, TurnControl, current_control
 
 VERIFY_LINE = ("To look at your account I need to verify you. Please enter your account ID and support PIN in "
                "the secure card.")
-VERIFY_SAY = ("To look at your account I need to verify you. Please tell me your account ID and your four-digit "
-              "support PIN, or type them into the card on screen.")
+# Voice uses the card too (doc 07 s14 row 18 fallback; rule V spoken verification is designed only, doc 09 s1.2).
+VERIFY_SAY = ("To look at your account I need to verify you. Please enter your account ID and support PIN in "
+              "the secure card on your screen. I can't take them by voice.")
 DECLINE_OFF_TOPIC_LINE = ("I can only help with Quillstack: your account, billing, tickets and how the product "
                           "works. Is there something there I can help with?")
 # Escalation leads per reason (doc 07 s6.5 lines; tool_failure from the S5 fixture); the ticket clause follows.
@@ -91,15 +93,15 @@ def route_reply(control: TurnControl) -> RouteReply:
     if route is None:
         raise ValueError("no route set")
     if route.kind == "verify":
-        return RouteReply(VERIFY_LINE, VERIFY_SAY, "verification_requested", verification_reason=route.reason)
+        return RouteReply(VERIFY_LINE, speak(VERIFY_SAY), "verification_requested", verification_reason=route.reason)
     if route.kind == "readback":
         rb = route.readback or {}
-        return RouteReply(str(rb.get("chat", "")), str(rb.get("voice") or rb.get("chat", "")), "readback")
+        return RouteReply(str(rb.get("chat", "")), speak(str(rb.get("voice") or rb.get("chat", ""))), "readback")
     if route.kind == "decline_off_topic":
-        return RouteReply(DECLINE_OFF_TOPIC_LINE, DECLINE_OFF_TOPIC_LINE, "declined_off_topic")
+        return RouteReply(DECLINE_OFF_TOPIC_LINE, speak(DECLINE_OFF_TOPIC_LINE), "declined_off_topic")
     text = _escalation_text(control)
     end_reason = route.reason if route.reason in ("deadline", "limit_reached") else "escalated"
-    return RouteReply(text, text, end_reason, escalated=True, ticket=route.ticket)
+    return RouteReply(text, speak(text), end_reason, escalated=True, ticket=route.ticket)
 
 
 def route_message(control: TurnControl) -> AIMessage:
