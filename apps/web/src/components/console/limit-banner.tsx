@@ -19,7 +19,7 @@ import type { LimitNotice } from "@/lib/turns/store";
  * Use when: the banner countdown and the input bar lock.
  * Inputs: the deadline in ms (null for none) and a callback for when it passes.
  * Output: seconds left (0 when none).
- * Side effects: an interval while time is left; calls onDone once at zero.
+ * Side effects: a one-second interval while a deadline is set (the owner clears it at zero); calls onDone once when it reaches zero.
  * Role: hook.
  */
 export function useSecondsLeft(untilMs: number | null, onDone: () => void): number {

@@ -1,5 +1,5 @@
 """What: offline tests for the S5 e2e module's helpers (reseed per case, the fallback badge check), with no stack.
-Use when: CI and local runs; the e2e tests themselves are skipped unless EVALS_E2E=1.
+Use when: CI and local runs; the e2e tests themselves are deselected by default (run with -m e2e and EVALS_E2E=1).
 Inputs: none. Output: pytest results. Side effects: none (subprocess, runner and graders are faked).
 Role: keeps the e2e harness honest; both tests come from the live rerun after PRs #52 and #58.
 """
