@@ -197,5 +197,5 @@ def test_c_agent_capabilities_state_what_the_agent_can_do_once_verified():
     # the overdue invoice." had no source: the capabilities text never said what verification unlocks.
     from agent.gates import AGENT_CAPABILITIES
 
-    assert "Once the customer is verified, it can read their account, charges, invoices and tickets" in AGENT_CAPABILITIES
+    assert "it can also read their account, charges, invoices and tickets" in AGENT_CAPABILITIES
     assert "It never sees what the customer types into the verification card." in AGENT_CAPABILITIES

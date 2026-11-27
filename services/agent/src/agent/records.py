@@ -5,7 +5,7 @@ system did; and session_tickets, the tickets opened in the session as the thread
 Use when: every code path that acts (agent.escalation, the step 13 handler, and any later path such as the held
 escalation of D-070) calls action_record or ticket_record and writes the message with its own thread write.
 Inputs: the turn's TurnControl, the action kind, a plain sentence, the facts.
-Output: RECORD_ID_PREFIX, action_record, ticket_record, change_record, session_tickets (bound to the verification).
+Output: RECORD_ID_PREFIX, UNBOUND, stamp_carried, action_record, ticket_record, change_record, session_tickets.
 Side effects: none (builders only; the caller writes the message).
 Role: one generic writer; ids are "record-{turn_id}-{kind}", so a repeated write of the same record replaces it.
 response_metadata is checkpointed and never sent to a model; the content is what the model reads.
@@ -57,26 +57,42 @@ def change_record(control: TurnControl, kind: str, text: str, *, pending_action_
     return action_record(control, kind, f"Our system did this on the customer's yes: {text}", **facts)
 
 
+UNBOUND = object()  # a missing stamp (written before the stamp existed): never carried over
+
+
+def stamp_carried(bound: Any, key: str | None, public: bool) -> bool:
+    """What: the one binding rule for anything carried from an earlier turn (review PR #71 I3, N3, N4, m8): a stamp
+    equal to the current identity is carried; a public result (stamped None: fetched or written while unverified,
+    holding no account data) is carried under any identity; a missing stamp is never carried.
+    Use when: tool results and code lines (agent.gates) and the session ticket list. Inputs: the stamp (UNBOUND
+    when missing), the current identity key, whether the source kind may be public. Output: bool.
+    Side effects: none. Role: rule. It does not restart the window at a verification change: after A, a lapse and
+    A again, A's earlier results are A's and come back (correct for privacy)."""
+    if bound is UNBOUND:
+        return False
+    if bound is None:
+        return public
+    return bound == key
+
+
 def session_tickets(messages: list[BaseMessage], key: str | None) -> list[str]:
     """What: the display ids of the tickets opened in this session under the current verification, oldest first,
     each once: from code records (ticket, or a submit with its approval ticket) and from create_ticket results
-    (ToolGuard's code-held artifact), each only when its bound_to stamp equals key (review PR #71 N3: tickets
-    opened as another account, or before a lapse, are not listed).
+    (ToolGuard's code-held artifact), each by stamp_carried (review PR #71 N3, m8: tickets opened as another
+    account, or before a lapse, are not listed; a public one, stamped None, is).
     Use when: Gate 2 session_state. Inputs: thread messages, the current identity key. Output: list of displays.
     Side effects: none. Role: code-held facts only (never model or customer text)."""
     out: list[str] = []
     for m in messages:
-        display, bound = None, _MISSING
+        display, bound = None, UNBOUND
         if isinstance(m, AIMessage) and str(m.id or "").startswith(RECORD_ID_PREFIX):
             meta = m.response_metadata or {}
-            display, bound = (meta.get("qs_action") or {}).get("display"), meta.get("bound_to", _MISSING)
+            display, bound = (meta.get("qs_action") or {}).get("display"), meta.get("bound_to", UNBOUND)
         elif isinstance(m, ToolMessage) and m.name == "create_ticket" and isinstance(m.artifact, dict):
             ticket = m.artifact.get("ticket")
             display = ticket.get("display") if isinstance(ticket, dict) else None
-            bound = m.artifact.get("bound_to", _MISSING)
-        if display and bound is not _MISSING and bound == key and display not in out:
+            bound = m.artifact.get("bound_to", UNBOUND)
+        if display and stamp_carried(bound, key, True) and display not in out:
             out.append(str(display))
     return out
 
-
-_MISSING = object()

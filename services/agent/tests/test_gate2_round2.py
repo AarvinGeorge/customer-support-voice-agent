@@ -224,3 +224,73 @@ async def test_n3_the_turn_runs_under_its_verification_and_its_route_line_is_sta
     route = [m for m in values["messages"] if str(m.id or "").startswith(line_ids.ROUTE)]
     assert route and identity_key(values) is not None
     assert route[-1].response_metadata["bound_to"] == identity_key(values)
+
+
+def test_d070_capabilities_and_the_public_tool_set_follow_the_contract_v0_set():
+    # D-070 (PR #78): no ticket without a verified requester, so the agent's own capability text must not claim a
+    # ticket "in any conversation", and the public (carried) tool set is the contract's V0 set.
+    from contracts.tools import VISIBILITY
+
+    from agent.gates import AGENT_CAPABILITIES, V0_TOOLS
+
+    assert V0_TOOLS == frozenset(VISIBILITY["V0"])
+    assert "in any conversation" not in AGENT_CAPABILITIES
+    assert "Once the customer is verified, it can open a ticket for the Quillstack support team" in AGENT_CAPABILITIES
+
+
+async def test_m6_each_verifier_and_scope_classifier_call_is_counted_once_on_its_turn():
+    # Doc 07 s2.3: usage.model_calls equals the LangSmith llm run count, so every gate call is recorded on the turn.
+    from agent.gates import ScopeClassifier
+
+    class Fail:
+        """What: a model that raises. Use when: this test. Inputs: any. Output: never. Side effects: raises.
+        Role: fake."""
+
+        model = "fake-fail"
+
+        async def ainvoke(self, *a: Any, **k: Any) -> Any:
+            """What: raise. Use when: a call. Inputs: any. Output: never. Side effects: raises. Role: fake."""
+            raise RuntimeError("down")
+
+    class On:
+        """What: a scope model answering ON. Use when: this test. Inputs: any. Output: AIMessage.
+        Side effects: none. Role: fake."""
+
+        model = "fake-scope"
+
+        async def ainvoke(self, *a: Any, **k: Any) -> Any:
+            """What: answer ON. Use when: a call. Inputs: any. Output: AIMessage. Side effects: none. Role: fake."""
+            return AIMessage("ON", usage_metadata={"input_tokens": 9, "output_tokens": 1, "total_tokens": 10})
+
+    for model, expect in ((On(), "fake-scope"), (Fail(), "fake-fail")):
+        control = TurnControl(session_id="s", turn_id="t")
+        await ScopeClassifier(model).on_topic(control, "hello")
+        assert [name for name, _ in control.gate_calls] == [expect]
+    for model in (CitingVerifierModel(no_claims_reason="conversation"), Fail()):
+        control = TurnControl(session_id="s", turn_id="t")
+        ev = session_evidence({}, [HumanMessage("hi")], control)
+        await GroundingVerifier(model, timeout_s=0.5, min_s=0.0).verify(control, "Hello.", ev)
+        assert len(control.gate_calls) == 1
+
+
+async def test_m10_the_warm_up_is_not_counted_on_any_turn():
+    from agent.turn_control import bind_turn_control
+
+    turn = TurnControl(session_id="s", turn_id="live-turn")
+    bind_turn_control(turn)  # a turn bound in this context must not receive the warm-up's call
+    model = CitingVerifierModel(no_claims_reason="conversation")
+    assert await warm_up_verifier(GroundingVerifier(model), timeout_s=1.0) is True
+    assert len(model.seen) == 1 and turn.gate_calls == []
+
+
+def test_m8_session_tickets_use_the_one_binding_rule():
+    control = TurnControl(session_id="s", turn_id="t0")  # identity None: opened while unverified (public stamp)
+    public = ticket_record(control, {"ticket_id": "TCK-2", "display": "ticket ending 2002"}, "deadline")
+    control.identity = P_KEY
+    priya = ticket_record(TurnControl(session_id="s", turn_id="t1", identity=P_KEY),
+                          {"ticket_id": "TCK-1", "display": "ticket ending 1001"}, "deadline")
+    unstamped = AIMessage("[System record] x", id="record-t2-ticket",
+                          response_metadata={"qs_action": {"kind": "ticket", "display": "ticket ending 3003"}})
+    msgs: list[Any] = [public, priya, unstamped]
+    assert session_tickets(msgs, P_KEY) == ["ticket ending 2002", "ticket ending 1001"]
+    assert session_tickets(msgs, D_KEY) == ["ticket ending 2002"]

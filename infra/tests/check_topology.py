@@ -3,7 +3,7 @@ Use when: after editing compose.yaml or compose.override.yaml, and in CI (needs 
 Inputs: none (runs `docker compose config --format json` from the repo root; needs the .env names or .env.example copied to .env).
 Output: prints PASS lines; exit 1 with the failed check names.
 Side effects: runs one docker compose subprocess; no containers started.
-Role: proves doc 06 s10 and doc 07 s15.2: core and knowledge are off the edge network, backend is internal, each service gets only its own variables."""
+Role: proves doc 06 s10, doc 07 s15.2 and D-071 part 4 (log rotation on every service): core and knowledge are off the edge network, backend is internal, each service gets only its own variables."""
 from __future__ import annotations
 
 import json
@@ -67,6 +67,10 @@ def main() -> int:
         check(f"{agent} stop_grace_period 1m0s", services[agent].get("stop_grace_period") == "1m0s")
     for svc in ("agent_a", "agent_b", "core", "knowledge", "postgres", "redis"):
         check(f"{svc} has a healthcheck", "healthcheck" in services[svc])
+    # D-071 part 4: container logs are rotated (bounded disk); durable evidence is turn_events plus LangSmith
+    want_log = {"driver": "json-file", "options": {"max-size": "10m", "max-file": "5"}}
+    for svc in sorted(services):
+        check(f"{svc} logging json-file 10m x 5", services[svc].get("logging") == want_log)
     for svc, banned in FORBIDDEN_ENV.items():
         leaked = banned & set(services[svc].get("environment", {}))
         check(f"{svc} env has none of {sorted(banned)[:2]}...", not leaked)

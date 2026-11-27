@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from contracts import limits
+from contracts.tools import VISIBILITY
 from contracts.trust import escape_untrusted, escape_untrusted_obj
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
@@ -38,7 +39,7 @@ from agent import line_ids
 from agent.deadline import clamp_timeout
 from agent.models.structured import structured_output_kwargs
 from agent.models.usage import reply_truncated
-from agent.records import session_tickets
+from agent.records import UNBOUND, session_tickets, stamp_carried
 from agent.turn_control import Route, TurnControl
 from agent.untrusted import escape_tags, harden, harden_obj
 
@@ -342,15 +343,16 @@ def turn_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
 
 ACCOUNT_SOURCE_ID = "account_context"
 CAPABILITIES_SOURCE_ID = "agent_capabilities"
-# What the agent can always do (doc 07 s5.2: create_ticket is in V0, V1 and V2). Fixed code text, so the agent's own
+# What the agent can do (doc 07 s5.2 with D-070: create_ticket only once verified). Fixed code text, so the agent's own
 # ticket offer ("I can open a ticket for our support team") has a source; it states no outcome, refund or deadline.
-AGENT_CAPABILITIES = ("This support agent can open a ticket for the Quillstack support team in any conversation, and "
-                      "a person on that team follows the ticket up. It can verify the customer in a secure card, "
-                      "search the help articles, and prepare an account change that runs only after the customer's "
-                      "yes. It never sees what the customer types into the verification card. Once the customer is "
-                      "verified, it can read their account, charges, invoices and tickets "
-                      "and look into their request. It cannot itself approve a refund, credit, discount or exception, "
-                      "and it cannot promise when the team will reply.")
+AGENT_CAPABILITIES = ("This support agent can verify the customer in a secure card and search the help articles. "
+                      "It never sees what the customer types into the verification card. Once the customer is "
+                      "verified, it can open a ticket for the Quillstack support team, and a person on that team "
+                      "follows the ticket up; it can also read their account, charges, invoices and tickets, look "
+                      "into their request, and prepare an account change that runs only after the customer's yes. "
+                      "While the customer is not verified it cannot open a ticket: it asks them to verify first, or "
+                      "points them to How to reach support. It cannot itself approve a refund, credit, discount or "
+                      "exception, and it cannot promise when the team will reply.")
 SESSION_SOURCE_ID = "session_state"
 FIXED_LINE_PREFIXES = (line_ids.ROUTE, line_ids.INGRESS)  # RouterMiddleware and ingress lines (agent.structured.pending ids)
 FIXED_LINES_MAX = 3
@@ -373,7 +375,7 @@ GATE2_EVIDENCE_USER_TURNS = 6  # D-065: the session window, in user turns (the c
 # token, so prose is over-counted; id-heavy JSON (uuids, timestamps) can run under 3, so it is an estimate, not a bound.
 # The budget is far below the verifier's context, so an under-count costs latency, not an overflow.
 EVIDENCE_MAX_TOKENS = 12_000
-V0_TOOLS = frozenset({"create_ticket", "request_verification", "search_kb"})  # doc 07 s5.2 V0 (unverified)
+V0_TOOLS = frozenset(VISIBILITY["V0"])  # doc 07 s5.2 V0 (unverified), D-070: no create_ticket
 
 
 def evidence_tokens(text: str) -> int:
@@ -424,7 +426,6 @@ def identity_key(values: dict[str, Any]) -> str | None:
     return f"{claims.get('user_id')}|{claims.get('account_id')}"
 
 
-_UNBOUND = object()  # a result with no bound_to stamp (written before the stamp existed): never carried over
 
 
 def _artifact(msg: ToolMessage) -> dict[str, Any]:
@@ -442,37 +443,22 @@ def _grounded_chunks(msg: ToolMessage) -> list[dict[str, Any]]:
     return [c for c in chunks if isinstance(c, dict) and c.get("chunk_id")] if isinstance(chunks, list) else []
 
 
-def _stamp_carried(bound: Any, key: str | None, public: bool) -> bool:
-    """What: the one binding rule for anything carried from an earlier turn (review PR #71 I3, N3, N4): a stamp
-    equal to the current identity is carried; a public result (stamped None: fetched or written while unverified,
-    holding no account data) is carried under any identity; a missing stamp is never carried.
-    Use when: tool results (_carried), code lines (_line_carried), the session ticket list. Inputs: the stamp
-    (_UNBOUND when missing), the current identity key, whether the source kind may be public. Output: bool.
-    Side effects: none. Role: rule. It does not restart the window at a verification change: after A, a lapse and
-    A again, A's earlier results are A's and come back (correct for privacy)."""
-    if bound is _UNBOUND:
-        return False
-    if bound is None:
-        return public
-    return bound == key
-
-
 def _carried(msg: ToolMessage, current: set[int], key: str | None) -> bool:
     """What: whether a tool result may be evidence now: this turn's results always; an earlier one by
-    _stamp_carried, public only for V0 tools (search_kb, create_ticket, request_verification) stamped None, so a
+    agent.records.stamp_carried, public only for the contract V0 tools (search_kb, request_verification) stamped None, so a
     public article read before verifying stays citable after it (N4) while account and tier-scoped results stay
     bound to their identity. Use when: session_evidence. Inputs: message, ids of this turn's messages, current
     identity key. Output: bool. Side effects: none. Role: rule."""
     if id(msg) in current:
         return True
-    return _stamp_carried(_artifact(msg).get("bound_to", _UNBOUND), key, str(msg.name) in V0_TOOLS)
+    return stamp_carried(_artifact(msg).get("bound_to", UNBOUND), key, str(msg.name) in V0_TOOLS)
 
 
 def _line_carried(msg: AIMessage, key: str | None) -> bool:
     """What: whether a code-written line may be a fixed_line source (N3): its bound_to stamp (written by
-    line_ids.code_line) under _stamp_carried, public when stamped None. Use when: session_evidence.
+    line_ids.code_line) under agent.records.stamp_carried, public when stamped None. Use when: session_evidence.
     Inputs: the line, current identity key. Output: bool. Side effects: none. Role: rule."""
-    return _stamp_carried((msg.response_metadata or {}).get("bound_to", _UNBOUND), key, True)
+    return stamp_carried((msg.response_metadata or {}).get("bound_to", UNBOUND), key, True)
 
 
 def _turns_ago(messages: list[BaseMessage], index: int) -> int:
@@ -726,7 +712,9 @@ class GroundingVerifier:
     async def verify_once(self, control: TurnControl, draft: str, evidence: SessionEvidence,
                           timeout_s: float) -> GroundingResult:
         """What: one verifier call outside a turn with its own timeout, the model's client timeout raised to match
-        when the model has one (ChatAnthropic, ChatOpenAI: default_request_timeout / request_timeout).
+        when the model has one (ChatAnthropic, ChatOpenAI: default_request_timeout / request_timeout). Limit (review
+        PR #71 m9): the copy gets the longer client timeout only while the original has not built its HTTP client
+        yet, which holds at start-up (the warm-up is the first call); a later repeat would keep the 5 s client.
         Use when: warm_up_verifier. Inputs: throwaway control, draft, evidence, timeout. Output: GroundingResult.
         Side effects: one model call. Role: the start-up warm-up path (review PR #71 N2)."""
         model = self.model

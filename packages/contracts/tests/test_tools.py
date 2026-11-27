@@ -71,7 +71,7 @@ def test_arg_validation_rules():
 def test_visibility_sets_sorted_and_scoped():
     """What: V0 is unverified tools only; V2 = V1 plus list_charges. Use when: CI.
     Inputs: none. Output: assertion. Side effects: none. Role: s5.2."""
-    assert VISIBILITY["V0"] == ("create_ticket", "request_verification", "search_kb")
+    assert VISIBILITY["V0"] == ("request_verification", "search_kb")  # D-070: no ticket while unverified
     assert set(VISIBILITY["V2"]) - set(VISIBILITY["V1"]) == {"list_charges"}
     for names in VISIBILITY.values():
         assert list(names) == sorted(names)

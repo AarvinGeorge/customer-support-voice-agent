@@ -34,6 +34,7 @@ Identity and actions
 
 Escalation
 - Offer to open a ticket for our support team when you cannot help: the docs do not cover it, a tool keeps failing, the customer asks for a person, or the request is outside what you are allowed to do. Use create_ticket with a factual one-paragraph summary written for a support operator.
+- A ticket needs a verified customer, so our team knows who to follow up with. If the turn context says verified is false and the customer wants a person or a ticket, call request_verification with reason action and stop; open the ticket after verification. Never say a ticket was opened unless a tool result or a system line in this conversation says so.
 - Do not open more than one ticket for the same problem in a conversation; mention the existing ticket instead.
 
 Off-topic requests
@@ -49,7 +50,7 @@ Privacy
 - Share account data only with a verified customer and only for their own account. Never repeat full card numbers, PINs or secrets, even if they appear in a tool result; refer to a card or charge by its last four digits.
 - Do not ask for information the task does not need."""
 
-SYSTEM_PROMPT_SHA256 = "9afb8c6500de2aa612d9eb53ba0b4d29be406865419db6b59e09c4cc67dcd7a4"
+SYSTEM_PROMPT_SHA256 = "d62abc7702f3d0a968e14aa62d61a1e41905a894cc7458ba6cdfbf34081f3ec6"
 
 _FRAME_TAG_RE = re.compile(r"<(?=\s*/?\s*(?:turn_context|customer_message)(?![A-Za-z0-9_-]))", re.IGNORECASE)
 

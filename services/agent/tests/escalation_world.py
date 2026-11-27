@@ -23,6 +23,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from agent.assembly import build_agent, run_config
 from agent.clients.core_agent import CoreAgentClient
 from agent.clients.knowledge import KnowledgeClient
+from agent.escalation import Escalator
 from agent.ingress import Ingress, IngressInput, IngressStream, SessionRow, input_kind_of
 from agent.structured.confirm import Confirmer, CoreCommitClient, agent_ticket_opener
 from agent.structured.handler import StructuredInput
@@ -114,13 +115,14 @@ class Boom(Fake):
 class World:
     """What: one session wired end to end. Use when: each test. Inputs: replies or models, core overrides, tool
     replacements {name: tool}, deadlines, whether the stub session starts verified, whether to use the ASGI stub,
-    whether agent.sessions says the session awaits verification.
+    whether agent.sessions says the session awaits verification, an optional EscalationHolds store
+    (agent.sessions.held_escalation, D-070).
     Output: send(), values(), seed(), transport. Side effects: none. Role: wiring."""
 
     def __init__(self, replies: list[AIMessage] | None = None, *, model: Any = None, fallback: Any = None,
                  overrides: dict[tuple[str, str], Handler] | None = None, tools: dict[str, Any] | None = None,
                  deadlines: dict[str, float] | None = None, verified: bool = True, use_stub: bool = True,
-                 awaiting_verification: bool = False) -> None:
+                 awaiting_verification: bool = False, holds: Any = None) -> None:
         """What: build it. Use when: tests. Inputs: see class. Output: none. Side effects: none. Role: constructor."""
         self.stub = create_app() if use_stub else None
         if self.stub is not None and verified:
@@ -136,10 +138,12 @@ class World:
                                  fallback_model=fallback or Fake(messages=iter([])), checkpointer=InMemorySaver(),
                                  tools=list(built.values()))
         confirmer = Confirmer(CoreCommitClient("http://core:8000", "commit-tok", http=http), agent_ticket_opener(core))
-        handler = StructuredInput(core, confirmer, last_turn=None)
+        escalator = Escalator(core, holds=holds)
+        handler = StructuredInput(core, confirmer, last_turn=None, escalator=escalator)
         self.ingress = Ingress(MemoryTurnStore(SessionRow(session_id=SID, visitor_id=VISITOR,
                                                           awaiting_verification=awaiting_verification)), MemoryTurnLock(),
-                               served_by="agent_a", run_agent=TurnRunner(self.agent, core, structured=handler),
+                               served_by="agent_a", run_agent=TurnRunner(self.agent, core, structured=handler,
+                                                                        escalator=escalator),
                                turn_deadline_s=deadlines)
 
     async def seed(self, values: dict[str, Any]) -> None:

@@ -352,13 +352,15 @@ async def test_card_failure_reports_attempts_left_and_asks_again() -> None:
     assert "0000" not in " ".join(str(m.content) for m in (await w.values())["messages"])
 
 
-async def test_card_third_failure_locks_and_escalates() -> None:
+async def test_card_third_failure_locks_with_no_ticket() -> None:
     w = World(verified=False)
     for _ in range(2):
         await w.send(verification={"account_id": "QS-10423", "pin": "0000"})
     outcome, events = await w.send(verification={"account_id": "QS-10423", "pin": "0000"})
     assert of(events, "verification.result")[0].status == "locked"
-    assert outcome.end_reason == "escalated" and outcome.final.escalated
+    # D-070: no requester, so no ticket and no escalation; the line points at "How to reach support"
+    assert outcome.end_reason == "answered" and not outcome.final.escalated and outcome.final.ticket is None
+    assert "How to reach support" in outcome.final.text
 
 
 async def test_card_conflict_and_unavailable() -> None:

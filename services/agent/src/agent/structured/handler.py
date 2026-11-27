@@ -65,7 +65,7 @@ class StructuredInput:
         Output: StructuredResult. Side effects: see module. Role: entry."""
         body = getattr(inp, "body", None)
         if body is not None and getattr(body, "verification", None) is not None:
-            return await verify_card(stream, prep.control, body.verification, self.core, self.flags)
+            return await verify_card(stream, prep.control, body.verification, self.core, self.flags, self.escalator)
         if body is not None and getattr(body, "ticket_offer", None) is not None:  # s6.7 Create ticket button
             return await self._ticket_offer(stream, prep, TICKET_OFFER_PRESSED)
         pending = prep.memory.current_pending
@@ -138,6 +138,8 @@ class StructuredInput:
         Use when: the ticket_offer body, or a voice strict yes right after the apology. Inputs: stream, prep, human
         line. Output: result. Side effects: at most one ticket and one escalated event. Role: s6.7 button flow."""
         text, end_reason, ticket = await self.escalator.ticket_offer(prep.control, list(prep.values.get("messages") or []))
+        if prep.control.awaiting_verification and self.flags is not None:  # D-070 hold: the card was requested
+            await self.flags.set_awaiting_verification(prep.control.session_id, True)
         return self._reply(stream, prep, human, text, end_reason,
                            final_extra={"escalated": end_reason == "escalated", "ticket": ticket},
                            records=[ticket_record(prep.control, ticket, "model_unavailable")] if ticket else [])

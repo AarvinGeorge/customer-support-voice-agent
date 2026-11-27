@@ -28,6 +28,7 @@ from agent.assembly import build_agent_from_registry
 from agent.clients.core_agent import CoreAgentClient
 from agent.clients.knowledge import KnowledgeClient
 from agent.gates import GroundingVerifier, warm_up_verifier
+from agent.escalation import EscalationHolds, Escalator
 from agent.ingress import CallKeys, Ingress, IngressInput, MergeTranscript, PgTurnStore, RedisTurnLock, TurnLock
 from agent.settings import Settings, secret_problem
 from agent.pin_guard import TypedPinRefusal
@@ -104,17 +105,20 @@ def start_verifier_warm_up(verifier: Any, provider: str) -> "asyncio.Task[bool] 
 
 def build_ingress(runtime: Any, *, store: PgTurnStore | Any, lock: TurnLock, served_by: str, commit: CoreCommitClient,
                   flags: SessionFlags | None, call_keys: CallKeys | None = None,
-                  merge_transcript: MergeTranscript | None = None, **extra: Any) -> Ingress:
+                  merge_transcript: MergeTranscript | None = None, holds: EscalationHolds | None = None,
+                  **extra: Any) -> Ingress:
     """What: the one Ingress for chat and voice, with the TurnRunner body: StructuredInput (verification card,
     ticket_offer, confirm press, strict yes or no) on the agent client, the Confirmer on the commit client, and
     last_turn from the same turn store (so a typed yes after a delivered read-back commits).
     Use when: wire_app; tests with memory stores. Inputs: AgentRuntime (agent, core, registry), turn store (with
-    last_turn), turn lock, replica name, commit client, session flags, voice call keys, transcript merger, extra
-    Ingress keyword arguments (trajectory). Output: Ingress. Side effects: none. Role: wiring."""
+    last_turn), turn lock, replica name, commit client, session flags, voice call keys, transcript merger, the
+    escalation hold store (D-070; production passes the same PgSessionFlags), extra Ingress keyword arguments
+    (trajectory). Output: Ingress. Side effects: none. Role: wiring."""
     confirmer = Confirmer(commit, agent_ticket_opener(runtime.core))
-    structured = StructuredInput(runtime.core, confirmer, flags=flags, last_turn=store.last_turn)
+    escalator = Escalator(runtime.core, holds=holds)  # one escalator: the loop, step 13 and the card share the hold
+    structured = StructuredInput(runtime.core, confirmer, flags=flags, last_turn=store.last_turn, escalator=escalator)
     body = TurnRunner(runtime.agent, runtime.core, structured=structured, flags=flags,
-                      cost_of=runtime.registry.cost_for_model)
+                      cost_of=runtime.registry.cost_for_model, escalator=escalator)
     return Ingress(store, lock, served_by=served_by, run_agent=body, call_keys=call_keys,
                    merge_transcript=merge_transcript,
                    refuse_typed_pin=TypedPinRefusal(runtime.agent, flags), flags=flags, **extra)
@@ -145,9 +149,10 @@ def wire_app(app: FastAPI, cfg: Settings) -> Ingress | None:
         return None
     extra = {"trajectory": state.trajectory} if getattr(state, "trajectory", None) is not None else {}
     store = PgTurnStore(state.pg_pool)
+    flags = PgSessionFlags(state.pg_pool)  # also the D-070 escalation hold store (agent.sessions)
     ingress = build_ingress(runtime, store=store, lock=RedisTurnLock(state.redis), served_by=cfg.served_by,
-                            commit=commit, flags=PgSessionFlags(state.pg_pool), call_keys=RedisCallKeys(state.redis),
-                            merge_transcript=TranscriptMerger(PgVoiceStore(state.pg_pool)), **extra)
+                            commit=commit, flags=flags, call_keys=RedisCallKeys(state.redis),
+                            merge_transcript=TranscriptMerger(PgVoiceStore(state.pg_pool)), holds=flags, **extra)
     state.ingress = ingress
     if getattr(state, "voice", None) is not None:
         state.voice.ingress = ingress
@@ -251,6 +256,9 @@ def wiring_gaps(app: Any) -> tuple[list[str], list[str]]:
                 gaps.append("last_turn: StructuredInput has no last_turn, every typed yes would repeat the read-back")
             if body.flags is None:
                 gaps.append("session flags: the TurnRunner has no flags, awaiting_verification would never be set")
+            if body.escalator.holds is None or structured.escalator is not body.escalator:
+                gaps.append("escalation holds: an unverified escalation would not be held for the verification card "
+                            "(D-070), or the loop and the card use different escalators")
             if body.cost_of is None:
                 gaps.append("cost_of: the TurnRunner has no price lookup, cost_usd_est would stay 0")
     return gaps, pending_safety(getattr(getattr(ingress, "run_agent", None), "agent", None))
