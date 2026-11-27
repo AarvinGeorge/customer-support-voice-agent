@@ -57,7 +57,10 @@ class ModelRegistry:
         """What: USD estimate for usage under a role's price. Use when: filling cost_usd_est.
         Inputs: role, Usage. Output: float. Side effects: none. Role: price math wrapper.
         """
-        return cost_usd_est(usage, self.spec(role).price)
+        price = self.spec(role).price
+        if price is None:  # the config validator requires a price on every role
+            raise ValueError(f"role {role}: price block is required")
+        return cost_usd_est(usage, price)
 
     def usage_of(self, message: AIMessage) -> Usage:
         """What: normalized usage of a model message. Use when: after each model call.

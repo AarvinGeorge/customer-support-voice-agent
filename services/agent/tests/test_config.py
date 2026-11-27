@@ -43,46 +43,54 @@ def test_voice_block_from_lane_c_is_preserved():
 
 
 def test_unknown_top_level_key_fails(tmp_path):
-    d = _doc(); d["surprise"] = 1
+    d = _doc()
+    d["surprise"] = 1
     with pytest.raises(ValidationError):
         load_models_config(_write(tmp_path, d))
 
 
 def test_unknown_role_key_fails(tmp_path):
-    d = _doc(); d["roles"]["agent"]["temprature"] = 0
+    d = _doc()
+    d["roles"]["agent"]["temprature"] = 0
     with pytest.raises(ValidationError):
         load_models_config(_write(tmp_path, d))
 
 
 def test_unknown_price_key_fails(tmp_path):
-    d = _doc(); d["roles"]["agent"]["price"]["inptu"] = 1
+    d = _doc()
+    d["roles"]["agent"]["price"]["inptu"] = 1
     with pytest.raises(ValidationError):
         load_models_config(_write(tmp_path, d))
 
 
 def test_missing_required_role_fails(tmp_path):
-    d = _doc(); del d["roles"]["agent_fallback"]
+    d = _doc()
+    del d["roles"]["agent_fallback"]
     with pytest.raises(ValidationError, match="agent_fallback"):
         load_models_config(_write(tmp_path, d))
 
 
 def test_agent_roles_require_first_token_timeout(tmp_path):
-    d = _doc(); del d["roles"]["agent"]["first_token_timeout_s"]
+    d = _doc()
+    del d["roles"]["agent"]["first_token_timeout_s"]
     with pytest.raises(ValidationError, match="first_token_timeout_s"):
         load_models_config(_write(tmp_path, d))
 
 
 def test_first_token_timeout_cannot_exceed_attempt_timeout(tmp_path):
-    d = _doc(); d["roles"]["agent"]["first_token_timeout_s"] = 99
+    d = _doc()
+    d["roles"]["agent"]["first_token_timeout_s"] = 99
     with pytest.raises(ValidationError):
         load_models_config(_write(tmp_path, d))
 
 
 def test_bad_provider_and_bad_date_fail(tmp_path):
-    d = _doc(); d["roles"]["agent"]["provider"] = "google"
+    d = _doc()
+    d["roles"]["agent"]["provider"] = "google"
     with pytest.raises(ValidationError):
         load_models_config(_write(tmp_path, d))
-    d = _doc(); d["roles"]["agent"]["price"]["as_of"] = "27/11/2026"
+    d = _doc()
+    d["roles"]["agent"]["price"]["as_of"] = "27/11/2026"
     with pytest.raises(ValidationError):
         load_models_config(_write(tmp_path, d))
 
