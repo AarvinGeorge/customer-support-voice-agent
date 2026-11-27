@@ -10,11 +10,13 @@
  * Role: CS-E-04.S5.T1 unified thread (doc 06 s16, D-002); CS-E-04.S6.T1 adds the verification
  *   result line, receipts and the two cards; CS-E-04.S5.T3 adds markdown answers, the answer
  *   states (Gate 2 hold, slow, retrying), error rows with Retry, decline notes, the Sources row,
- *   ticket chips, the escalation line and the fallback badge.
+ *   ticket chips, the escalation line and the fallback badge. CS-E-05.S4.T3 adds what the voice
+ *   agent said aloud: an interrupted read-back freezes at what was heard with an Interrupted chip
+ *   (the full answer one click away), and speech outside a turn is its own spoken line.
  */
-import { CircleAlert, LifeBuoy, Mic, PanelRight, RotateCcw } from "lucide-react";
+import { CircleAlert, LifeBuoy, Mic, PanelRight, Pause, RotateCcw } from "lucide-react";
 import type { StatusEvent } from "@contracts/contracts";
-import type { RefObject } from "react";
+import { useState, type RefObject } from "react";
 import type { ConfirmInput, VerificationInput } from "@contracts/contracts";
 
 import { Button } from "@/components/ui/button";
@@ -134,6 +136,92 @@ function UserMessage({ text, mode }: { text: string; mode: "chat" | "voice" }) {
 }
 
 /**
+ * What: one assistant voice item of the thread.
+ * Use when: typing the spoken props.
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: alias.
+ */
+type SpokenItem = Extract<ThreadItem, { kind: "agent-voice" }>;
+
+/**
+ * What: the Interrupted chip (warning outline, pause icon, the word).
+ * Use when: an assistant voice item was cut by a barge-in or Stop speaking.
+ * Inputs: none.
+ * Output: a pill.
+ * Side effects: none.
+ * Role: chip (Figma "Assistant message (voice, interrupted)"; words first, color reinforces).
+ */
+function InterruptedChip() {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-warning bg-raised px-2.5 py-1 text-label-sm text-warning">
+      <Pause aria-hidden className="size-3.5" />
+      <span>Interrupted</span>
+    </span>
+  );
+}
+
+/**
+ * What: the words the customer heard, or "Not played aloud." when audio was cleared before any played.
+ * Use when: an interrupted answer or spoken line.
+ * Inputs: { heard }.
+ * Output: a paragraph.
+ * Side effects: none.
+ * Role: helper (review PR #55 I2: a queued read-back cleared before it played has 0 ms heard).
+ */
+function HeardWords({ heard }: { heard: string }) {
+  return heard === "" ? <p className="text-body text-muted italic">Not played aloud.</p> : <p className="text-body text-ink">{heard}</p>;
+}
+
+/**
+ * What: an interrupted read-back: the words heard, the Interrupted chip with a note, and a
+ *   disclosure that shows the turn's full answer.
+ * Use when: the voice item linked to a turn was interrupted.
+ * Inputs: { heard, full, streaming }.
+ * Output: JSX (fragment inside the assistant article).
+ * Side effects: local open state.
+ * Role: 04 item 2.2 (the transcript shows only what was heard; core's text stays one click away,
+ *   doc 07 s6.6 R-15).
+ */
+function InterruptedAnswer({ heard, full, streaming }: { heard: string; full: string; streaming: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      {open ? <AnswerMarkdown text={full} streaming={streaming} /> : <HeardWords heard={heard} />}
+      <div className="flex flex-wrap items-center gap-2">
+        <InterruptedChip />
+        <span className="text-caption text-muted">Audio stopped here. The full answer stays in text.</span>
+        <Button variant="ghost" size="sm" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+          {open ? "Show what was heard" : "Show full answer"}
+        </Button>
+      </div>
+    </>
+  );
+}
+
+/**
+ * What: speech the voice agent said outside a relayed answer (a greeting, a holding phrase).
+ * Use when: an assistant voice item with no turn.
+ * Inputs: { item }.
+ * Output: an <article> labelled "Assistant, spoken".
+ * Side effects: none.
+ * Role: shows what the realtime model said aloud (R-15 mitigation: nothing spoken is hidden).
+ */
+function SpokenLine({ item }: { item: SpokenItem }) {
+  return (
+    <article aria-label="Assistant, spoken" className="flex flex-col items-start gap-1.5">
+      <span className="inline-flex items-center gap-1 text-caption text-muted">
+        <Mic aria-hidden className="size-3" />
+        <span>Voice, spoken</span>
+      </span>
+      <HeardWords heard={item.heard} />
+      {item.interrupted && <InterruptedChip />}
+    </article>
+  );
+}
+
+/**
  * What: the subject word of a decline note per action type.
  * Use when: titling a DeclineNoteBlock ("Refund declined").
  * Inputs: none.
@@ -153,9 +241,10 @@ const DECLINE_SUBJECT: Readonly<Record<string, string>> = Object.freeze({
  *   escalation line, the Create ticket offer (both models unavailable, while it is still the
  *   session's open offer), error rows and the footer with the fallback badge.
  * Use when: a turn thread item.
- * Inputs: { turn, conversation, index, cards, onResend?, inspect?, number } (onResend is set when
+ * Inputs: { turn, conversation, index, cards, onResend?, inspect?, number, spoken? } (onResend is set when
  *   the customer's typed text for this turn is known, so a retryable error row can offer Retry;
- *   inspect and the 1-based turn number add the footer's Inspect button).
+ *   inspect and the 1-based turn number add the footer's Inspect button; spoken is the voice
+ *   read-back of this turn, which replaces the answer text when it was interrupted).
  * Output: an <article>.
  * Side effects: none.
  * Role: assistant message; the order follows Figma S1 and States (receipts and the quoted
@@ -170,7 +259,9 @@ function AssistantMessage({
   onResend,
   inspect,
   number,
+  spoken,
 }: {
+  spoken?: SpokenItem;
   turn: TurnView;
   conversation: ConversationState;
   index: CardIndex;
@@ -201,7 +292,11 @@ function AssistantMessage({
         const action = turn.actionResults.find((r) => String(r.seq) === note.key)?.action_type ?? "";
         return <DeclineNoteBlock key={note.key} note={note} action={DECLINE_SUBJECT[action] ?? "Request"} />;
       })}
-      {turn.text.trim() !== "" && <AnswerMarkdown text={turn.text} streaming={turn.phase === "streaming"} />}
+      {spoken?.interrupted ? (
+        <InterruptedAnswer heard={spoken.heard} full={turn.text} streaming={turn.phase === "streaming"} />
+      ) : (
+        turn.text.trim() !== "" && <AnswerMarkdown text={turn.text} streaming={turn.phase === "streaming"} />
+      )}
       {state === "checking_policy" && <HeldAnswer />}
       {(state === "slow" || state === "retrying") && status && <StatusLine state={state} message={status.message} />}
       {verifyState !== "hidden" && (
@@ -332,6 +427,8 @@ export function ConversationLog({
 }) {
   const turns = conversation.turns;
   const index = cardIndex(conversation);
+  const spokenByTurn = new Map<string, SpokenItem>();
+  for (const item of thread) if (item.kind === "agent-voice" && item.turnId !== null && turns[item.turnId]) spokenByTurn.set(item.turnId, item);
   if (thread.length === 0) {
     return (
       <div className="flex flex-1 flex-col justify-center gap-2 py-12">
@@ -348,6 +445,7 @@ export function ConversationLog({
       {thread.map((item, i) => {
         if (item.kind === "user") return <UserMessage key={item.id} text={item.text} mode={item.mode} />;
         if (item.kind === "error") return <SendError key={item.id} item={item} onRetry={cards.disabled ? undefined : onRetry} />;
+        if (item.kind === "agent-voice") return item.turnId !== null && turns[item.turnId] ? null : <SpokenLine key={item.id} item={item} />;
         const turn = turns[item.turnId];
         const prev = thread[i - 1];
         const typed = prev?.kind === "user" && prev.mode === "chat" ? prev.text : null;
@@ -363,6 +461,7 @@ export function ConversationLog({
             onResend={resend}
             inspect={inspect}
             number={conversation.turnOrder.indexOf(turn.turnId) + 1}
+            spoken={spokenByTurn.get(turn.turnId)}
           />
         ) : null;
       })}

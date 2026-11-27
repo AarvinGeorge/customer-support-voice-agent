@@ -251,3 +251,96 @@ describe("review PR #20 fixes", () => {
     expect(document.getElementById(btn.getAttribute("aria-controls") as string)).not.toBeNull();
   });
 });
+
+describe("voice dock in the shell (CS-E-05.S4.T1)", () => {
+  /**
+   * What: a stand-in voice controller in a given state.
+   * Use when: rendering the shell mid-call without a VoiceClient.
+   * Inputs: the state.
+   * Output: a VoiceController with spy actions.
+   * Side effects: none.
+   * Role: test helper.
+   */
+  const controller = (state: "listening" | "ended" | "error") => ({
+    voice: { state, label: state, caption: null, error: state === "error" ? "Voice couldn't connect just now." : null, muted: false, endsAt: null, agentLine: null },
+    toggle: vi.fn(),
+    end: vi.fn(),
+    mute: vi.fn(),
+    stopSpeaking: vi.fn(),
+    levels: () => ({ mic: 0, agent: 0 }),
+    available: true,
+  });
+
+  it("the dock replaces the input bar while a call is open; Back to typing ends the call", () => {
+    const v = controller("listening");
+    render(<ConsoleShell sessionId="s" store={replayed(s1)} voice={v} />);
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Voice call" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Back to typing/ }));
+    expect(v.end).toHaveBeenCalledTimes(1);
+  });
+
+  it("after the call the input bar is back, with the error words when it failed", () => {
+    render(<ConsoleShell sessionId="s" store={replayed(s1)} voice={controller("error")} />);
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Voice call" })).toBeNull();
+    expect(screen.getByText("Voice couldn't connect just now.")).toBeTruthy();
+  });
+});
+
+describe("voice transcripts in the thread (CS-E-05.S4.T3)", () => {
+  const voiceTurn = loadFixture("voice_turn.jsonl");
+
+  it("an interrupted read-back shows only what was heard, the Interrupted chip, and the full answer on request", () => {
+    const store = replayed(voiceTurn, ["When will my refund arrive?"]);
+    const turnId = voiceTurn[0]?.turn_id as string;
+    const full = store.getState().conversation.turns[turnId]?.text ?? "";
+    store.getState().upsertAgentVoice({ itemId: "a1", text: "Refunds reach your card in five to ten business days.", heard: "Refunds reach your card", interrupted: true, turnId });
+    render(<ConsoleShell sessionId="s" store={store} />);
+    const log = screen.getByRole("log", { name: "Conversation" });
+    expect(within(log).getByText("Refunds reach your card")).toBeTruthy();
+    expect(within(log).getByText("Interrupted")).toBeTruthy();
+    expect(within(log).queryByText(full)).toBeNull();
+    fireEvent.click(within(log).getByRole("button", { name: "Show full answer" }));
+    expect(within(log).getByText(full)).toBeTruthy();
+    expect(within(log).getAllByRole("article").map((a) => a.getAttribute("aria-label"))).toEqual(["You said", "Assistant"]);
+  });
+
+  it("a read-back heard in full adds nothing (the answer is already the turn's text)", () => {
+    const store = replayed(voiceTurn, ["When will my refund arrive?"]);
+    const turnId = voiceTurn[0]?.turn_id as string;
+    store.getState().upsertAgentVoice({ itemId: "a1", text: "Spoken words.", heard: "Spoken words.", interrupted: false, turnId });
+    render(<ConsoleShell sessionId="s" store={store} />);
+    expect(screen.queryByText("Spoken words.")).toBeNull();
+    expect(screen.queryByText("Interrupted")).toBeNull();
+  });
+
+  it("speech outside a turn (a holding phrase) is its own spoken line, marked when interrupted", () => {
+    const store = createTurnStore();
+    store.getState().upsertAgentVoice({ itemId: "h1", text: "One moment while I check that.", heard: "One moment", interrupted: true, turnId: null });
+    render(<ConsoleShell sessionId="s" store={store} />);
+    const line = screen.getByRole("article", { name: "Assistant, spoken" });
+    expect(within(line).getByText("One moment")).toBeTruthy();
+    expect(within(line).getByText("Interrupted")).toBeTruthy();
+  });
+});
+
+describe("fix round 1 (review PR #55)", () => {
+  it("M4: after Back to typing ends the call, focus returns to the message box", () => {
+    const base = { toggle: vi.fn(), end: vi.fn(), mute: vi.fn(), stopSpeaking: vi.fn(), levels: () => ({ mic: 0, agent: 0 }), available: true };
+    const v = (state: "listening" | "ended") => ({ ...base, voice: { state, label: state, caption: null, error: null, muted: false, endsAt: null, agentLine: null } });
+    const store = createTurnStore();
+    const { rerender } = render(<ConsoleShell sessionId="s" store={store} voice={v("listening")} />);
+    rerender(<ConsoleShell sessionId="s" store={store} voice={v("ended")} />);
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Message" }));
+  });
+
+  it("an interrupted read-back that was never played says so instead of an empty line", () => {
+    const voiceTurn = loadFixture("voice_turn.jsonl");
+    const store = replayed(voiceTurn, ["When will my refund arrive?"]);
+    store.getState().upsertAgentVoice({ itemId: "a1", text: "Refunds reach your card soon.", heard: "", interrupted: true, turnId: voiceTurn[0]?.turn_id as string });
+    render(<ConsoleShell sessionId="s" store={store} />);
+    expect(screen.getByText("Not played aloud.")).toBeTruthy();
+  });
+});
+
