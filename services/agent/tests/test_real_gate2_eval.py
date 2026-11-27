@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from pathlib import Path
 
@@ -143,3 +144,144 @@ async def _expect(cases: list[tuple[str, bool]], label: str) -> None:
 @pytest.mark.real
 async def test_real_verifier_never_lets_account_context_alone_support_policy():
     await _expect(ACCOUNT_POLICY, "account_context policy")
+
+
+# --- Gate model token cap (fix after browser pass 2): S1 policy follow-up and S3 Marcus member decline ----------
+
+
+def _turn(tool_name: str, content: str) -> list:
+    """What: a turn's messages: the human question then one tool result. Use when: the token cap cases.
+    Inputs: tool name, wrapped content. Output: messages. Side effects: none. Role: helper."""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    call = AIMessage("", tool_calls=[{"name": tool_name, "args": {}, "id": f"c-{tool_name}", "type": "tool_call"}])
+    return [HumanMessage("q"), call, ToolMessage(content, tool_call_id=f"c-{tool_name}", name=tool_name)]
+
+
+def _marcus() -> dict:
+    """What: verified state for the S3 member persona (data/seeds/personas.yaml Marcus Lee: member, business, active,
+    QS-20318) built from the stub context with those fields. Use when: the S3 case. Output: state values.
+    Side effects: none. Role: helper."""
+    claims = {**ex.CLAIMS.model_dump(mode="json"), "display_name": "Marcus Lee", "account_id": "QS-20318",
+              "account_name": "Northwind Labs", "role": "member", "tier": "business",
+              "permissions": {"billing_read": False, "billing_actions": False, "own_notification_prefs": True}}
+    ctx = ex.ME_CONTEXT.model_dump(mode="json")
+    ctx = {**ctx, "claims": claims, "open_tickets": [], "recent_actions": [],
+           "profile": {**ctx["profile"], "display_name": "Marcus Lee", "account_id": "QS-20318",
+                       "account_name": "Northwind Labs", "role": "member", "tier": "business", "seats": 20}}
+    return {"verified": True, "claims_snapshot": claims, "context_snapshot": ctx}
+
+
+def token_cap_cases() -> list[tuple[str, str, dict, list, bool]]:
+    """What: (label, draft, state values, turn messages, should pass) for the two live failures plus 6 eval cases.
+    Use when: test_real_gate_models_return_a_verdict_within_the_cap. Output: list. Side effects: reads articles.
+    Role: reconstructed from evals/golden/golden.yaml G-03 (S1 follow-up: refund-policy#did-my-refund-...) and G-04
+    (S3 Marcus: ROLE_NOT_PERMITTED, roles-and-permissions#billing-permissions); the live drafts were not saved."""
+    from agent.untrusted import wrap_result, wrap_search
+
+    s1_docs = wrap_search("pass", None, [
+        {"id": "refund-policy#did-my-refund-go-through-and-when-will-i-see-it", "article": "refund-policy",
+         "section": "Did my refund go through, and when will I see it?",
+         "text": _doc_text("refund-policy", "Did my refund go through, and when will I see it?")},
+        {"id": "refund-policy#how-refunds-work", "article": "refund-policy", "section": "How refunds work",
+         "text": _doc_text("refund-policy", "How refunds work")}])
+    s1_draft = ("Your refund went back to your original payment method. How long it takes to show on your statement "
+                "depends on your bank.")
+    declined = {"decision": "declined", "reason_codes": ["ROLE_NOT_PERMITTED"],
+                "policy_refs": [{"article": "roles-and-permissions", "section": "billing-permissions",
+                                 "title": "Billing permissions"}],
+                "message": "Only an account owner or billing admin can make billing changes.",
+                "pending_action_id": None, "state": "declined", "ticket": None, "changed": False}
+    s3_draft = ("Thanks, Marcus. I can't request this refund for you: only an account owner or billing admin can "
+                "make billing changes, including refunds. Your owner or billing admin can ask for it, or I can open "
+                "a ticket so the right person follows up.")
+    s3_docs = wrap_search("pass", None, [
+        {"id": "roles-and-permissions#billing-permissions", "article": "roles-and-permissions",
+         "section": "Billing permissions", "text": _doc_text("roles-and-permissions", "Billing permissions")}])
+    s3_turn = _turn("search_kb", s3_docs) + _turn("prepare_refund", wrap_result("prepare_refund", declined))[1:]
+    return [
+        ("S1 policy follow-up", s1_draft, _priya_after_refund(), _turn("search_kb", s1_docs), True),
+        ("S3 Marcus member decline", s3_draft, _marcus(), s3_turn, True),
+        ("D-059 policy " + SUBSET[0][:30], SUBSET[0], {}, [HumanMessage("hi")], False),
+        ("D-059 policy " + SUBSET[4][:30], SUBSET[4], {}, [HumanMessage("hi")], False),
+        ("D-059 clarify " + SUBSET[6][:30], SUBSET[6], {}, [HumanMessage("hi")], True),
+        ("verification " + VERIFICATION_TURN[0][0][:30], VERIFICATION_TURN[0][0], VERIFIED, [HumanMessage("hi")], True),
+        ("verification " + VERIFICATION_TURN[3][0][:30], VERIFICATION_TURN[3][0], VERIFIED, [HumanMessage("hi")], False),
+        ("account policy " + ACCOUNT_POLICY[0][0][:30], ACCOUNT_POLICY[0][0], VERIFIED, [HumanMessage("hi")], False),
+    ]
+
+
+def _priya_after_refund() -> dict:
+    """What: VERIFIED with the S1 refund (CH-00000412, $96) in recent_actions, as the memory refresh shows it after the
+    commit (G-03 turn 4). Use when: the S1 follow-up case. Output: state values. Side effects: none. Role: helper."""
+    ctx = ex.ME_CONTEXT.model_dump(mode="json")
+    refund = {"action_type": "refund", "label": "Refunded $96.00 for the duplicate charge ending 0412",
+              "effective_date": "2026-11-27", "committed_by": "customer", "amount_cents": 9600}
+    return {**VERIFIED, "context_snapshot": {**ctx, "recent_actions": [refund, *ctx["recent_actions"]]}}
+
+
+def _doc_text(article: str, heading: str) -> str:
+    """What: a section's markdown from data/articles. Use when: token cap cases. Inputs: slug, heading.
+    Output: text. Side effects: reads one file. Role: helper."""
+    text = (ROOT / "data" / "articles" / f"{article}.md").read_text()
+    return f"## {heading}\n" + text.split(f"## {heading}\n", 1)[1].split("\n## ", 1)[0].strip()
+
+
+class _Recorder:
+    """What: wraps the real chat model to keep its last reply (stop reason and usage). Use when: the token cap
+    measurement. Inputs: model. Output: ainvoke passthrough. Side effects: stores replies. Role: probe."""
+
+    def __init__(self, model) -> None:
+        """What: keep the model. Use when: tests. Inputs: model. Output: none. Side effects: none. Role: constructor."""
+        self.inner, self.model, self.replies = model, getattr(model, "model", None), []
+
+    async def ainvoke(self, messages, config=None):
+        """What: call the real model and record the reply. Use when: a gate call. Inputs: messages, config.
+        Output: reply. Side effects: records. Role: passthrough."""
+        reply = await self.inner.ainvoke(messages, config=config)
+        self.replies.append(reply)
+        return reply
+
+
+@pytest.mark.real
+async def test_real_gate_models_return_a_verdict_within_the_cap():
+    """8 verifier calls and 2 scope classifier calls (10 real calls, cap 12), one at a time for clean latency."""
+    from agent.gates import ScopeClassifier, reply_truncated
+
+    load_dotenv(ROOT / ".env", override=False)
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        pytest.fail("ANTHROPIC_API_KEY missing: this eval must not pass without making the calls")
+    registry = ModelRegistry(load_models_config(ROOT / "data" / "models.yaml"))
+    bad = []
+    for label, draft, values, msgs, expect in token_cap_cases():
+        rec = _Recorder(registry.build("grounding_verifier"))
+        ver = GroundingVerifier(rec)
+        evidence, sources = grounded_evidence(values, msgs)
+        chunks = {cid: {"chunk_id": cid} for m in msgs if getattr(m, "name", None) == "search_kb"
+                  for cid in re.findall(r'<doc id="([^"]+)"', str(m.content))}
+        start = time.monotonic()
+        raw = await ver.verify(TurnControl(session_id="eval", turn_id="eval"), draft, evidence)
+        secs = time.monotonic() - start
+        res = enforce_code_rules(raw, draft, chunks, tool_names=sources)
+        reply = rec.replies[-1] if rec.replies else None
+        meta = getattr(reply, "response_metadata", {}) or {}
+        usage = getattr(reply, "usage_metadata", {}) or {}
+        ok = res.passed is expect and not (reply is not None and reply_truncated(reply))
+        bad += [] if ok else [label]
+        print(f"{'ok ' if ok else 'BAD'} {label} | expect={'pass' if expect else 'flag'} verdict={res.verdict} "
+              f"reason={res.reason} stop={meta.get('stop_reason') or meta.get('finish_reason')} "
+              f"out={usage.get('output_tokens')} reasoning={(usage.get('output_token_details') or {}).get('reasoning')} "
+              f"{secs:.2f}s claims={[(c['text'][:50], c['supported'], c['source_id']) for c in res.claims]}")
+    for text, on in (("Can I get a refund on my Pro plan?", True), ("What's the weather in Paris tomorrow?", False)):
+        rec = _Recorder(registry.build("scope_classifier"))
+        start = time.monotonic()
+        got = await ScopeClassifier(rec).on_topic(TurnControl(session_id="eval", turn_id="eval"), text)
+        secs = time.monotonic() - start
+        reply = rec.replies[-1] if rec.replies else None
+        meta = getattr(reply, "response_metadata", {}) or {}
+        usage = getattr(reply, "usage_metadata", {}) or {}
+        ok = got is on and reply is not None and not reply_truncated(reply)
+        bad += [] if ok else [text]
+        print(f"{'ok ' if ok else 'BAD'} scope {text!r} | on_topic={got} answer={getattr(reply, 'text', None)!r} "
+              f"stop={meta.get('stop_reason') or meta.get('finish_reason')} out={usage.get('output_tokens')} {secs:.2f}s")
+    assert not bad, bad
