@@ -1,0 +1,12 @@
+# What: publishes the Compose Postgres on 127.0.0.1 so host-run pytest (marker `pg`) and CI jobs can reach it.
+# Use when: `docker compose -f compose.yaml -f compose.pgtest.yaml up -d postgres` (port PG_TEST_PORT, default 55432).
+# Why a second network: `backend` is internal and Docker will not publish ports from an internal-only network;
+#   `pgtest` is a plain bridge used only for the published port. Not part of the demo stack (never in compose.yaml).
+# Role: test harness for services/core/tests/pg; the services themselves keep talking over `backend` only.
+services:
+  postgres:
+    networks: [backend, pgtest]
+    ports: ["127.0.0.1:${PG_TEST_PORT:-55432}:5432"]
+
+networks:
+  pgtest: {}

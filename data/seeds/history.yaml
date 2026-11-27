@@ -1,0 +1,4 @@
+# What: refunds already committed (rows for core.action_history). days_ago is relative like charges.yaml.
+# Use when: core/seeds/seed.py. Role: feeds the 90-day repeat rule and the "already refunded" answer (doc 07 s3.1).
+history:
+  - {account_id: QS-80267, user_id: U-9966, charge_id: CH-00000801, days_ago: 38, committed_by: customer}
