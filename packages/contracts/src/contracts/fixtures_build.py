@@ -7,8 +7,10 @@ Side effects: none.
 Role: one S1 chat conversation (4 turns: ask, verify plus prepare, confirm, follow-up answer), one
 voice turn, and edge turns (fallback with a skipped grounding gate, tool failure escalation,
 deadline path with an error event and the deadline ticket) so lane C's reducer
-can assert on every doc 07 s6.2 event type, and the S4 unsure turns (off-topic decline, weak then
-clarify, weak again then escalate not_in_docs) for the step trail gate rows."""
+can assert on every doc 07 s6.2 event type, the S4 unsure turns (off-topic decline, weak then
+clarify, weak again then escalate not_in_docs) for the step trail gate rows, the S3 member decline
+(ROLE_NOT_PERMITTED with its policy ref) and the S5 failures (fallback model on a 429, then a
+billing tool failure with a ticket) for the answer states (CS-E-04.S5.T3)."""
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -348,6 +350,140 @@ def _s4_unsure() -> list[dict]:
     return out
 
 
+ROLES_CHUNK = {
+    "chunk_id": "roles-and-permissions#2", "label": "Roles and permissions, Billing permissions",
+    "ref": "roles-and-permissions#2", "spoken": "our roles and permissions article",
+    "url": "https://app.notion.com/p/4257c83d5896812f8c2ecfbb7aa2cb61",
+    "section_title": "Billing permissions",
+    "excerpt": ("Only an account owner or billing admin can make billing changes. If a member asks for "
+                "any of these, support explains that the request needs an owner or billing admin and "
+                "can open a ticket so the right person follows up."),
+    "score": 0.66,
+}
+ROLE_POLICY_REF = {"article": "roles-and-permissions", "section": "billing-permissions",
+                   "title": "Billing permissions"}
+ROLE_DECLINE_MESSAGE = "Only an account owner or billing admin can make billing changes."
+
+
+def _s3_decline() -> list[dict]:
+    """What: S3, Marcus (member, Business) asks for a refund: the verification request, then the
+    verified turn where core declines the prepare with ROLE_NOT_PERMITTED (doc 07 s5.2 keeps
+    prepare_refund visible to members so the decline and its policy ref reach the customer); the
+    model answers from the roles article and offers a ticket. Use when: rendering
+    s3_decline.jsonl. Inputs: none. Output: event dicts. Side effects: none.
+    Role: fixture body for the decline note (CS-E-04.S5.T3)."""
+    sid = "019a7c2e-8000-7000-8000-00000000b001"
+    person = VerifiedPerson(display_name="Marcus Lee", role="member", tier="business",
+                            contract_status="active", account_id="QS-20871")
+    out: list[dict] = []
+
+    t = _Turn(sid, "019a7c2e-8010-7000-8000-0000000000b1", "chat", 400)
+    t.add("turn.started", served_by="agent_a", input_kind="text", contract_version=VERSION)
+    t.model_step(1400, 2100, 40)
+    t.step("tool", "request_verification", "Asking you to verify", "Asked you to verify", 5,
+           args={"reason": "action"})
+    verify_line = ("To look at your account I need to verify you. Please enter your account ID and "
+                   "support PIN in the secure card.")
+    t.add("verification.required", reason="action", prompt_text=verify_line, attempts_left=3,
+          fields=["account_id", "pin"])
+    t.add("turn.completed", final=_final(verify_line, verify_line),
+          usage=_usage(1500, 1, 1, 2100, 40, ttft=1450), end_reason="verification_requested", replayed=False)
+    out += t.events
+
+    t = _Turn(sid, "019a7c2e-8020-7000-8000-0000000000b2", "chat", 430)
+    t.add("turn.started", served_by="agent_b", input_kind="verification", contract_version=VERSION)
+    t.step("verify", "identity_verify", "Verifying your identity", "Verified identity", 150,
+           args={"account_id": "QS-20871", "pin": "[PIN]"}, detail="Marcus Lee, member, Business")
+    t.add("verification.result", status="verified", person=person.model_dump(mode="json"),
+          attempts_left=None, ticket=None)
+    t.step("memory", "me_context", "Loading your account", "Loaded your account", 90, detail="no open tickets")
+    t.model_step(1500, 3600, 45, cache=2100)
+    t.step("tool", "prepare_refund", "Preparing your refund", "Refund declined", 210,
+           args={"charge_ref": {"ending": None, "on": "2026-11-03"}, "reason": "other",
+                 "note": "Extra seats charged on 3 Nov"},
+           detail="declined, member role", status="blocked",
+           rule={"decision": "declined", "reason_code": "ROLE_NOT_PERMITTED", "policy_ref": ROLE_POLICY_REF})
+    t.add("action.result", pending_action_id=None, action_type="refund", outcome="declined", changed=False,
+          reason_codes=["ROLE_NOT_PERMITTED"], policy_refs=[ROLE_POLICY_REF],
+          result_text=ROLE_DECLINE_MESSAGE, ticket=None)
+    sid_search = t.step("tool", "search_kb", "Searching help articles", "Searched help articles", 380,
+                        args={"query": "who can request a refund member role"}, detail="2 relevant sections")
+    t.add("gate", step_id=sid_search, gate="retrieval", verdict="pass", decision="answer", top_cosine=0.66,
+          tau_low=0.30, tau_high=0.45, calibration_status="provisional", code_match=False,
+          chunk_ids=["roles-and-permissions#2", "roles-and-permissions#1"])
+    t.model_step(1900, 4800, 70, cache=3600)
+    claims = [{"text": "Only an account owner or billing admin can make billing changes", "supported": True,
+               "source_id": "roles-and-permissions#2"}]
+    _grounding(t, claims)
+    text = ("I can't request this refund for you, because your role on this account is **member**. "
+            "Only an account owner or billing admin can make billing changes, including refunds.\n\n"
+            "Would you like me to open a ticket so your owner or billing admin can follow up?")
+    t.tokens(text)
+    say = ("I can't request this refund for you, because your role on this account is member. Only an "
+           "account owner or billing admin can make billing changes, including refunds. Would you like "
+           "me to open a ticket so your owner or billing admin can follow up?")
+    t.add("turn.completed", final=_final(text, say, citations=[ROLES_CHUNK], confidence={
+        "retrieval_verdict": "pass", "top_cosine": 0.66, "tau_low": 0.30, "tau_high": 0.45,
+        "grounding": "pass"}), usage=_usage(4400, 2, 4, 8400, 115, cache=5700, ttft=4300),
+        end_reason="answered", replayed=False)
+    out += t.events
+    return out
+
+
+def _s5_failures() -> list[dict]:
+    """What: S5 for Priya: (1) the primary model is rate limited (demo fault llm_429), the fallback
+    model finds the duplicate charge and prepares the refund, so the read-back carries the fallback
+    badge; (2) on the yes the billing system fails, one retry fails too, nothing changed, and a
+    ticket is opened in code (escalate tool_failure). Use when: rendering s5_failures.jsonl.
+    Inputs: none. Output: event dicts. Side effects: none. Role: fixture body (CS-E-04.S5.T3)."""
+    sid = "019a7c2e-9000-7000-8000-00000000c501"
+    out: list[dict] = []
+
+    t = _Turn(sid, "019a7c2e-9010-7000-8000-0000000000a1", "chat", 500)
+    t.add("turn.started", served_by="agent_a", input_kind="text", contract_version=VERSION)
+    t.model_step(20, 0, 0, status="error")
+    t.add("model.fallback", from_model=AGENT_MODEL, to_model=FALLBACK_MODEL, reason="fault_llm_429")
+    t.model_step(1700, 3900, 45, model=FALLBACK_MODEL)
+    t.step("tool", "list_charges", "Checking your billing history", "Checked billing history", 180,
+           args={"ending": None, "on": "2026-11-21", "since_days": 90}, detail="2 charges of $96.00 on 21 Nov")
+    t.model_step(1300, 4500, 50, model=FALLBACK_MODEL)
+    t.step("tool", "prepare_refund", "Preparing your refund", "Prepared refund", 250,
+           args={"charge_id": "CH-26112102", "reason": "duplicate", "note": "Charged twice on 21 Nov"},
+           detail="$96.00, allowed on Pro",
+           rule={"decision": "allowed", "reason_code": "PRO_WITHIN_LIMITS",
+                 "policy_ref": ex.POLICY_REF.model_dump()})
+    pending = ex.PENDING_PUBLIC.model_dump(mode="json")
+    t.add("confirmation.required", pending=pending, confirm_label="Confirm refund")
+    t.add("turn.completed", final=_final(pending["readback_text"], pending["readback_say"],
+                                         citations=[REFUND_CHUNK], pending=pending),
+          usage=_usage(3500, 3, 2, 8400, 95, models=[AGENT_MODEL, FALLBACK_MODEL], fallback=True, ttft=3450),
+          end_reason="readback", replayed=False)
+    out += t.events
+
+    t = _Turn(sid, "019a7c2e-9020-7000-8000-0000000000a2", "chat", 530)
+    t.add("turn.started", served_by="agent_b", input_kind="confirm", contract_version=VERSION)
+    args = {"pending_action_id": ex.PENDING_ID}
+    t.step("commit", "commit", "Issuing your refund", "Refund failed, checking and retrying", 2510, args=args,
+           status="retrying", detail="Billing system did not respond")
+    t.add("status", kind="retrying", message="Retrying the billing system...")
+    t.step("commit", "commit", "Issuing your refund", "Refund failed", 2480, args=args, status="error",
+           attempt=2, detail="TOOL_ERROR, changed false")
+    ticket = ex.TICKET_REF.model_copy(update={"priority": "P2"}).model_dump(mode="json")
+    t.add("action.result", pending_action_id=ex.PENDING_ID, action_type="refund", outcome="failed",
+          changed=False, reason_codes=[], policy_refs=[], result_text="The refund was not issued.", ticket=ticket)
+    t.step("escalation", "create_ticket", "Opening a ticket", "Opened a ticket", 390, detail="ticket ending 8213")
+    t.add("escalated", reason="tool_failure", ticket=ticket, origin="code", offer_ticket_button=False)
+    line = ("I couldn't complete the refund because our billing system didn't respond. No charge was "
+            "changed. I've opened a ticket for our team, ticket ending 8213, and they will finish this for you.")
+    say = ("I couldn't complete the refund because our billing system didn't respond. No charge was "
+           "changed. I've opened a ticket for our team, ticket ending eight two one three, and they will "
+           "finish this for you.")
+    t.add("turn.completed", final=_final(line, say, escalated=True, ticket=ticket),
+          usage=_usage(5500, 0, 1, 0, 0, ttft=5450), end_reason="escalated", replayed=False)
+    out += t.events
+    return out
+
+
 def _jsonl(events: list[dict]) -> str:
     """What: events as JSONL text. Use when: rendering. Inputs: event dicts. Output: text.
     Side effects: none. Role: helper."""
@@ -358,4 +494,5 @@ def render_all() -> dict[str, str]:
     """What: every fixture file's content. Use when: writing or checking fixtures.
     Inputs: none. Output: {file name: JSONL text}. Side effects: none. Role: the builder."""
     return {"s1_chat.jsonl": _jsonl(_s1_chat()), "voice_turn.jsonl": _jsonl(_voice()),
-            "edge_turns.jsonl": _jsonl(_edge()), "s4_unsure.jsonl": _jsonl(_s4_unsure())}
+            "edge_turns.jsonl": _jsonl(_edge()), "s4_unsure.jsonl": _jsonl(_s4_unsure()),
+            "s3_decline.jsonl": _jsonl(_s3_decline()), "s5_failures.jsonl": _jsonl(_s5_failures())}

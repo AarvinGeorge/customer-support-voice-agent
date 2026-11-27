@@ -10,7 +10,8 @@ from conftest import FIXTURES
 from contracts.events import EVENT_TYPES, TurnCompletedEvent, parse_event
 from contracts.fixtures_build import render_all
 
-FILES = ("s1_chat.jsonl", "voice_turn.jsonl", "edge_turns.jsonl", "s4_unsure.jsonl")
+FILES = ("s1_chat.jsonl", "voice_turn.jsonl", "edge_turns.jsonl", "s4_unsure.jsonl", "s3_decline.jsonl",
+         "s5_failures.jsonl")
 
 
 def _lines(name):
@@ -138,3 +139,44 @@ def test_s4_unsure_covers_the_scenario():
     assert len(esc) == 1 and esc[0].reason == "not_in_docs" and esc[0].ticket is not None
     assert esc[0].turn_id == last.turn_id
     assert not any(e.type == "token" for e in evs)
+
+
+def test_s3_decline_covers_the_scenario():
+    """What: the S3 member file verifies Marcus (member, Business), then the refund prepare is
+    declined ROLE_NOT_PERMITTED with its policy ref, reported as action.result declined with
+    changed false, and the grounded answer cites the public roles article (L1 S3, doc 07 s6.2).
+    Use when: CI. Inputs: none. Output: assertion. Side effects: reads a file.
+    Role: S3 coverage for the decline note (CS-E-04.S5.T3)."""
+    evs = [parse_event(ln) for ln in _lines("s3_decline.jsonl")]
+    person = [e for e in evs if e.type == "verification.result"][0].person
+    assert (person.role, person.tier) == ("member", "business")
+    rules = [e.rule for e in evs if e.type == "step.completed" and e.rule is not None]
+    assert [(r.decision, r.reason_code) for r in rules] == [("declined", "ROLE_NOT_PERMITTED")]
+    res = [e for e in evs if e.type == "action.result"]
+    assert len(res) == 1 and res[0].outcome == "declined" and res[0].changed is False
+    assert res[0].reason_codes == ["ROLE_NOT_PERMITTED"] and res[0].pending_action_id is None
+    assert [(p.article, p.section) for p in res[0].policy_refs] == [("roles-and-permissions",
+                                                                     "billing-permissions")]
+    final = [e for e in evs if e.type == "turn.completed"][-1].final
+    assert final.citations and all(c.url.startswith("https://") for c in final.citations)
+    assert not any(e.type == "confirmation.required" for e in evs)
+
+
+def test_s5_failures_cover_the_scenario():
+    """What: the S5 file has a turn where the primary model is rate limited and the fallback
+    model prepares the refund (model.fallback, usage.fallback_used, models_used), then the yes
+    turn where the billing system fails twice: retrying status, action.result failed with changed
+    false and a ticket, escalated tool_failure (L1 s8, doc 07 s6.2). Use when: CI. Inputs: none.
+    Output: assertion. Side effects: reads a file. Role: S5 coverage (CS-E-04.S5.T3)."""
+    evs = [parse_event(ln) for ln in _lines("s5_failures.jsonl")]
+    fb = [e for e in evs if e.type == "model.fallback"]
+    assert len(fb) == 1 and fb[0].reason == "fault_llm_429"
+    ends = [e for e in evs if e.type == "turn.completed"]
+    assert [e.end_reason for e in ends] == ["readback", "escalated"]
+    assert ends[0].usage.fallback_used and fb[0].to_model in ends[0].usage.models_used
+    assert ends[0].turn_id == fb[0].turn_id
+    assert any(e.type == "status" and e.kind == "retrying" for e in evs)
+    res = [e for e in evs if e.type == "action.result"]
+    assert [(r.outcome, r.changed) for r in res] == [("failed", False)] and res[0].ticket is not None
+    esc = [e for e in evs if e.type == "escalated"]
+    assert len(esc) == 1 and esc[0].reason == "tool_failure" and esc[0].ticket is not None
