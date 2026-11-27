@@ -101,19 +101,31 @@ function ask(item: string, response: string, callId: string, transcript = "Can y
 /**
  * What: the say response that reads the agent's answer back, with its audio transcript deltas.
  * Use when: after the relay answered.
- * Inputs: response id, assistant item id, the text.
+ * Inputs: response id, assistant item id, the text, the say tag the relay put in response.create
+ *   metadata (absent for speech that is not a say).
  * Output: RealtimeEvent[] (response.created, deltas by word, output_audio_buffer.started).
  * Side effects: none.
  * Role: test data (GA event names response.output_audio_transcript.delta / .done).
  */
-function sayStarts(response: string, item: string, text: string): RealtimeEvent[] {
+function sayStarts(response: string, item: string, text: string, tag?: string): RealtimeEvent[] {
   const words = text.split(/(?<= )/);
   return [
-    { type: "response.created", response: { id: response, status: "in_progress", output: [] } },
+    { type: "response.created", response: { id: response, status: "in_progress", output: [], ...(tag ? { metadata: { qs_say: tag } } : {}) } },
     ...words.map((w) => ({ type: "response.output_audio_transcript.delta", response_id: response, item_id: item, delta: w })),
     { type: "output_audio_buffer.started", response_id: response },
   ];
 }
+
+/**
+ * What: the say tag of the last response.create the relay sent.
+ * Use when: playing the say response back to the relay.
+ * Inputs: the sent log.
+ * Output: the tag, or undefined.
+ * Side effects: none.
+ * Role: helper (review PR #46 M2: the say is matched by response metadata).
+ */
+const tagOf = (sent: Array<{ msg: Record<string, unknown> }>) =>
+  ((sent.filter((s) => s.msg.type === "response.create").at(-1)?.msg.response as { metadata?: { qs_say?: string } } | undefined)?.metadata?.qs_say);
 
 /** What: voice/ask bodies. Use when: asserting relays. Inputs: fetch mock. Output: bodies. Side effects: none. Role: helper. */
 const asks = (f: ReturnType<typeof fakeFetch>["fetchMock"]) => f.mock.calls.map(([, init]) => JSON.parse(String((init as RequestInit).body)) as VoiceAskRequest);
@@ -143,7 +155,7 @@ describe("interruption of a read-back", () => {
     const { relay, store, sent, fetchMock } = harness();
     for (const e of ask("item_u1", "resp_1", "call_1")) relay.handle(e);
     await relay.settled();
-    for (const e of sayStarts("resp_say", "item_a1", READBACK)) relay.handle(e);
+    for (const e of sayStarts("resp_say", "item_a1", READBACK, tagOf(sent))) relay.handle(e);
     await vi.advanceTimersByTimeAsync(2000);
 
     const bargeAt = Date.now();
@@ -201,10 +213,10 @@ describe("interruption of a read-back", () => {
 
 describe("live transcripts", () => {
   it("a finished say becomes one assistant item keyed by item_id and linked to its turn; the dock gets the live line", async () => {
-    const { relay, store, agentLines } = harness();
+    const { relay, store, agentLines, sent } = harness();
     for (const e of ask("item_u1", "resp_1", "call_1")) relay.handle(e);
     await relay.settled();
-    for (const e of sayStarts("resp_say", "item_a1", "Refunds reach your card in five to ten business days.")) relay.handle(e);
+    for (const e of sayStarts("resp_say", "item_a1", "Refunds reach your card in five to ten business days.", tagOf(sent))) relay.handle(e);
     expect(agentLines.at(-1)).toBe("Refunds reach your card in five to ten business days.");
     relay.handle({ type: "response.output_audio_transcript.done", response_id: "resp_say", item_id: "item_a1", transcript: "Refunds reach your card in five to ten business days." });
     relay.handle({ type: "output_audio_buffer.stopped", response_id: "resp_say" });

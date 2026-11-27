@@ -14,7 +14,7 @@
  *   agent said aloud: an interrupted read-back freezes at what was heard with an Interrupted chip
  *   (the full answer one click away), and speech outside a turn is its own spoken line.
  */
-import { CircleAlert, Mic, PanelRight, Pause, RotateCcw } from "lucide-react";
+import { CircleAlert, LifeBuoy, Mic, PanelRight, Pause, RotateCcw } from "lucide-react";
 import type { StatusEvent } from "@contracts/contracts";
 import { useState, type RefObject } from "react";
 import type { ConfirmInput, VerificationInput } from "@contracts/contracts";
@@ -81,6 +81,8 @@ export interface CardActions {
   pinRef: RefObject<HTMLInputElement | null>;
   verify: (body: VerificationInput) => Promise<unknown>;
   decide: (body: ConfirmInput) => Promise<unknown>;
+  /** The Create ticket button after both models were unavailable (doc 07 s6.7). */
+  offerTicket: () => Promise<unknown>;
 }
 
 /**
@@ -98,6 +100,7 @@ const NO_ACTIONS: CardActions = Object.freeze({
   pinRef: { current: null },
   verify: async () => undefined,
   decide: async () => undefined,
+  offerTicket: async () => undefined,
 });
 
 /**
@@ -223,7 +226,8 @@ const DECLINE_SUBJECT: Readonly<Record<string, string>> = Object.freeze({
 /**
  * What: one agent turn: trail, verification result and receipt lines, the answer (markdown, or
  *   the held, slow or retrying state), decline notes, the cards, Sources, ticket chips, the
- *   escalation line, error rows and the footer with the fallback badge.
+ *   escalation line, the Create ticket offer (both models unavailable, while it is still the
+ *   session's open offer), error rows and the footer with the fallback badge.
  * Use when: a turn thread item.
  * Inputs: { turn, conversation, index, cards, onResend?, inspect?, number, spoken? } (onResend is set when
  *   the customer's typed text for this turn is known, so a retryable error row can offer Retry;
@@ -307,6 +311,15 @@ function AssistantMessage({
       )}
       <SourcesRow views={sources} />
       {turn.escalation && <EscalationLine text={escalationWords(turn.escalation)} />}
+      {conversation.ticketOffer !== null && conversation.ticketOffer.turn_id === turn.turnId && (
+        <div className="flex flex-wrap items-center gap-3">
+          <Button variant="ink" size="sm" disabled={cards.disabled} onClick={() => void cards.offerTicket()}>
+            <LifeBuoy aria-hidden className="size-3.5" />
+            Create ticket
+          </Button>
+          <span className="text-caption text-muted">No ticket is created unless you ask.</span>
+        </div>
+      )}
       {tickets.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           {tickets.map((t) => (
@@ -419,7 +432,7 @@ export function ConversationLog({
     <div role="log" aria-label="Conversation" aria-live="off" className="flex flex-col gap-7">
       {thread.map((item, i) => {
         if (item.kind === "user") return <UserMessage key={item.id} text={item.text} mode={item.mode} />;
-        if (item.kind === "error") return <SendError key={item.id} item={item} onRetry={onRetry} />;
+        if (item.kind === "error") return <SendError key={item.id} item={item} onRetry={cards.disabled ? undefined : onRetry} />;
         if (item.kind === "agent-voice") return item.turnId !== null && turns[item.turnId] ? null : <SpokenLine key={item.id} item={item} />;
         const turn = turns[item.turnId];
         const prev = thread[i - 1];

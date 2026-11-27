@@ -504,6 +504,7 @@ export interface PrepareResult {
   ticket?: TicketRef | null;
   policy_version: string;
   changed: false;
+  card?: PendingPublic | null;
 }
 
 /** What: what a prepare tool returns to the model (before wrapping). Use when: ToolGuard wraps it. */

@@ -12,8 +12,10 @@
  *   Rules: act only on `response.done` with status completed and a function_call item
  *   (`function_call_arguments.done` also fires on cancel, SPIKE_NOTE s3); dedupe by call_id; the
  *   user item is the last `input_audio_buffer.committed` before that response's `response.created`;
- *   wait up to 1.5 s for its final transcript (order is not guaranteed); on timeout or error answer
- *   the fixed line; interrupting never cancels the backend turn.
+ *   wait up to 1.5 s for its final transcript (order is not guaranteed); the 25 s relay window
+ *   starts when the call arrives and includes that wait; on timeout or error answer the fixed line;
+ *   interrupting never cancels the backend turn; a call that has not posted when the call ends
+ *   never posts.
  *   CS-E-05.S4.T3 adds live transcripts and interruption: user finals and what the agent said
  *   go into the shared thread keyed by item_id (the say is linked to its voice/ask turn); a
  *   barge-in or Stop speaking while agent audio plays sends `output_audio_buffer.clear` at once
@@ -226,7 +228,7 @@ function questionOf(args: string | null): string {
  * Output: VoiceRelay.
  * Side effects: see module.
  * Role: see module. last_assistant_interrupted is true when the most recent say (the response
- *   created after our response.create) was cut by a barge-in, cleared by Stop speaking, or ended
+ *   whose echoed metadata carries the qs_say tag of our last response.create, review PR #46 M2) was cut by a barge-in, cleared by Stop speaking, or ended
  *   cancelled; it is read when a call arrives, then reset for the next say.
  */
 export function createVoiceRelay(d: RelayDeps): VoiceRelay {
@@ -241,7 +243,8 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
   const waiters = new Map<string, Array<(t: string) => void>>();
   const responseUser = new Map<string, string | null>();
   let lastCommitted: string | null = null;
-  let awaitingSay = false;
+  let sayTag: string | null = null;
+  let saySeq = 0;
   let sayResponseId: string | null = null;
   let sayPlaying = false;
   let sayInterrupted = false;
@@ -364,13 +367,16 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
   /**
    * What: relays one call and returns what Realtime should say.
    * Use when: a new call_id in a completed response.
-   * Inputs: call id, arguments, user item id, the interrupted flag read at arrival.
-   * Output: FunctionCallOutput (the fixed line on any failure).
+   * Inputs: call id, arguments, user item id, the interrupted flag read at arrival, the deadline (ms
+   *   since epoch, call arrival plus 25 s).
+   * Output: FunctionCallOutput (the fixed line on any failure), or null when the call ended before
+   *   the post (review PR #46 M5).
    * Side effects: one POST voice/ask through the store (events reach the shared reducer).
-   * Role: helper.
+   * Role: helper. An empty final transcript counts as none (review PR #46 M4).
    */
-  const relayOne = async (callId: string, args: string | null, userItemId: string | null, interrupted: boolean): Promise<FunctionCallOutput> => {
-    const transcript = await waitFinal(userItemId);
+  const relayOne = async (callId: string, args: string | null, userItemId: string | null, interrupted: boolean, deadline: number): Promise<FunctionCallOutput | null> => {
+    const transcript = (await waitFinal(userItemId)) || null;
+    if (closed) return null;
     const question = (questionOf(args) || transcript || "").slice(0, 2000);
     if (question === "") return { say: RELAY_FAILURE_SAY, escalated: false };
     const body: VoiceAskRequest = {
@@ -384,7 +390,8 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
       last_assistant_interrupted: interrupted,
     };
     try {
-      const { completed } = await d.store.getState().sendVoiceAsk(d.sessionId, body, { deps: d.deps, turnMs: relayMs, noBytesMs: relayMs });
+      const left = Math.max(1, deadline - Date.now());
+      const { completed } = await d.store.getState().sendVoiceAsk(d.sessionId, body, { deps: d.deps, turnMs: left, noBytesMs: left });
       lastTurnId = completed.turn_id;
       return toFunctionOutput(completed);
     } catch {
@@ -415,15 +422,17 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
     machine("tool_call");
     const userItemId = (id !== null ? responseUser.get(id) : undefined) ?? lastCommitted;
     const interrupted = sayInterrupted;
+    const deadline = Date.now() + relayMs;
     let remaining = calls.length;
     for (const c of calls) {
       const callId = str(c, "call_id") as string;
-      const p = relayOne(callId, str(c, "arguments"), userItemId, interrupted).then((out) => {
-        if (!closed) d.send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output: JSON.stringify(out) } });
+      const p = relayOne(callId, str(c, "arguments"), userItemId, interrupted, deadline).then((out) => {
+        if (!closed && out !== null) d.send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output: JSON.stringify(out) } });
         remaining -= 1;
         if (remaining === 0 && !closed) {
-          awaitingSay = true;
-          d.send({ type: "response.create" });
+          saySeq += 1;
+          sayTag = `say-${saySeq}`;
+          d.send({ type: "response.create", response: { metadata: { qs_say: sayTag } } });
         }
       });
       pending.add(p);
@@ -482,8 +491,9 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
         const id = str(e.response, "id");
         if (id === null) return;
         responseUser.set(id, lastCommitted);
-        if (awaitingSay) {
-          awaitingSay = false;
+        const meta = (e.response as { metadata?: unknown } | undefined)?.metadata;
+        if (sayTag !== null && str(meta, "qs_say") === sayTag) {
+          sayTag = null;
           sayTurn.set(id, lastTurnId);
           sayResponseId = id;
           sayInterrupted = false;

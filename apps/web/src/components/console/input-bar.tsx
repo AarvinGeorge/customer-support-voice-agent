@@ -3,16 +3,18 @@
  * What: the console input bar: a message field that sends on Enter, a send button, and the mic
  *   button that starts or ends a voice call.
  * Use when: the bottom of the console.
- * Inputs: { onSend, busy, disabled, placeholder?, inputRef?, voice? }.
+ * Inputs: { onSend, busy, disabled, placeholder?, inputRef?, locked?, restore?, caption?, voice? }.
  * Output: JSX.
- * Side effects: calls onSend with the trimmed text and clears the field.
+ * Side effects: calls onSend with the trimmed text and clears the field; puts a refused draft
+ *   back into an empty field (restore), or keeps it as a "Message not sent" chip with Restore when
+ *   the field already has text, so a refused message is never lost.
  * Role: CS-E-04.S5.T1 input bar (F1 s5.1, s5.4); CS-E-04.S5.T3 adds the 2,000 character counter
  *   (shown from 1,800, blocks sending over the limit; doc 07 s2.3) and the placeholder from the
  *   console (the pending-confirmation prompt). The mic is the minimal CS-E-05.S3.T3 control; the voice dock
  *   that replaces the bar during a call is CS-E-05.S4.T1.
  */
 import { ArrowUp, Mic, PhoneOff } from "lucide-react";
-import { useId, useState, type KeyboardEvent, type Ref } from "react";
+import { useEffect, useId, useState, type KeyboardEvent, type Ref } from "react";
 
 import { messageLimit } from "@/lib/turns/furniture";
 import { cn } from "@/lib/utils";
@@ -33,6 +35,12 @@ export interface InputBarProps {
   placeholder?: string;
   /** Ref to the message field, so the shell can return focus to it after a card press. */
   inputRef?: Ref<HTMLTextAreaElement>;
+  /** Why sending is paused (a 429 or 503 countdown), or null; typing stays allowed. */
+  locked?: string | null;
+  /** A draft the agent refused (429 or 503); restored once per id, into an empty field, else held as a chip with Restore. */
+  restore?: { id: number; text: string } | null;
+  /** Replaces the helper line under the bar (the limit caption). */
+  caption?: string | null;
   /** The voice call: live (a call is open) and the toggle the mic button calls; absent disables the mic. */
   voice?: { live: boolean; onToggle: () => void };
 }
@@ -45,10 +53,33 @@ export interface InputBarProps {
  * Side effects: see module.
  * Role: see module. Enter sends (ignored while an IME is composing); Shift+Enter is a newline.
  */
-export function InputBar({ onSend, busy, disabled, placeholder, inputRef, voice }: InputBarProps) {
+export function InputBar({ onSend, busy, disabled, placeholder, inputRef, locked = null, restore = null, caption = null, voice }: InputBarProps) {
   const [text, setText] = useState("");
+  const [held, setHeld] = useState<string | null>(null);
   const limit = messageLimit(text.trim());
-  const canSend = !busy && !disabled && text.trim() !== "" && !limit.over;
+  const canSend = !busy && !disabled && locked === null && text.trim() !== "" && !limit.over;
+  const restoreId = restore?.id ?? null;
+
+  useEffect(() => {
+    if (restore === null) return;
+    if (text === "") setText(restore.text);
+    else setHeld((h) => (h === null ? restore.text : `${h}\n${restore.text}`));
+    // Only a new notice id restores; later renders of the same notice keep what the customer typed.
+  }, [restoreId]);
+
+  /**
+   * What: puts the held (refused) text in front of whatever is in the field.
+   * Use when: the Restore button on the "Message not sent" chip.
+   * Inputs: none.
+   * Output: none.
+   * Side effects: updates the field and clears the chip.
+   * Role: handler.
+   */
+  const restoreHeld = () => {
+    if (held === null) return;
+    setText((current) => (current === "" ? held : `${held}\n${current}`));
+    setHeld(null);
+  };
   const counterId = useId();
 
   /**
@@ -81,6 +112,16 @@ export function InputBar({ onSend, busy, disabled, placeholder, inputRef, voice 
 
   return (
     <div className="flex w-full flex-col items-center gap-2">
+      {held !== null && (
+        <div role="group" aria-label="Message not sent" className="flex w-full items-center gap-3 rounded-lg border border-rule bg-margin px-3 py-2 text-body-sm text-ink">
+          <span className="min-w-0 flex-1 truncate" title={held}>
+            {held}
+          </span>
+          <button type="button" onClick={restoreHeld} className="shrink-0 rounded-md px-2 py-1 text-caption font-medium text-ember outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring">
+            Restore
+          </button>
+        </div>
+      )}
       <div
         className={cn(
           "flex w-full items-center gap-2 rounded-lg border border-rule bg-raised py-2.5 pr-2.5 pl-4 transition-colors duration-150 ease-out-expo focus-within:border-ember",
@@ -119,7 +160,7 @@ export function InputBar({ onSend, busy, disabled, placeholder, inputRef, voice 
           type="button"
           aria-label="Send"
           aria-disabled={!canSend}
-          title={busy ? "Finishing the current reply" : limit.over ? "Shorten your message to send" : undefined}
+          title={busy ? "Finishing the current reply" : locked ?? (limit.over ? "Shorten your message to send" : undefined)}
           onClick={send}
           className={cn(
             "flex size-9 shrink-0 items-center justify-center rounded-full bg-ink text-paper outline-none transition-[opacity,transform] duration-150 ease-out-expo focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-raised motion-safe:active:scale-[0.97]",
@@ -135,7 +176,7 @@ export function InputBar({ onSend, busy, disabled, placeholder, inputRef, voice 
           <span>{limit.over ? " characters. Shorten your message to send." : " characters"}</span>
         </p>
       ) : (
-        <p className="text-center text-caption text-muted">Answers come only from Quillstack help articles. Actions need your clear yes.</p>
+        <p className="text-center text-caption text-muted">{caption ?? "Answers come only from Quillstack help articles. Actions need your clear yes."}</p>
       )}
     </div>
   );

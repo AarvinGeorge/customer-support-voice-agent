@@ -297,6 +297,26 @@ describe("VoiceClient", () => {
     expect(h.fetchMock.mock.calls.some(([u]) => String(u) === `/api/sessions/${SID}/voice/ask`)).toBe(true);
   });
 
+  it("a stale mic grant that resolves after a newer one never leaves a mic open (review PR #46 M1)", async () => {
+    const grants: Array<(s: MediaStream) => void> = [];
+    const tracks = [0, 1].map(() => ({ stop: vi.fn(), kind: "audio" }));
+    const streams = tracks.map((t) => ({ getTracks: () => [t], getAudioTracks: () => [t] }) as unknown as MediaStream);
+    const h = harness({ getUserMedia: vi.fn(() => new Promise<MediaStream>((r) => grants.push(r))) });
+    const first = h.client.connect();
+    h.client.end();
+    const second = h.client.connect();
+    grants[1]?.(streams[1] as MediaStream);
+    await vi.advanceTimersByTimeAsync(0);
+    grants[0]?.(streams[0] as MediaStream);
+    await first;
+    await second;
+    expect(tracks[0]?.stop).toHaveBeenCalled();
+    expect(h.client.getSnapshot().state).toBe("connecting");
+    h.client.end();
+    expect(tracks[1]?.stop).toHaveBeenCalled();
+    expect(h.client.getSnapshot().state).toBe("ended");
+  });
+
   it("feeds the mic and the remote track into one level meter, reads both, and closes it at End", async () => {
     const h = harness();
     await connectLive(h);

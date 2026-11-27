@@ -5,7 +5,8 @@
  *   confirm stop S1 after its first or second turn, so the open card shows).
  * Use when: `pnpm dev` (the `.dev.tsx` extension is in pageExtensions only for the dev server;
  *   `next build` never compiles this file, so fixtures never reach the production output).
- * Inputs: the `fixture` query value (unknown values fall back to s1).
+ * Inputs: the `fixture` query value (unknown values fall back to s1); `demo=1` adds the fault
+ *   toggle and a sample 429 banner (CS-E-07.S1.T4 screenshots).
  * Output: the console with the replayed thread.
  * Side effects: reads one JSONL file from packages/contracts/fixtures on the server.
  * Role: dev tool for CS-E-04.S5.T1 and later console tasks.
@@ -74,5 +75,5 @@ export default async function ReplayPage({ searchParams }: { searchParams: Promi
     .map((l) => JSON.parse(l) as SseEvent);
   const keep = new Set([...new Set(events.map((e) => e.turn_id))].slice(0, script.turns ?? Infinity));
   const voiceDemo = q.voice === "listening" || q.voice === "interrupted" ? q.voice : undefined;
-  return <FixtureReplay events={events.filter((e) => keep.has(e.turn_id))} lines={script.lines} voiceDemo={voiceDemo} />;
+  return <FixtureReplay events={events.filter((e) => keep.has(e.turn_id))} lines={script.lines} demo={q.demo === "1"} voiceDemo={voiceDemo} />;
 }
