@@ -4,7 +4,7 @@
  *   toggle for the mic button.
  * Use when: the console shell renders the mic button and the voice line.
  * Inputs: the session id (null: no session, no client) and the turn store.
- * Output: { voice: VoiceSnapshot, toggle, available }.
+ * Output: VoiceController ({ voice, toggle, end, mute, stopSpeaking, levels, available }).
  * Side effects: creates a VoiceClient per session; ends the call on unmount or session change.
  * Role: React binding for CS-E-05.S3.T3; toggle calls connect synchronously inside the click
  *   so getUserMedia runs in the user gesture.
@@ -24,7 +24,35 @@ import { VOICE_LABELS, isLive } from "./machine";
  * Side effects: none.
  * Role: constant (stable reference for useSyncExternalStore).
  */
-const IDLE: VoiceSnapshot = Object.freeze({ state: "idle", label: VOICE_LABELS.idle, caption: null, error: null });
+const IDLE: VoiceSnapshot = Object.freeze({ state: "idle", label: VOICE_LABELS.idle, caption: null, error: null, muted: false, endsAt: null });
+
+/**
+ * What: what the console needs to drive a call.
+ * Use when: typing useVoice's result, or a stand-in (the dev replay, tests).
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: the shell's voice seam (CS-E-05.S4.T1).
+ */
+export interface VoiceController {
+  voice: VoiceSnapshot;
+  toggle: () => void;
+  end: () => void;
+  mute: () => void;
+  stopSpeaking: () => void;
+  levels: () => { mic: number; agent: number };
+  available: boolean;
+}
+
+/**
+ * What: levels when there is no client.
+ * Use when: no session.
+ * Inputs: none.
+ * Output: zeros.
+ * Side effects: none.
+ * Role: constant function.
+ */
+const NO_LEVELS = () => ({ mic: 0, agent: 0 });
 
 /**
  * What: a subscribe function that never notifies.
@@ -40,11 +68,11 @@ const noSubscribe = () => () => undefined;
  * What: the hook.
  * Use when: see module.
  * Inputs: sessionId, store.
- * Output: { voice, toggle, available }.
+ * Output: VoiceController.
  * Side effects: see module.
  * Role: see module.
  */
-export function useVoice(sessionId: string | null, store: StoreApi<TurnStoreState>) {
+export function useVoice(sessionId: string | null, store: StoreApi<TurnStoreState>): VoiceController {
   const client = useMemo(() => (sessionId === null ? null : createVoiceClient({ sessionId, store })), [sessionId, store]);
   useEffect(() => () => client?.end(), [client]);
   const voice = useSyncExternalStore(client?.subscribe ?? noSubscribe, client?.getSnapshot ?? (() => IDLE), () => IDLE);
@@ -63,5 +91,9 @@ export function useVoice(sessionId: string | null, store: StoreApi<TurnStoreStat
     else void client.connect();
   }, [client]);
 
-  return { voice, toggle, available: client !== null };
+  const end = useCallback(() => client?.end(), [client]);
+  const mute = useCallback(() => client?.toggleMute(), [client]);
+  const stopSpeaking = useCallback(() => client?.stopSpeaking(), [client]);
+  const levels = useMemo(() => (client === null ? NO_LEVELS : client.getLevels), [client]);
+  return { voice, toggle, end, mute, stopSpeaking, levels, available: client !== null };
 }

@@ -251,3 +251,39 @@ describe("review PR #20 fixes", () => {
     expect(document.getElementById(btn.getAttribute("aria-controls") as string)).not.toBeNull();
   });
 });
+
+describe("voice dock in the shell (CS-E-05.S4.T1)", () => {
+  /**
+   * What: a stand-in voice controller in a given state.
+   * Use when: rendering the shell mid-call without a VoiceClient.
+   * Inputs: the state.
+   * Output: a VoiceController with spy actions.
+   * Side effects: none.
+   * Role: test helper.
+   */
+  const controller = (state: "listening" | "ended" | "error") => ({
+    voice: { state, label: state, caption: null, error: state === "error" ? "Voice couldn't connect just now." : null, muted: false, endsAt: null },
+    toggle: vi.fn(),
+    end: vi.fn(),
+    mute: vi.fn(),
+    stopSpeaking: vi.fn(),
+    levels: () => ({ mic: 0, agent: 0 }),
+    available: true,
+  });
+
+  it("the dock replaces the input bar while a call is open; Back to typing ends the call", () => {
+    const v = controller("listening");
+    render(<ConsoleShell sessionId="s" store={replayed(s1)} voice={v} />);
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Voice call" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Back to typing/ }));
+    expect(v.end).toHaveBeenCalledTimes(1);
+  });
+
+  it("after the call the input bar is back, with the error words when it failed", () => {
+    render(<ConsoleShell sessionId="s" store={replayed(s1)} voice={controller("error")} />);
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Voice call" })).toBeNull();
+    expect(screen.getByText("Voice couldn't connect just now.")).toBeTruthy();
+  });
+});

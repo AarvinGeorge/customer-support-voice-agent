@@ -115,6 +115,8 @@ export interface RelayDeps {
  */
 export interface VoiceRelay {
   handle: (event: RealtimeEvent) => void;
+  /** Stop speaking: clears the agent's audio buffer (audio only; the backend turn goes on). */
+  stopSpeaking: () => void;
   close: () => void;
   settled: () => Promise<void>;
 }
@@ -372,6 +374,9 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
 
   return {
     handle,
+    stopSpeaking: () => {
+      if (!closed) d.send({ type: "output_audio_buffer.clear" });
+    },
     close: () => {
       closed = true;
     },
