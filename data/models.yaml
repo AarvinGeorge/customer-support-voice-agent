@@ -57,7 +57,7 @@ roles:
     attempt_timeout_s: 1.2
     price: {input_per_mtok: 0.02, output_per_mtok: 0.0, as_of: 2026-11-27}
   voice:
-    # Written by lane C (CS-E-05.S3.T1, evidence in spikes/realtime/SPIKE_NOTES); price added by lane B.
+    # Written by lane C (CS-E-05.S3.T1, evidence in spikes/realtime/SPIKE_NOTE.md); price added by lane B.
     provider: openai
     model: gpt-realtime-2.1          # GET /v1/models lists it; session.created echoed it
     voice: marin                     # accepted by client_secrets; echoed in session.created
