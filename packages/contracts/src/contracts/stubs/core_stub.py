@@ -8,7 +8,9 @@ Side effects: appends a RecordedCall to app.state.calls per request (in memory o
 body, PIN included, is kept: acceptable for a test double, never copy this log to a real sink).
 Session state (in memory, per app): a session is unverified until a successful verify with its
 X-Session-Id; three failures lock it; a commit is remembered so a second commit replays and the
-status read says committed.
+status read says committed. A prepare opens the stub pending for the session: me/context reports it
+(PendingPublic) until a commit or cancel, a commit or submit with the prepare's X-Turn-Id is 409
+CONFIRMATION_REQUIRED, and a second cancel is 409 PENDING_NOT_ACTIVE.
 Role: test double for core; it applies no business rules (one fixed persona, fixed decisions).
 Paths for step-up, billing email, grace extension, preferences and operators are designed only."""
 import json
@@ -104,13 +106,16 @@ def create_app() -> FastAPI:
     """What: build a fresh stub app with an empty call log.
     Use when: each test (fresh state) or the module-level app for uvicorn. Inputs: none.
     Output: FastAPI app; app.state.calls is the call log, app.state.verified the verified session
-    ids, app.state.failed failures per session, app.state.committed committed pending ids.
+    ids, app.state.failed failures per session, app.state.committed committed pending ids,
+    app.state.open the prepare turn id per session with an open pending, app.state.cancelled cancelled ids.
     Side effects: none. Role: factory."""
     app = FastAPI(title="Quillstack core stub", version=VERSION)
     app.state.calls = []
     app.state.verified = set()
     app.state.failed = {}
     app.state.committed = set()
+    app.state.open = {}
+    app.state.cancelled = set()
     app.add_middleware(_AuthAndRecord)
 
     def _sid(request: Request) -> str:
@@ -200,8 +205,9 @@ def create_app() -> FastAPI:
     def me_context(request: Request) -> Any:
         """What: MeContext, or 401 SESSION_NOT_VERIFIED. Use when: memory refresh. Inputs: request.
         Output: MeContext or error. Side effects: none. Role: s3.1."""
+        pending = ex.PENDING_PUBLIC if _sid(request) in app.state.open else None
         return _not_verified(request) or _dump(ex.ME_CONTEXT.model_copy(
-            update={"claims": ex.CLAIMS.model_copy(update={"session_id": _sid(request)})}))
+            update={"claims": ex.CLAIMS.model_copy(update={"session_id": _sid(request)}), "pending_action": pending}))
 
     @app.get("/v1/me/profile", response_model=None)
     def me_profile(request: Request) -> Any:
@@ -236,7 +242,12 @@ def create_app() -> FastAPI:
     def refund_prepare(body: RefundPrepareRequest, request: Request) -> Any:
         """What: always "allowed" (Pro within limits) for a verified session. Use when: prepare_refund.
         Inputs: RefundPrepareRequest. Output: PrepareResult or 401. Side effects: none. Role: s3.3."""
-        return _not_verified(request) or _dump(ex.PREPARE_ALLOWED)
+        if (err := _not_verified(request)) is not None:
+            return err
+        app.state.open[_sid(request)] = request.headers.get("x-turn-id", "")
+        app.state.committed.discard(ex.PENDING_ID)
+        app.state.cancelled.discard(ex.PENDING_ID)
+        return _dump(ex.PREPARE_ALLOWED)
 
     @app.get("/v1/actions/pending/{pending_id}")
     def pending_status(pending_id: str) -> Any:
@@ -248,31 +259,48 @@ def create_app() -> FastAPI:
             return _dump(ex.PENDING_STATUS.model_copy(update={"state": "committed", "result": ex.COMMIT_RESULT}))
         return _dump(ex.PENDING_STATUS)
 
+    def _same_turn(request: Request) -> JSONResponse | None:
+        """What: 409 CONFIRMATION_REQUIRED when the caller's X-Turn-Id is the prepare's turn. Use when: commit,
+        submit. Inputs: request. Output: error or None. Side effects: none. Role: s3.3 "later turn" check."""
+        prepared_in = app.state.open.get(_sid(request))
+        if prepared_in and prepared_in == request.headers.get("x-turn-id"):
+            return error_response("CONFIRMATION_REQUIRED", "Confirm in a later turn.")
+        return None
+
     @app.post("/v1/actions/pending/{pending_id}/commit")
-    def commit(pending_id: str) -> Any:
+    def commit(pending_id: str, request: Request) -> Any:
         """What: commit result; a repeat returns the stored result with replayed true.
         Use when: ingress confirm. Inputs: id. Output: CommitResult or 404.
         Side effects: remembers the commit. Role: s3.3 replay rule."""
         if pending_id != ex.PENDING_ID:
             return error_response("NOT_FOUND", "Not found.")
+        if (err := _same_turn(request)) is not None:
+            return err
         replayed = pending_id in app.state.committed
         app.state.committed.add(pending_id)
+        app.state.open.pop(_sid(request), None)
         return _dump(ex.COMMIT_RESULT.model_copy(update={"replayed": replayed}))
 
     @app.post("/v1/actions/pending/{pending_id}/submit")
-    def submit(pending_id: str) -> Any:
+    def submit(pending_id: str, request: Request) -> Any:
         """What: submit result. Use when: ingress confirm for needs_approval. Inputs: id.
         Output: SubmitResult or 404. Side effects: none. Role: s3.3."""
         if pending_id != ex.PENDING_ID:
             return error_response("NOT_FOUND", "Not found.")
+        if (err := _same_turn(request)) is not None:
+            return err
         return _dump(ex.SUBMIT_RESULT)
 
     @app.post("/v1/actions/pending/{pending_id}/cancel")
-    def cancel(pending_id: str) -> Any:
-        """What: cancel result. Use when: strict no or Cancel. Inputs: id. Output: CancelResult or 404.
-        Side effects: none. Role: s3.3."""
+    def cancel(pending_id: str, request: Request) -> Any:
+        """What: cancel result; a second cancel is 409 PENDING_NOT_ACTIVE. Use when: strict no or Cancel.
+        Inputs: id. Output: CancelResult, 404 or 409. Side effects: closes the session's pending. Role: s3.3."""
         if pending_id != ex.PENDING_ID:
             return error_response("NOT_FOUND", "Not found.")
+        if pending_id in app.state.cancelled:
+            return error_response("PENDING_NOT_ACTIVE", "That request is no longer active.")
+        app.state.cancelled.add(pending_id)
+        app.state.open.pop(_sid(request), None)
         return _dump(ex.CANCEL_RESULT)
 
     @app.post("/v1/tickets")
