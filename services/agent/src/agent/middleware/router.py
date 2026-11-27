@@ -20,6 +20,7 @@ from typing import Any, Awaitable, Callable
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import AIMessage, RemoveMessage
 
+from agent.line_ids import ROUTE, line_id
 from agent.gates import ScopeClassifier, next_weak_streak, run_scope_check
 from agent.say import speak
 from agent.turn_control import Route, TurnControl, current_control
@@ -110,7 +111,7 @@ def route_message(control: TurnControl) -> AIMessage:
     Use when: RouterMiddleware, and any hook that ends the turn in code (escalate_from_hook). Inputs: control with a
     route. Output: AIMessage. Side effects: sets control.route_message_id. Role: one builder for route lines."""
     reply = route_reply(control)
-    msg = AIMessage(content=reply.say if control.mode == "voice" else reply.text, id=f"route-{control.turn_id}")
+    msg = AIMessage(content=reply.say if control.mode == "voice" else reply.text, id=line_id(ROUTE, control.turn_id))
     control.route_message_id = msg.id
     return msg
 
