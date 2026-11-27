@@ -12,7 +12,7 @@ status read says committed. A prepare opens the stub pending for the session: me
 (PendingPublic) until a commit or cancel, a commit or submit with the prepare's X-Turn-Id is 409
 CONFIRMATION_REQUIRED, and a second cancel is 409 PENDING_NOT_ACTIVE.
 Role: test double for core; it applies no business rules (one fixed persona, fixed decisions).
-Paths for step-up, billing email, grace extension, preferences and operators are designed only."""
+Paths for step-up, billing email, grace extension, preferences, profile and operators are designed only."""
 import json
 import re
 from dataclasses import dataclass, field
@@ -209,12 +209,6 @@ def create_app() -> FastAPI:
         return _not_verified(request) or _dump(ex.ME_CONTEXT.model_copy(
             update={"claims": ex.CLAIMS.model_copy(update={"session_id": _sid(request)}), "pending_action": pending}))
 
-    @app.get("/v1/me/profile", response_model=None)
-    def me_profile(request: Request) -> Any:
-        """What: Profile, or 401 SESSION_NOT_VERIFIED. Use when: get_account_summary. Inputs: request.
-        Output: Profile or error. Side effects: none. Role: s3.2."""
-        return _not_verified(request) or _dump(ex.PROFILE)
-
     @app.get("/v1/me/charges", response_model=None)
     def me_charges(request: Request, ending: str | None = Query(default=None, pattern=r"^[0-9]{4}$"),
                    on: str | None = None, since_days: int = Query(default=90, ge=1, le=400),
@@ -303,10 +297,17 @@ def create_app() -> FastAPI:
         app.state.open.pop(_sid(request), None)
         return _dump(ex.CANCEL_RESULT)
 
-    @app.post("/v1/tickets")
-    def create_ticket(body: TicketCreate) -> dict[str, Any]:
-        """What: ticket created (fixed ticket ending 8213). Use when: create_ticket or escalation.
-        Inputs: TicketCreate. Output: TicketCreateResponse. Side effects: none. Role: s3.4."""
+    @app.post("/v1/tickets", response_model=None)
+    def create_ticket(body: TicketCreate, request: Request) -> Any:
+        """What: ticket created (fixed ticket ending 8213) for a verified session; an unverified one gets 403
+        REQUESTER_UNKNOWN {reason, verify_locked}, as core does. Use when: create_ticket or escalation.
+        Inputs: TicketCreate, X-Session-Id. Output: TicketCreateResponse or error. Side effects: none.
+        Role: s3.4 and D-070 (every ticket has a verified requester)."""
+        sid = _sid(request)
+        if sid not in app.state.verified:
+            return error_response("REQUESTER_UNKNOWN", "A ticket needs a verified customer.",
+                                  details={"reason": "requester_unknown",
+                                           "verify_locked": app.state.failed.get(sid, 0) >= VERIFY_FAILURES_PER_SESSION})
         return _dump(ex.TICKET_CREATED)
 
     return app

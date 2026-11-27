@@ -31,7 +31,8 @@ FACTS = [
     ("plans-pricing-contracts", "pricing", "tiers.pro.price_cents_per_seat_month|dollars", "{v} per seat per month"),
     ("plans-pricing-contracts", "pricing", "tiers.business.price_cents_per_seat_month|dollars", "{v} per seat per month"),
     ("support-and-escalation", "tickets", "tickets.limits.verified_per_account_per_day", "up to {v} tickets per day"),
-    ("support-and-escalation", "tickets", "tickets.limits.unverified_per_session", "up to {v} tickets"),
+    ("support-and-escalation", "how-to-reach-support", "identity.account_lock.failures", "after {v} failed attempts"),
+    ("support-and-escalation", "how-to-reach-support", "identity.account_lock.lock_minutes", "paused for {v} minutes"),
     ("support-and-escalation", "priorities-and-response-targets", "tickets.target_label.P1", "| P1 | {v} |"),
     ("support-and-escalation", "priorities-and-response-targets", "tickets.target_label.P2_enterprise", "| Enterprise | P2 | {v} |"),
     ("support-and-escalation", "priorities-and-response-targets", "tickets.target_label.P2", "| Business | P2 | {v} |"),
@@ -232,7 +233,6 @@ POLICY_MUTATIONS = [
     ("business seats max", lambda r: r["tiers"]["business"].update(seats=[30, 400])),
     ("auto cap", lambda r: r["actions"]["refund"]["tiers"]["pro"].update(auto_cap_cents=20000)),  # B
     ("repeat window", lambda r: r["actions"]["refund"].update(repeat_window_days=60)),
-    ("unverified tickets", lambda r: r["tickets"]["limits"].update(unverified_per_session=3)),
     ("pin digits", lambda r: r["identity"].update(pin_digits=6)),
     ("lock minutes", lambda r: r["identity"]["account_lock"].update(lock_minutes=30)),
 ]

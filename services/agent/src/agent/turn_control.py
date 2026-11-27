@@ -79,7 +79,7 @@ class TurnControl:
     (default loop_clock). `ticket` is the one ticket opened this turn (model tool or escalation code), so a later
     escalation in the same turn reuses it instead of opening a second one (CS-E-03.S4.T1).
     Output: the object. Side effects: none.
-    Gate fields (retrieval, retrieval_chunks, scope_check, grounding, citations, gate_message_id) are written by
+    Gate fields (retrieval, retrieval_chunks, scope_check, grounding, grounding_supported, citations, gate_message_id) are written by
     agent.gates and GroundingMiddleware and read by the router,
     GroundingMiddleware and the SSE adapter.
     Role: D-048 counters live here (executed tool calls only; incremented before the first await); the model
@@ -107,6 +107,8 @@ class TurnControl:
     prepares: int = 0
     failures: dict[str, int] = field(default_factory=dict)
     awaiting_verification: bool = False
+    session_awaiting_verification: bool = False  # agent.sessions flag at turn start (ingress), D-071 part 1
+    identity: str | None = None  # "user|account" this turn runs under (agent.gates.identity_key), review PR #71 N3
     verify_attempts_left: int = 3
     # Gate 1 (agent.gates, doc 07 s6.5): the last search's verdict facts, the relevant chunks the model saw (for
     # citations), and a pending scope check (verdict none) that RouterMiddleware runs before the next model call.
@@ -116,12 +118,16 @@ class TurnControl:
     # Gate 2 (agent.middleware.grounding, doc 07 s6.4): result for FinalConfidence.grounding, the citations of a
     # passed draft, and the id of the fixed clarifying line written after a fail.
     grounding: str = "not_run"
+    grounding_supported: int = 0  # supported claims on the Gate 2 pass (D-066, review PR #71 I2)
     citations: list[dict[str, Any]] = field(default_factory=list)
     gate_message_id: str | None = None
     # Gate model calls sent this turn (scope classifier, verifier): (model name, usage metadata or None), added to
     # Usage by stream_agent_turn so model_calls keeps matching LangSmith's llm run count (doc 07 s2.3).
     gate_calls: list[tuple[str, Any]] = field(default_factory=list)
     ticket: dict[str, Any] | None = None
+    # D-070: core's REQUESTER_UNKNOWN details ({reason, verify_locked}) when it refused this turn's ticket because the
+    # session has no verified requester; the escalation module then holds the escalation instead (agent.escalation).
+    requester_refusal: dict[str, Any] | None = None
     model_node_failed: bool = False  # the agent model node raised (primary and fallback failed or skipped), s6.7
     # Agent model replies cut at max_tokens and discarded (review PR #68 I-1): (model name, usage metadata), so the
     # drawer shows the reason and the turn usage keeps their tokens (each is already one of model_attempts).

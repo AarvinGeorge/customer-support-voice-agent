@@ -70,6 +70,8 @@ CORE_ERROR_CODES: dict[str, tuple[int, bool, bool | None]] = {
     "PENDING_EXPIRED": (410, False, False),
     "VALIDATION_ERROR": (422, False, False),
     "TICKET_LIMIT_REACHED": (429, False, False),
+    # D-070: a ticket needs a verified requester from the session claim; details {reason, verify_locked}.
+    "REQUESTER_UNKNOWN": (403, False, False),
     "TOOL_ERROR": (503, True, False),
     "INTERNAL": (500, True, None),
 }

@@ -2,7 +2,7 @@
 (card PINs replaced, emails masked) and INSERTs it into core.audit_events.
 Use when: any core code records a verify, prepare, commit, decline, ticket or fault event.
 Inputs: an AuditEvent, a connection (inside the caller's transaction), the clock, a RedactContext.
-Output: AuditEvent, audit_row, write_audit.
+Output: AuditEvent, audit_row, write_audit, write_refusal.
 Side effects: write_audit INSERTs one row and logs one line (redacted facts only).
 Role: doc 07 s11 and s12. The audit row commits or rolls back with the business effect it describes.
 args_sha256 is over the REDACTED args: a hash of raw args would let anyone with the table try all 10,000 PINs.
@@ -88,3 +88,23 @@ def write_audit(conn: Any, ev: AuditEvent, *, clock: Clock, context: RedactConte
                  tuple(row[c] for c in _COLUMNS))
     log.info("audit id=%s event=%s actor=%s session=%s trace=%s", audit_id, ev.event, ev.actor, ev.session_id, ev.trace_id)
     return audit_id
+
+
+def write_refusal(db: Any, *, event: str, code: str, status: int, session_id: str, clock: Clock,
+                  policy_version: str | None, trace_id: str | None, mode: str | None, action_type: str | None = None,
+                  pending_action_id: str | None = None, idempotency_key: str | None = None) -> None:
+    """What: one refusal audit row in its own transaction, after the request transaction rolled back.
+    Use when: a route raised a CoreError (prepare, commit, submit, cancel, ticket create), so the effect and any
+    audit row inside it are gone. Inputs: the Database, event name (e.g. ticket_create_refused), the error code and
+    HTTP status, session, clock, policy version, trace, mode, optional action type, pending id, idempotency key.
+    Output: none. Side effects: one INSERT on audit_events; a failure is logged, never raised (the original error must
+    reach the caller). Role: the one refusal writer (review M2, D-055; PR #78 review M-6)."""
+    try:
+        with db.tx() as conn:
+            write_audit(conn, AuditEvent(
+                event=event, actor="agent", trace_id=trace_id, session_id=uuid.UUID(session_id), mode=mode,
+                action_type=action_type, pending_action_id=pending_action_id, decision="error",
+                policy_version=policy_version, args={"code": code}, result_status=status,
+                idempotency_key=idempotency_key), clock=clock)
+    except Exception as audit_exc:  # noqa: BLE001 (the refusal itself must still be returned)
+        log.warning("refusal audit not written event=%s code=%s error=%s", event, code, type(audit_exc).__name__)

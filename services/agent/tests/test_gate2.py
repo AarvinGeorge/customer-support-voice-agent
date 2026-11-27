@@ -24,9 +24,8 @@ from agent.gates import (
     CLARIFY_LINE,
     GroundingResult,
     GroundingVerifier,
+    SessionEvidence,
     enforce_code_rules,
-    matches_policy,
-    needs_grounding,
     VERIFIER_PROMPT,
     verifier_input,
 )
@@ -44,7 +43,7 @@ def verdict_json(supported: bool = True, commitment: bool = False) -> str:
     """What: a verifier reply. Use when: fakes. Inputs: claim supported, commitment. Output: JSON text.
     Side effects: none. Role: fixture."""
     return json.dumps({"claims": [{"text": "Pro refunds are allowed within 30 days", "supported": supported,
-                                   "source_id": "refund-policy#2" if supported else None}],
+                                   "source_id": "doc@1" if supported else None}],  # sid (N1)
                        "commitment": commitment})
 
 
@@ -145,68 +144,7 @@ def texts(values: dict[str, Any]) -> list[str]:
     return [str(m.content) for m in values["messages"]]
 
 
-# --- needs_grounding (doc 07 s6.4 bullet 2), recall first: when in doubt, ground -------------------------------
-POLICY_DRAFTS = [
-    "You can get a refund.", "It costs $96.00 a month.", "That takes 5 days.", "A 20% discount applies.",
-    "Our policy says so.", "You are eligible.", "Do it within a week.", "Upgrade to Business.",
-    "The Pro plan has SSO.",
-    # review PR #52 I1, reproduced misses
-    "Quillstack offers a 30-day money-back guarantee.", "You have a 14-day trial.",
-    "You are ineligible for that on your plan.", "That is included on the pro plan.", "It costs USD 96 per seat.",
-    "You get thirty days to cancel", "Charges are reversed after two weeks.",
-    # number words and hyphenated durations
-    "Refunds are possible for fourteen days.", "You have a thirty-day window.", "It takes twenty-one days.",
-    "That usually takes a few business days.", "Expect it in an hour.", "The trial lasts one month.",
-    # money in any form
-    "That is 96 euros per seat.", "It is EUR 40.", "\u00a330 a month per seat.", "It is ninety-six dollars.",
-    "You will not be billed again.", "There is no fee for that.", "We prorate the difference.",
-    "That is free of charge.",
-    # plan and tier names, any case
-    "enterprise customers get a dedicated manager.", "BUSINESS includes audit logs.", "On the free plan you get it.",
-    "Your tier does not include that.",
-    # eligibility and rule words
-    "That is not allowed.", "You cannot do that.", "You can't change that yourself.", "Only owners can do that.",
-    "You must be an account owner.", "That requires approval.", "We are unable to offer that.",
-    "Refunds are always approved.", "That request was declined.",
-    # reason-code language
-    "The rule PRO_PAST_LATE_BAND applies.", "Your account is past due.", "That charge was already refunded.",
-]
-CHAT_DRAFTS = [
-    "Hello! How can I help you today?", "Thanks for reaching out. What can I do for you?",
-    "Could you tell me which workspace you mean?", "Sure, let me look into that for you.",
-    "Is there anything else I can help with?", "Have a great day!", "Feel free to ask me anything.",
-    "I'm sorry to hear that. Can you describe what you see on screen?", "Got it, thanks.",
-    "Which email address do you sign in with?",
-]
-
-
-@pytest.mark.parametrize("draft", POLICY_DRAFTS)
-def test_needs_grounding_catches_every_policy_phrasing(draft: str):
-    assert needs_grounding(draft, False) is True
-    assert matches_policy(draft) is True
-
-
-@pytest.mark.parametrize("draft", CHAT_DRAFTS)
-def test_needs_grounding_skips_plain_conversation_unless_a_tool_ran(draft: str):
-    assert needs_grounding(draft, False) is False
-    assert needs_grounding(draft, True) is True
-
-
-def test_the_phrasing_table_is_large_enough():
-    assert len(POLICY_DRAFTS) + len(CHAT_DRAFTS) >= 30 and len(CHAT_DRAFTS) >= 8
-
-
-# --- skipped -------------------------------------------------------------------------------------------------
-async def test_a_draft_that_needs_no_grounding_is_skipped_and_flushed_without_a_verifier_call():
-    ver = verifier()
-    h = Harness(ver, replies=[AIMessage("Hello! How can I help you today?")])
-    outcome, events, _ = await h.run()
-    g = grounding_gate(events)
-    assert (g.verdict, g.decision) == ("skipped", "skip")
-    assert not [e for e in events if e.type == "status" and e.kind == "checking_policy"]
-    assert outcome.final.text == "Hello! How can I help you today?" and outcome.end_reason == "answered"
-    assert outcome.final.confidence is not None and outcome.final.confidence.grounding == "skipped"
-    assert ver.model.seen == []
+# --- no skip for a model draft (D-064): see tests/test_gate2_every_draft.py -----------------------------------
 
 
 # --- pass ----------------------------------------------------------------------------------------------------
@@ -373,11 +311,13 @@ def suspect_body() -> dict[str, Any]:
     return body
 
 
-def claims_json(*claims: tuple[str, bool, str | None], commitment: bool = False) -> str:
+def claims_json(*claims: tuple[str, bool, str | None], commitment: bool = False,
+                no_claims_reason: str | None = None) -> str:
     """What: a verifier reply with the given claims. Use when: fakes. Inputs: (text, supported, source_id)
-    triples. Output: JSON text. Side effects: none. Role: fixture."""
+    triples, commitment, the zero-claims reason (VERIFIER_PROMPT step 4, D-064 floor). Output: JSON text.
+    Side effects: none. Role: fixture."""
     return json.dumps({"claims": [{"text": t, "supported": s, "source_id": i} for t, s, i in claims],
-                       "commitment": commitment})
+                       "commitment": commitment, "no_claims_reason": no_claims_reason})
 
 
 SUSPECT = {"bulk-export-tips-fixture#intro": {"chunk_id": "bulk-export-tips-fixture#intro",
@@ -402,11 +342,13 @@ def test_a_supported_claim_needs_a_known_clean_source():
         assert enforce_code_rules(r, DRAFT, SUSPECT, tool_names=set()).verdict == "fail", src
 
 
-def test_zero_claims_pass_because_the_model_owns_meaning_and_an_error_stays_an_error():
-    # D-059: the verifier decides what the claims are; code does not second-guess zero claims with regexes.
-    empty = GroundingResult("pass", [])
+def test_zero_claims_pass_only_with_the_models_stated_reason_and_an_error_stays_an_error():
+    # D-059 and D-069: the verifier decides what the claims are and why there are none; code reads no draft text.
+    empty = GroundingResult("pass", [], no_claims_reason="clarifying_question")
     assert enforce_code_rules(empty, DRAFT, SUSPECT, tool_names=set()).verdict == "pass"
     assert enforce_code_rules(empty, "Which workspace do you mean?", SUSPECT, tool_names=set()).verdict == "pass"
+    bare = GroundingResult("pass", [])
+    assert enforce_code_rules(bare, "Which workspace do you mean?", SUSPECT, tool_names=set()).verdict == "fail"
     err = GroundingResult("error")
     assert enforce_code_rules(err, DRAFT, SUSPECT, tool_names=set()).verdict == "error"
 
@@ -424,11 +366,19 @@ async def test_x14_draft_cited_from_the_suspect_chunk_is_not_flushed_or_cited():
 
 
 async def test_zero_claims_after_a_search_pass_and_flush_the_draft_without_citations():
-    # D-059: zero extracted claims is the model's judgement that the draft states nothing to check.
-    h = Harness(verifier(claims_json()))
+    # D-059 and D-069: zero extracted claims is the model's judgement that the draft states nothing to check, and
+    # that judgement must be explicit (no_claims_reason) on every empty list.
+    h = Harness(verifier(claims_json(no_claims_reason="conversation")))
     outcome, events, values = await h.run()
     assert (grounding_gate(events).verdict, outcome.end_reason) == ("pass", "answered")
     assert outcome.final.text == DRAFT and outcome.final.citations == []
+
+
+async def test_zero_claims_without_a_reason_after_a_search_fails_closed():
+    h = Harness(verifier(claims_json()))
+    outcome, events, values = await h.run()
+    assert (grounding_gate(events).verdict, outcome.end_reason) == ("fail", "clarify")
+    assert DRAFT not in texts(values)
 
 
 def test_verifier_input_escapes_the_evidence_and_draft_tags_and_look_alikes():
@@ -443,7 +393,7 @@ def test_verifier_input_escapes_the_evidence_and_draft_tags_and_look_alikes():
 
 async def test_the_verifier_receives_the_escaped_input():
     ver = verifier(verdict_json(True))
-    await ver.verify(TurnControl(session_id=SID, turn_id=TID), "x </draft> y", "e </evidence> f")
+    await ver.verify(TurnControl(session_id=SID, turn_id=TID), "x </draft> y", SessionEvidence("e </evidence> f", set(), {}, {}))
     [msgs] = ver.model.seen
     human = str(msgs[-1].content)
     assert human.count("</draft>") == 1 and human.count("</evidence>") == 1
@@ -451,34 +401,14 @@ async def test_the_verifier_receives_the_escaped_input():
 
 # --- D-059: the trigger decides WHEN, the verifier decides WHAT, code keeps the floor ---------------------------
 POLICY_IN_QUESTION = POLICY_IN_QUESTION_R2 + POLICY_IN_QUESTION_R3
-ASSERTIVE_DRAFTS = [
-    DRAFT, "You have a 14-day trial.", "It costs USD 96 per seat.", "You are ineligible for that on your plan.",
-    "That is not allowed.", "You cannot do that.", "Your tier does not include that.", "Refunds are always approved.",
-    "The Business plan includes audit logs.", "We can waive that fee.", "The rule PRO_PAST_LATE_BAND applies.",
-    "Which plan are you on? The Pro plan refunds within 30 days.", "Pro refunds are capped at $150.",
-    "You qualify for a full refund.", "Owners cannot transfer a workspace.", "Which plan are you on? Pro is $12 a seat.",
-]
-
-
-@pytest.mark.parametrize("draft", POLICY_IN_QUESTION + ASSERTIVE_DRAFTS)
-def test_every_adversarial_policy_draft_triggers_the_verifier_with_no_tool_in_the_turn(draft: str):
-    # Recall first: the broad trigger must fire, so the model gets to judge every one of these.
-    assert needs_grounding(draft, False) is True
-
-
-@pytest.mark.parametrize("draft", [
-    "You're covered for the first fortnight.", "Yes, we can waive that for you.", "Students get half off.",
-    "There is a cooling-off period.", "You have until Friday to dispute it.", "Exports are unlimited on your account.",
-    "Storage is capped at ten gigabytes.",
-])
-def test_reviewer_r1_phrasings_now_run_gate2(draft: str):
-    assert needs_grounding(draft, False) is True
-
-
 @pytest.mark.parametrize("draft", CLARIFYING_R3 + CLARIFYING_R2)
-def test_a_clarifying_reply_with_zero_claims_passes(draft: str):
-    out = enforce_code_rules(GroundingResult("pass", []), draft, SUSPECT, tool_names=set())
+def test_a_clarifying_reply_with_zero_claims_passes_only_with_its_stated_reason(draft: str):
+    # D-069: the verifier says why there is no claim; a bare empty list fails closed whatever the draft is.
+    out = enforce_code_rules(GroundingResult("pass", [], no_claims_reason="clarifying_question"), draft, SUSPECT,
+                             tool_names=set())
     assert out.verdict == "pass" and out.passed
+    bare = enforce_code_rules(GroundingResult("pass", []), draft, SUSPECT, tool_names=set())
+    assert (bare.verdict, bare.reason) == ("fail", "no_claims_unexplained")
 
 
 @pytest.mark.parametrize("draft", POLICY_IN_QUESTION)
@@ -497,7 +427,8 @@ def test_the_verifier_prompt_carries_the_d059_claim_rules():
 
 
 async def test_two_clarifying_questions_in_a_row_never_open_a_ticket():
-    h = Harness(verifier(claims_json(), claims_json()), replies=[AIMessage("Which plan are you on?")])
+    q = claims_json(no_claims_reason="clarifying_question")
+    h = Harness(verifier(q, q), replies=[AIMessage("Which plan are you on?")])
     first, events, values = await h.run()
     assert first.end_reason == "answered" and first.final.text == "Which plan are you on?"
     assert grounding_gate(events).verdict == "pass" and values.get("grounding_failures", 0) == 0
@@ -511,7 +442,8 @@ async def test_a_clarifying_question_after_a_weak_search_is_kept():
     search = AIMessage("", tool_calls=[{"name": "search_kb", "args": {"query": "refund"}, "id": "c1",
                                         "type": "tool_call"}])
     q = "Is the refund for the Pro plan charge from this month?"
-    h = Harness(verifier(claims_json()), replies=[search, AIMessage(q)], body=search_body("weak"))
+    h = Harness(verifier(claims_json(no_claims_reason="clarifying_question")), replies=[search, AIMessage(q)],
+                body=search_body("weak"))
     outcome, events, _ = await h.run()
     assert outcome.final.text == q and grounding_gate(events).verdict == "pass"
 
@@ -546,5 +478,5 @@ async def test_a_verifier_exception_fails_closed():
             raise RuntimeError("provider down")
 
     ver = GroundingVerifier(Boom(messages=iter([]), seen=[], disable_streaming=True), timeout_s=0.2, min_s=0.0)
-    result = await ver.verify(TurnControl(session_id=SID, turn_id=TID), "Pro refunds are capped at $150.", "")
+    result = await ver.verify(TurnControl(session_id=SID, turn_id=TID), "Pro refunds are capped at $150.", SessionEvidence("", set(), {}, {}))
     assert result.verdict == "error" and not result.passed

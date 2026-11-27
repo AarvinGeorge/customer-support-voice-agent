@@ -158,7 +158,7 @@ def test_run_cases_grades_every_case_and_unscripted_ones_are_error() -> None:
 
     result = runner.run_cases(all_cases, PERSONAS, client, store, POLICY, before_case=before)
     verdicts = {g.case_id: g.verdict for g in result.grades}
-    assert len(verdicts) == 14 and verdicts["G-01"] == "pass"
+    assert len(verdicts) == 15 and verdicts["G-01"] == "pass"
     assert all(v == "error" for k, v in verdicts.items() if k != "G-01")
 
 

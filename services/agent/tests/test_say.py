@@ -22,7 +22,7 @@ from escalation_world import OWNER, Boom, World, error_response
 SNAPSHOT = Path(__file__).parent / "snapshots" / "say_fixed_lines.txt"
 UNSPEAKABLE = re.compile(r"[*_`#\[\]<>|$%]|\d|\b[A-Z]{2,4}-[0-9A-F]{4,}\b|https?://")
 # Lines that only go to the thread for the model to read (never shown or spoken to the customer).
-THREAD_ONLY = (verification.VERIFIED_THREAD_LINE, verification.CARD_SUBMITTED_LINE)
+THREAD_ONLY = (verification.VERIFIED_THREAD_LINE, verification.CARD_SUBMITTED_LINE, verification.NO_PIN_PRESSED)
 DISPLAY, SHORT, REF = "ticket ending 8213", "8213", "0a1f"
 
 
@@ -70,8 +70,11 @@ def fixed_lines() -> dict[str, str]:
         "handler.verify_expired": handler.VERIFY_EXPIRED_LINE, "voice_yes.reprompt": voice_yes.REPROMPT_LINE,
         "confirm.verify_lapsed": confirm.VERIFY_LAPSED_LINE,
         "verification.failed": verification.FAILED_LINE.format(n=2, tries="tries"),
-        "verification.locked": verification.LOCKED_LINE.format(display=DISPLAY),
-        "verification.locked_no_ticket": verification.LOCKED_NO_TICKET_LINE,
+        "verification.locked": verification.LOCKED_LINE, "verification.no_pin": verification.NO_PIN_LINE, "verification.held_ticket":
+            verification.HELD_TICKET_LINE.format(name="Priya", clause=router.TICKET_CLAUSE.format(display=DISPLAY)),
+        "escalation.hold": f"{router.ESCALATION_LEADS['not_in_docs']} {escalation.HOLD_SAY}",
+        "escalation.hold_chat": f"{router.ESCALATION_LEADS['not_in_docs']} {escalation.HOLD_LINE}",
+        "escalation.card_pending": escalation.CARD_PENDING_LINE, "escalation.no_requester": escalation.NO_REQUESTER_LINE,
         "verification.conflict": verification.CONFLICT_LINE, "verification.unavailable": verification.UNAVAILABLE_LINE,
         "confirm.cancelled": confirm.CANCELLED_LINE, "confirm.timed_out": confirm.TIMED_OUT_LINE,
         "confirm.not_active": confirm.NOT_ACTIVE_LINE, "confirm.step_up": confirm.STEP_UP_LINE,
@@ -130,7 +133,8 @@ async def test_voice_finals_are_spoken_end_to_end() -> None:
     assert outcome.final.text.endswith("ticket ending 8213.")
     assert outcome.final.say.endswith("ticket ending eight two one three.") and not UNSPEAKABLE.search(outcome.final.say)
     thread = (await w.values())["messages"]
-    assert thread[-1].content == outcome.final.say  # voice thread lines are the spoken form
+    assert thread[-2].content == outcome.final.say  # voice thread lines are the spoken form
+    assert str(thread[-1].id).startswith("record-")  # then the code record of the ticket (D-071)
 
 
 async def test_model_answers_get_a_plain_say_and_keep_markdown_in_text() -> None:

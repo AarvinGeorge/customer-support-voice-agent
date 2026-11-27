@@ -278,7 +278,7 @@ async def test_a_closing_tool_result_tag_in_a_result_comes_back_escaped():
     text = str(msg.content)
     assert text.count("</tool_result>") == 1 and text.count("<tool_result") == 1 and "<system" not in text
     assert payload(msg, "list_tickets")["tickets"][0]["summary"].replace("&lt;", "<") == HOSTILE
-    assert msg.artifact is None  # the raw result is not kept in the thread twice
+    assert msg.artifact == {"bound_to": "None|None"}  # only the verification stamp; the raw result is not kept twice
 
 
 @pytest.mark.parametrize("lookalike", [

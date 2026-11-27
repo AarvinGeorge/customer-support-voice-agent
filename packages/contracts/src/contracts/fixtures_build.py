@@ -362,7 +362,8 @@ ROLES_CHUNK = {
 }
 ROLE_POLICY_REF = {"article": "roles-and-permissions", "section": "billing-permissions",
                    "title": "Billing permissions"}
-ROLE_DECLINE_MESSAGE = "Only an account owner or billing admin can make billing changes."
+ROLE_DECLINE_MESSAGE = ("Only an account owner or billing admin can make billing changes. An owner or billing admin on "
+                        "your account can ask for it.")
 
 
 def _s3_decline() -> list[dict]:

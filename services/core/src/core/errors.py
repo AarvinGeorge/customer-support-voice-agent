@@ -23,7 +23,7 @@ _CLASS = {
     "ACTION_IN_PROGRESS": "core_conflict", "PENDING_NOT_ACTIVE": "core_conflict",
     "CONFIRMATION_REQUIRED": "core_conflict", "RULES_CHANGED": "core_conflict",
     "INVALID_TRANSITION": "core_conflict", "PENDING_EXPIRED": "core_conflict",
-    "VALIDATION_ERROR": "validation", "TICKET_LIMIT_REACHED": "rate_limited",
+    "VALIDATION_ERROR": "validation", "TICKET_LIMIT_REACHED": "rate_limited", "REQUESTER_UNKNOWN": "access_denied",
     "TOOL_ERROR": "core_unavailable", "INTERNAL": "core_unavailable",
 }
 _MESSAGE = {

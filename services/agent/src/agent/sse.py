@@ -24,6 +24,8 @@ from contracts.errors import ErrorBody
 from contracts.events import KEEPALIVE, Citation, Envelope, FinalAnswer, FinalConfidence, Usage, format_sse, parse_event
 from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 
+from agent.gates import answered_with_support
+from agent.line_ids import LIMIT, code_line
 from agent.middleware.router import route_reply
 from agent.models.usage import add_usage, normalize_usage, token_usage
 from agent.say import speak
@@ -323,8 +325,10 @@ def classify_final(stream: TurnStream, messages: list[Any], model_ids: set[str],
             stream.emit("token", text=piece)
         cites = [Citation.model_validate(c) for c in (control.citations if control is not None else [])]
         final = FinalAnswer(text=text, say=text, citations=cites, escalated=False, confidence=final_confidence(control))
-        # Gate 1 row 2: a first weak turn ends with the model's one clarifying question.
-        clarify = control is not None and (control.retrieval or {}).get("decision") == "clarify"
+        # Gate 1 row 2: a first weak turn ends with the model's one clarifying question; D-066: unless the model
+        # answered and Gate 2 passed it with a supported claim, which is an answer.
+        clarify = (control is not None and (control.retrieval or {}).get("decision") == "clarify"
+                   and not answered_with_support(control))
         return TurnOutcome(final=final, usage=usage, end_reason="clarify" if clarify else "answered",
                            model_used=model_used)
     # Another hook-written line (Gate 2): deterministic, no tokens.
@@ -456,5 +460,5 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
     outcome.fallback_used = outcome.usage.fallback_used
     if outcome.end_reason == "limit_reached" and messages:
         # doc 07 s2.4 step 15 / spike 17a: replace the framework line in the thread with ours.
-        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=messages[-1].id), AIMessage(LIMIT_LINE, id=f"limit-{control.turn_id}")]})
+        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=messages[-1].id), code_line(LIMIT, control.turn_id, LIMIT_LINE, control.identity)]})
     return outcome

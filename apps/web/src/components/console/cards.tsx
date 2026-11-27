@@ -181,7 +181,8 @@ function useSinglePress() {
  *   verificationCardState; `disabled` while any turn streams; `account` and `onAccountChange`
  *   keep the Account ID outside the card so a retry card shows it again (never the PIN);
  *   `pinRef` lets the shell focus the PIN of a retry card; `onSubmit` sends
- *   TurnRequest.verification and resolves when the turn settles.
+ *   TurnRequest.verification and resolves when the turn settles; `onNoPin` sends the explicit
+ *   "I don't have my PIN" input (D-070: no ticket, the "How to reach support" line, no model call).
  */
 export interface VerificationCardProps {
   request: VerificationRequiredEvent | null;
@@ -191,6 +192,7 @@ export interface VerificationCardProps {
   onAccountChange: (value: string) => void;
   pinRef: RefObject<HTMLInputElement | null>;
   onSubmit: (body: VerificationInput) => Promise<unknown>;
+  onNoPin: () => Promise<unknown>;
 }
 
 /**
@@ -204,7 +206,7 @@ export interface VerificationCardProps {
  *   only, 4 at most, autocomplete "one-time-code" so password managers do not offer to save it
  *   (M2); only its length is kept in state.
  */
-export function VerificationCard({ request, state, disabled, account, onAccountChange, pinRef, onSubmit }: VerificationCardProps) {
+export function VerificationCard({ request, state, disabled, account, onAccountChange, pinRef, onSubmit, onNoPin }: VerificationCardProps) {
   const headingId = useId();
   const accountId = useId();
   const pinId = useId();
@@ -305,6 +307,9 @@ export function VerificationCard({ request, state, disabled, account, onAccountC
             <div className="flex items-center gap-3">
               <Button type="submit" variant="ink" size="sm" disabled={!canVerify}>
                 {press.busy ? "Verifying..." : "Verify"}
+              </Button>
+              <Button type="button" variant="ghost" size="sm" disabled={disabled || press.busy} onClick={() => press.run(onNoPin)}>
+                {"I don't have my PIN"}
               </Button>
               <span id={attemptsId} className="text-caption text-muted">
                 {left !== null ? `${left} ${left === 1 ? "attempt" : "attempts"} left` : ""}

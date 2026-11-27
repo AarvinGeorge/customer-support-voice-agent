@@ -95,13 +95,11 @@ describe("verificationNotice: one test per verification result (doc 07 s6.2, s6.
     expect(verificationNotice(vr({ status: "failed" })).tone).toBe("error");
   });
 
-  it("locked says verification is locked and names core's ticket", () => {
-    const n = verificationNotice(vr({ status: "locked", ticket: TICKET }));
+  it("locked says verification is locked, promises no follow-up and points to How to reach support (D-070)", () => {
+    const n = verificationNotice(vr({ status: "locked" }));
     expect(n.tone).toBe("error");
-    expect(n.text).toBe("For your security, verification is locked for this conversation. Our team will follow up on ticket ending 8213.");
-    expect(verificationNotice(vr({ status: "locked" })).text).toBe(
-      "For your security, verification is locked for this conversation. Our team will follow up.",
-    );
+    expect(n.text).toBe("For your security, verification is locked for this conversation. See How to reach support in our help center for what to do next.");
+    expect(n.text).not.toMatch(/follow up|ticket/);
   });
 
   it("conflict uses the doc 07 s6.3 sentence", () => {

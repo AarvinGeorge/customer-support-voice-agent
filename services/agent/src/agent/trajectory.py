@@ -17,7 +17,7 @@ from typing import Any, Awaitable, Callable
 
 from contracts import limits
 from contracts.events import Envelope
-from contracts.redact import RedactContext, redact
+from contracts.redact import redact_system
 from psycopg.types.json import Jsonb
 
 log = logging.getLogger("agent.trajectory")
@@ -33,12 +33,15 @@ BUFFER_MAX = 5000       # about 125 turns of 40 events; beyond this new rows are
 Row = tuple[Any, ...]
 
 
-def event_row(ev: Envelope, context: RedactContext | None = None) -> Row:
-    """What: one agent.turn_events row for an event, payload redacted with contracts redact.
-    Use when: TrajectoryWriter.add. Inputs: the typed event; redaction context (default: no session facts).
+def event_row(ev: Envelope) -> Row:
+    """What: one agent.turn_events row for an event, payload redacted with contracts redact_system.
+    Use when: TrajectoryWriter.add. Inputs: the typed event.
     Output: (turn_id, seq, session_id, ts, type, step_id, Jsonb(payload)).
-    Side effects: none. Role: doc 07 s12 "payload: the full event as sent on SSE, already redacted"."""
-    payload = redact(ev.model_dump(mode="json", by_alias=True), context or RedactContext())
+    Side effects: none. Role: doc 07 s12 "payload: the full event as sent on SSE, already redacted". Events are
+    system-originated (D-071 part 3): customer text in them was redacted at ingress, so the PIN scanner does not
+    run on their fields again and code-generated ids ("short_id": "8352") are stored as sent; PIN fields and
+    emails are still redacted."""
+    payload = redact_system(ev.model_dump(mode="json", by_alias=True))
     return (payload["turn_id"], payload["seq"], payload["session_id"], payload["ts"], payload["type"],
             payload.get("step_id"), Jsonb(payload))
 

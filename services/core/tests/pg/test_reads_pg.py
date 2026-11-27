@@ -5,13 +5,16 @@ Role: CS-E-03.S13.T3 Done-when: a member gets 403 ROLE_NOT_PERMITTED for an exis
 context returns only the open pending action. Sessions are written straight into session_claims (verify is S1.T1)."""
 from __future__ import annotations
 
+import asyncio
 import random
+import sys
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import httpx
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
@@ -21,6 +24,10 @@ from core.app import create_app
 from core.clock import FixedClock
 from core.config import Settings
 from tests.conftest import TOKENS
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "services" / "agent" / "src"))
+from agent.clients.core_agent import CoreAgentClient  # noqa: E402  # pyright: ignore[reportMissingImports]  (the agent's real client, stdlib plus httpx only)
+from agent.turn_control import TurnControl  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 pytestmark = pytest.mark.pg
 NY = ZoneInfo("America/New_York")
@@ -120,7 +127,6 @@ def build_world(c: psycopg.Connection) -> SimpleNamespace:
     w.t_pending = ticket(w.a, w.owner, "pending_approval", w.s_owner2, category="refund", pa=w.pa_approval, created=20)
     w.t_resolved = ticket(w.a, w.owner, "resolved", w.s_owner, category="access", created=30)
     w.t_b = ticket(w.b, w.other, "open", uuid.uuid4(), created=40)
-    w.t_anon = ticket(None, None, "open", w.s_anon, category="bug", verified=False, created=50)
     return w
 
 
@@ -148,6 +154,7 @@ def world(app_url, owner_url, migrated):
                                              "X-Mode": "chat"})
 
         w.get = get
+        w.client = client
         yield w
     accounts = [w.a, w.b]
     with psycopg.connect(owner_url, autocommit=True) as o:
@@ -274,7 +281,7 @@ def test_charges_ending_on_since_days_and_limit(world):
 
 def test_tickets_by_role_status_and_ending(world):
     """What: an owner sees the account's open and pending tickets (status=open), all four with status=all, one with
-    ending; a member sees their own only; an unverified session sees only its own session's tickets; other accounts
+    ending; a member sees their own only; an unverified session sees none (D-070: it can own no ticket); other accounts
     never appear; each item has the TicketView fields. Use when: always. Inputs: world. Output: assertions.
     Side effects: none. Role: doc 07 s3.2 /me/tickets."""
     opened = world.get(world.s_owner, "/v1/me/tickets").json()["tickets"]
@@ -289,8 +296,7 @@ def test_tickets_by_role_status_and_ending(world):
     assert set(one[0]) == keys and one[0]["category"] == "bug" and one[0]["display"] == f"ticket ending {world.t_old[-4:]}"
     member = world.get(world.s_member, "/v1/me/tickets?status=all").json()["tickets"]
     assert [t["ticket_id"] for t in member] == [world.t_member]
-    anon = world.get(world.s_anon, "/v1/me/tickets").json()["tickets"]
-    assert [t["ticket_id"] for t in anon] == [world.t_anon] and anon[0]["verified"] is False and anon[0]["priority"] == "P4"
+    assert world.get(world.s_anon, "/v1/me/tickets").json() == {"tickets": []}  # D-070: no ticket without a requester
     assert world.get(uuid.uuid4(), "/v1/me/tickets").json() == {"tickets": []}
 
 
@@ -306,3 +312,32 @@ def test_a_failed_world_build_leaves_no_committed_rows(app_url, migrated, monkey
     with psycopg.connect(app_url) as c:
         left = c.execute("SELECT count(*) FROM accounts WHERE id = ANY(%s)", (["QS-20000", "QS-60000"],)).fetchone()
     assert left == (0,)
+
+
+class _ThroughCoreApp(httpx.AsyncBaseTransport):
+    """What: an httpx transport that sends each request through the real core app (a TestClient).
+    Use when: the agent's own client must talk to core's real routes. Inputs: a TestClient.
+    Output: the app's response. Side effects: one in-process request. Role: lets the real CoreAgentClient run against core."""
+
+    def __init__(self, client: TestClient) -> None:
+        """What: keep the client. Use when: building. Inputs: TestClient. Output: none. Side effects: none. Role: ctor."""
+        self.client = client
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        """What: forward the request to the app. Use when: the client calls. Inputs: request. Output: response.
+        Side effects: in-process request. Role: bridge."""
+        r = self.client.request(request.method, str(request.url), headers=dict(request.headers), content=request.content)
+        return httpx.Response(r.status_code, headers=r.headers, content=r.content)
+
+
+def test_get_account_summary_works_against_the_real_core_route(world):
+    """What: the agent's real CoreAgentClient.get_profile (what get_account_summary calls) gets the owner's Profile from
+    the real core app on the real database, with the agent token and headers it really sends.
+    Use when: always. Inputs: world. Output: assertions. Side effects: none.
+    Role: CS-E-03.S13 regression: the tool called GET /v1/me/profile, a route core never built, and 404ed live."""
+    client = CoreAgentClient("http://core", TOKENS["agent_tools"], http=httpx.AsyncClient(transport=_ThroughCoreApp(world.client)))
+    control = TurnControl(session_id=str(world.s_owner), turn_id="turn-1", mode="chat")
+    profile = asyncio.run(client.get_profile(control))
+    assert profile == {"account_id": world.a, "account_name": "Acme", "display_name": "Priya", "role": "owner",
+                       "tier": "pro", "contract_status": "active", "grace_until": None, "seats": 5,
+                       "billing_email_masked": "p***@acme.com", "notification_prefs": {"weekly_digest": False}}

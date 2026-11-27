@@ -46,7 +46,7 @@ from agent.tracing import build_langsmith_client
 from agent.trajectory import TrajectoryWriter
 from agent.structured.confirm import CoreCommitClient
 from agent.turn_body import PgSessionFlags
-from agent.voice import PgVoiceStore, TranscriptMerger, VoiceDeps, VoiceSessionRow
+from agent.voice import PgVoiceStore, TranscriptMerger, VoiceDeps, VoiceSessionRow, load_relay_facts
 
 pytestmark = pytest.mark.pg
 
@@ -188,7 +188,8 @@ class NoMinter:
 
 class Fixed(GenericFakeChatModel):
     """What: a fake gate model that records its inputs and replies per the shared mode: the scope classifier "ON"
-    (or "OFF" when mode["scope"] is "OFF"); the grounding verifier zero claims (passes, D-059), or with
+    (or "OFF" when mode["scope"] is "OFF"); the grounding verifier zero claims with no_claims_reason "conversation" (passes; D-069: every empty
+    list needs a reason), or with
     mode["verifier"] == "fail" one unsupported claim quoting its input plus a commitment (escalate with a ticket).
     Use when: the two gates of this test. Inputs: role, shared mode dict. Output: AI message.
     Side effects: records every call in `seen`. Role: gate inputs become a searched sink, and the failing paths run."""
@@ -208,7 +209,7 @@ class Fixed(GenericFakeChatModel):
             reply = json.dumps({"claims": [{"text": quoted, "supported": False, "source_id": "none"}],
                                 "commitment": True})
         else:
-            reply = '{"claims": [], "commitment": false}'
+            reply = '{"claims": [], "commitment": false, "no_claims_reason": "conversation"}'
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=reply))])
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kw):  # type: ignore[override]
@@ -397,8 +398,13 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                     Output: summary. Side effects: none. Role: fake."""
                     return SessionSummary()
 
+                async def relay_facts(sid: str) -> Any:
+                    """What: the production RelayFacts loader over Postgres and this saver. Use when: POST
+                    /transcript. Inputs: sid. Output: RelayFacts. Side effects: reads. Role: wiring (D-071)."""
+                    return await load_relay_facts(PgTurnStore(pool), saver, sid)
+
                 voice = VoiceDeps(store=PgVoiceStore(pool), minter=NoMinter(), voice_spec=None, summary=summary,
-                                  ingress=ingress)
+                                  ingress=ingress, relay_facts=relay_facts)
 
                 async def ok() -> str:
                     """What: healthy probe. Use when: readyz. Inputs: none. Output: ok. Side effects: none.
@@ -470,9 +476,30 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                         if ev[-1].final.text == TYPED_PIN_LINE:
                             refused.append(text)
                     # 6. Every bypass as posted voice chatter, then merged; the spoken ones also as voice/ask.
+                    # The session holds an issued ticket (rereview-pr76-r1 N3), so the relay exemption is live.
                     sid, vs_id = await new_session(pool, sids)
-                    items = [{"realtime_item_id": f"item_b{n}", "role": "user", "text": text, "interrupted": False,
-                              "client_ts": "2026-11-28T13:00:00Z"} for n, text in enumerate(BYPASSES)]
+                    ref = ex.TICKET_REF.model_dump(mode="json")
+                    async with pool.connection() as conn:
+                        await conn.execute(
+                            "INSERT INTO agent.turns (turn_id, session_id, client_turn_id, mode, input_kind, status, "
+                            "deadline_at, started_at, final) VALUES (%s, %s, %s, 'voice', 'voice', 'completed', "
+                            "now() + interval '45 seconds', now() - interval '1 minute', %s)",
+                            (str(uuid.uuid4()), sid, str(uuid.uuid4()),
+                             json.dumps({"text": f"I've opened {ref['display']} for our team.", "say": "s",
+                                         "ticket": ref})))
+                    facts = await relay_facts(sid)
+                    assert facts.ids == {ref["short_id"]}, facts  # positive control: a non-empty issued id set
+                    # D-071 / review-pr76 M3: every bypass also as an assistant item (the realtime model echoing it,
+                    # or a browser that labels customer speech "assistant"); provenance is decided server-side.
+                    items = [{"realtime_item_id": f"item_{role[0]}{n}", "role": role, "text": text,
+                              "interrupted": False, "client_ts": "2026-11-28T13:00:00Z"}
+                             for role in ("user", "assistant") for n, text in enumerate(BYPASSES)][:50]
+                    items2 = [{"realtime_item_id": f"item_{role[0]}{n}", "role": role, "text": text,
+                               "interrupted": False, "client_ts": "2026-11-28T13:00:00Z"}
+                              for role in ("user", "assistant") for n, text in enumerate(BYPASSES)][50:]
+                    if items2:
+                        assert (await post(sid, "/transcript", {"voice_session_id": vs_id,
+                                                                "items": items2})).status_code == 204
                     assert (await post(sid, "/transcript", {"voice_session_id": vs_id, "items": items})).status_code == 204
                     assert (await chat(sid, "thanks, any update?"))[-1].type == "turn.completed"
                     for n, text in enumerate(SPOKEN_BYPASSES):

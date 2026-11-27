@@ -11,7 +11,7 @@
  * Role: CS-E-04.S6.T1 Done when: one test per verification result and per outcome; a double
  *   click sends one request; the DOM never holds the PIN after submit.
  */
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActionResultEvent, ConfirmationRequiredEvent, SseEvent, TurnRequest, VerificationResultEvent } from "@contracts/contracts";
 import { loadFixture, toWire } from "@/test-support/fixtures";
@@ -196,6 +196,21 @@ describe("verification card", () => {
     expect(sendTurn).toHaveBeenCalledTimes(1);
   });
 
+  it("I don't have my PIN sends the explicit no_pin input once, never a PIN, and closes the card when the turn settles", async () => {
+    const store = storeWith(c1);
+    const sendTurn = vi.fn((_sid: string, _req: TurnRequest) => Promise.resolve({} as never));
+    store.setState({ sendTurn });
+    render(<ConsoleShell sessionId={SID} store={store} />);
+    const btn = screen.getByRole("button", { name: "I don't have my PIN" });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    expect(sendTurn).toHaveBeenCalledTimes(1);
+    const req = sendTurn.mock.calls[0]?.[1] as TurnRequest;
+    expect(Object.keys(req).sort()).toEqual(["client_turn_id", "verification"]);
+    expect(req.verification).toEqual({ no_pin: true });
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Verify your account" })).toBeNull());
+  });
+
   const results: [VerificationResultEvent["status"], Partial<VerificationResultEvent>, string][] = [
     [
       "verified",
@@ -203,7 +218,7 @@ describe("verification card", () => {
       "Verified as Priya Shah, billing admin, Pro plan",
     ],
     ["failed", { attempts_left: 2 }, "That account ID and PIN didn't match. 2 attempts left."],
-    ["locked", { ticket: TICKET }, "For your security, verification is locked for this conversation. Our team will follow up on ticket ending 8213."],
+    ["locked", {}, "For your security, verification is locked for this conversation. See How to reach support in our help center for what to do next."],
     ["conflict", {}, "This conversation is already verified as someone else. Please start a new conversation to verify as another person."],
     ["unavailable", {}, "We couldn't reach our account system, so you aren't verified yet. Please try again in a moment."],
   ];

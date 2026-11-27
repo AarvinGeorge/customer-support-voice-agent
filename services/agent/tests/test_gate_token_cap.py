@@ -18,6 +18,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from test_gate2 import DRAFT, Harness, grounding_gate
 
 from agent.gates import (
+    SessionEvidence,
     CLARIFY_LINE,
     GroundingVerifier,
     ScopeClassifier,
@@ -70,7 +71,7 @@ async def test_a_truncated_verifier_reply_is_its_own_outcome_and_fails_closed(ca
     ver = GroundingVerifier(ScriptedModel(truncated()), timeout_s=1.0, min_s=0.0)
     control = TurnControl(session_id="s", turn_id="t")
     with caplog.at_level(logging.WARNING, logger="agent.gates"):
-        res = await ver.verify(control, DRAFT, "<evidence/>")
+        res = await ver.verify(control, DRAFT, SessionEvidence("", set(), {}, {}))
     assert (res.verdict, res.reason, res.passed, res.claims) == ("error", "truncated", False, [])
     assert any("truncated" in r.getMessage() and "max_tokens" in r.getMessage() for r in caplog.records)
     assert control.gate_calls and control.gate_calls[0][1]["output_tokens"] == 512  # still counted in usage
@@ -78,18 +79,18 @@ async def test_a_truncated_verifier_reply_is_its_own_outcome_and_fails_closed(ca
 
 async def test_a_truncated_reply_never_passes_even_when_its_text_parses():
     ver = GroundingVerifier(ScriptedModel(truncated(PASS_JSON)), timeout_s=1.0, min_s=0.0)
-    res = await ver.verify(TurnControl(session_id="s", turn_id="t"), DRAFT, "<evidence/>")
+    res = await ver.verify(TurnControl(session_id="s", turn_id="t"), DRAFT, SessionEvidence("", set(), {}, {}))
     assert (res.verdict, res.reason) == ("error", "truncated")
 
 
 async def test_other_verifier_errors_carry_their_own_reason():
     unreadable = GroundingVerifier(ScriptedModel(AIMessage("no json", response_metadata={"stop_reason": "end_turn"})),
                                    timeout_s=1.0, min_s=0.0)
-    res = await unreadable.verify(TurnControl(session_id="s", turn_id="t"), DRAFT, "")
+    res = await unreadable.verify(TurnControl(session_id="s", turn_id="t"), DRAFT, SessionEvidence("", set(), {}, {}))
     assert (res.verdict, res.reason) == ("error", "unparseable")
     ok = GroundingVerifier(ScriptedModel(AIMessage(PASS_JSON, response_metadata={"stop_reason": "end_turn"})),
                            timeout_s=1.0, min_s=0.0)
-    res = await ok.verify(TurnControl(session_id="s", turn_id="t"), DRAFT, "")
+    res = await ok.verify(TurnControl(session_id="s", turn_id="t"), DRAFT, SessionEvidence("", set(), {}, {}))
     assert (res.verdict, res.reason) == ("pass", None)
 
 
