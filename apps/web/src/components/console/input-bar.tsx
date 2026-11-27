@@ -1,18 +1,19 @@
 "use client";
 /**
- * What: the console input bar: a message field that sends on Enter, a send button, and a
- *   disabled mic placeholder (voice arrives with CS-E-05).
+ * What: the console input bar: a message field that sends on Enter, a send button, and the mic
+ *   button that starts or ends a voice call.
  * Use when: the bottom of the console.
- * Inputs: { onSend, busy, disabled, placeholder?, inputRef?, locked?, restore?, caption? }.
+ * Inputs: { onSend, busy, disabled, placeholder?, inputRef?, locked?, restore?, caption?, voice? }.
  * Output: JSX.
  * Side effects: calls onSend with the trimmed text and clears the field; puts a refused draft
  *   back into an empty field (restore), or keeps it as a "Message not sent" chip with Restore when
  *   the field already has text, so a refused message is never lost.
  * Role: CS-E-04.S5.T1 input bar (F1 s5.1, s5.4); CS-E-04.S5.T3 adds the 2,000 character counter
  *   (shown from 1,800, blocks sending over the limit; doc 07 s2.3) and the placeholder from the
- *   console (the pending-confirmation prompt).
+ *   console (the pending-confirmation prompt). The mic is the minimal CS-E-05.S3.T3 control; the voice dock
+ *   that replaces the bar during a call is CS-E-05.S4.T1.
  */
-import { ArrowUp, Mic } from "lucide-react";
+import { ArrowUp, Mic, PhoneOff } from "lucide-react";
 import { useEffect, useId, useState, type KeyboardEvent, type Ref } from "react";
 
 import { messageLimit } from "@/lib/turns/furniture";
@@ -40,6 +41,8 @@ export interface InputBarProps {
   restore?: { id: number; text: string } | null;
   /** Replaces the helper line under the bar (the limit caption). */
   caption?: string | null;
+  /** The voice call: live (a call is open) and the toggle the mic button calls; absent disables the mic. */
+  voice?: { live: boolean; onToggle: () => void };
 }
 
 /**
@@ -50,7 +53,7 @@ export interface InputBarProps {
  * Side effects: see module.
  * Role: see module. Enter sends (ignored while an IME is composing); Shift+Enter is a newline.
  */
-export function InputBar({ onSend, busy, disabled, placeholder, inputRef, locked = null, restore = null, caption = null }: InputBarProps) {
+export function InputBar({ onSend, busy, disabled, placeholder, inputRef, locked = null, restore = null, caption = null, voice }: InputBarProps) {
   const [text, setText] = useState("");
   const [held, setHeld] = useState<string | null>(null);
   const limit = messageLimit(text.trim());
@@ -141,12 +144,17 @@ export function InputBar({ onSend, busy, disabled, placeholder, inputRef, locked
         />
         <button
           type="button"
-          disabled
-          aria-label="Voice, coming soon"
-          title="Voice, coming soon"
-          className="flex size-9 shrink-0 items-center justify-center rounded-full border border-rule bg-raised text-ink disabled:opacity-50"
+          disabled={disabled || voice === undefined}
+          aria-label={voice?.live ? "End voice call" : "Start voice"}
+          aria-pressed={voice?.live ?? false}
+          title={voice?.live ? "End voice call" : "Start voice"}
+          onClick={voice?.onToggle}
+          className={cn(
+            "flex size-9 shrink-0 items-center justify-center rounded-full border border-rule outline-none transition-colors duration-150 ease-out-expo focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-raised disabled:opacity-50",
+            voice?.live ? "border-ember bg-ember text-paper" : "bg-raised text-ink",
+          )}
         >
-          <Mic aria-hidden className="size-[18px]" />
+          {voice?.live ? <PhoneOff aria-hidden className="size-[18px]" /> : <Mic aria-hidden className="size-[18px]" />}
         </button>
         <button
           type="button"

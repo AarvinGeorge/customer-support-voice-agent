@@ -95,6 +95,7 @@ class TurnControl:
     attempt_role: str = "primary"
     model_attempts: int = 0          # provider calls actually sent (DeadlineAndFaultMiddleware), for Usage.model_calls
     fallback_used: bool = False      # set when the fallback model ran this turn
+    fallback_unfinished: bool = False  # the last fallback attempt started and did not return (failed, timed out or cut), D-058
     primary_error: BaseException | None = None  # last primary failure, for model.fallback reason
     primary_model: str | None = None  # id of the primary client, for model.fallback from_model
     fault_fired: bool = False        # an injected llm_429 was raised this turn

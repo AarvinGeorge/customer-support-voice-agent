@@ -217,11 +217,14 @@ class Escalator:
         except Exception:  # noqa: BLE001 - the reply already exists; the next turn's repair covers the thread
             log.exception("escalation thread write failed turn_id=%s", control.turn_id)
 
-    async def _messages(self, agent: Any, config: dict[str, Any]) -> list[Any]:
-        """What: the thread messages (empty on failure). Use when: summaries. Inputs: agent, config.
+    async def _messages(self, agent: Any, config: dict[str, Any], control: TurnControl) -> list[Any]:
+        """What: the thread messages (empty on failure or timeout), the read bounded to min(2 s, time left) (doc 07
+        s8.1 checkpointer) so a hung read cannot eat the reserve. Use when: summaries. Inputs: agent, config, control.
         Output: messages. Side effects: one read. Role: helper."""
         try:
-            return list(((await agent.aget_state(config)).values or {}).get("messages") or [])
+            limit = max(min(limits.POSTGRES_CHECKPOINTER_TIMEOUT_S, control.remaining_s()), 0.0)
+            state = await asyncio.wait_for(agent.aget_state(config), limit)
+            return list((state.values or {}).get("messages") or [])
         except Exception:  # noqa: BLE001
             return []
 
@@ -241,7 +244,7 @@ class Escalator:
                 stream.emit("error", **{k: v for k, v in deadline_error().model_dump(mode="json", by_alias=True).items()
                                         if k != "trace_id"})
             if route.ticket is None:
-                messages = await self._messages(agent, config)
+                messages = await self._messages(agent, config, control)
                 category = TOOL_CATEGORY.get(route.tool or "") if reason == "tool_failure" else None
                 route.ticket = await self.open_ticket(control, reason, summary=self.summary(reason, messages),
                                                       category=category)
@@ -253,7 +256,7 @@ class Escalator:
             await self._thread(agent, config, control, {"messages": [AIMessage(line, id=control.route_message_id)]})
             return new
         if outcome.end_reason == "limit_reached":
-            messages = await self._messages(agent, config)
+            messages = await self._messages(agent, config, control)
             ticket = await self.open_ticket(control, "limit_reached", summary=self.summary("limit_reached", messages))
             text = f"{ESCALATION_LEADS['limit_reached']} " + (
                 TICKET_CLAUSE.format(display=ticket.get("display") or f"ticket ending {ticket.get('short_id')}")
@@ -278,7 +281,7 @@ class Escalator:
         Side effects: see module. Role: deadline path."""
         err = deadline_error()
         stream.emit("error", **{k: v for k, v in err.model_dump(mode="json", by_alias=True).items() if k != "trace_id"})
-        messages = await self._messages(agent, config)
+        messages = await self._messages(agent, config, control)
         ticket = await self.open_ticket(control, "deadline", summary=self.summary("deadline", messages))
         text = (DEADLINE_TICKET_LINE.format(display=ticket.get("display") or f"ticket ending {ticket.get('short_id')}")
                 if ticket else f"{DEADLINE_LEAD} {fallback_clause(control)}")
