@@ -10,7 +10,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import { ACCESS_GATE_PATH, ApiError, ContractViolationError, apiFetch, parseRetryAfter } from "./client";
+import { ACCESS_GATE_PATH, ApiError, ContractViolationError, NetworkError, apiFetch, parseRetryAfter } from "./client";
 
 /**
  * What: builds a fake fetch that returns one canned response.
@@ -215,5 +215,38 @@ describe("apiFetch unknown error shapes fail loudly", () => {
     const err = await rejection(apiFetch("/api/me", {}, { fetch, redirect }));
     expect(err).toBeInstanceOf(ContractViolationError);
     expect(redirect).not.toHaveBeenCalled();
+  });
+});
+
+describe("apiFetch network failures are typed (review M2)", () => {
+  it("wraps a rejected fetch in NetworkError reason network, keeping the cause", async () => {
+    const cause = new TypeError("Failed to fetch");
+    const fetch = vi.fn(async () => {
+      throw cause;
+    });
+    const err = (await rejection(apiFetch("/api/me", {}, { fetch }))) as NetworkError;
+    expect(err).toBeInstanceOf(NetworkError);
+    expect([err.reason, err.cause, err.turnId]).toEqual(["network", cause, null]);
+  });
+
+  it("reports a caller abort as reason aborted", async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const fetch = vi.fn(async () => {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    });
+    const err = (await rejection(apiFetch("/api/me", { signal: ctrl.signal }, { fetch }))) as NetworkError;
+    expect(err.reason).toBe("aborted");
+  });
+
+  it("wraps a body read failure on an error response in NetworkError", async () => {
+    const body = new ReadableStream({
+      start(c) {
+        c.error(new TypeError("network error"));
+      },
+    });
+    const fetch = vi.fn(async () => new Response(body, { status: 503 }));
+    const err = await rejection(apiFetch("/api/me", {}, { fetch }));
+    expect(err).toBeInstanceOf(NetworkError);
   });
 });
