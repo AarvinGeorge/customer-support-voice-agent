@@ -76,3 +76,13 @@ def test_usage_from_message_reads_usage_metadata(registry):
     m = AIMessage(content="x", usage_metadata={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12,
                                                "input_token_details": {"cache_read": 4}})
     assert registry.usage_of(m) == token_usage(10, 2, 4, 0)
+
+
+def test_openai_tool_roles_send_reasoning_effort_none(monkeypatch, registry):
+    # Live bug (wiring part 1, llm_429 run): OpenAI chat completions answers 400 "Function tools with
+    # reasoning_effort are not supported for gpt-5.4-mini ... set reasoning_effort to 'none'" when the
+    # fallback carries the agent tools. The fallback is the only OpenAI role that gets tools.
+    seen = {}
+    monkeypatch.setattr(reg, "init_chat_model", lambda model, **kw: seen.setdefault(model, kw))
+    registry.build("agent_fallback")
+    assert seen[registry.config.roles["agent_fallback"].model].get("reasoning_effort") == "none"

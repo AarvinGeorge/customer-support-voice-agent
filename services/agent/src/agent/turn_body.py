@@ -5,13 +5,16 @@ reserve (agent.escalation: route tickets, limit ticket, deadline path, both mode
 Use when: the app (or a test) builds Ingress(run_agent=TurnRunner(agent, core, structured=...)).
 Inputs: the compiled agent, the agent-token core client, an optional structured-input handler, optional session
 flags writer (agent.sessions.awaiting_verification).
-Output: TurnRunner, StructuredResult, StructuredHandler, TurnPrep, SessionFlags, PgSessionFlags, monotonic_deadline.
+Output: TurnRunner, StructuredResult, StructuredHandler, TurnPrep, SessionFlags, PgSessionFlags, monotonic_deadline,
+voice_user_text.
 Budget: steps 10 to 13 are bounded by their own clamps (every core call is min(listed, remaining - 3 s)), so a
 commit or submit failure ticket started at the end of step 13 runs in the reserve; only step 14 runs under the loop
 timeout (deadline - 3 s), and every escalation ticket is opened after it (doc 07 s8.2, s8.3).
 Side effects: thread reads and writes (checkpointer), core calls, events on the turn stream, the session flag.
-Role: composition of the ingress steps between the turn row and the final row. Steps 9a (PIN scan) and 12
-(transcript merge) belong to CS-E-03.S7.T9 and CS-E-05.S3.T2 and slot in here.
+Role: composition of the ingress steps between the turn row and the final row. Step 12's result (the merged
+<voice_transcript> message, from Ingress) is placed before the turn message; step 9a (PIN scan) is CS-E-03.S7.T9.
+Wiring part 2 (CS-E-08.S5): reuses the TurnControl Ingress bound (deadline, demo fault), passes cost_of to the SSE
+adapter and runs the loop with turn_run_config (LangSmith run id = turn id, fault tags).
 """
 from __future__ import annotations
 
@@ -22,17 +25,31 @@ from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Protocol
 
 from contracts import limits
+from langchain_core.messages import HumanMessage
 
-from agent.assembly import run_config
+from agent.assembly import run_config, turn_run_config
 from agent.clients.core_agent import CoreAgentClient
 from agent.escalation import Escalator
 from agent.memory import MemoryRefresh, refresh_memory, repair_dangling
 from agent.prompt import TurnContext, build_turn_message
 from agent.deadline import TurnBudgetExhausted
 from agent.sse import TurnOutcome, TurnStream, stream_agent_turn
-from agent.turn_control import TURN_CONTROL, TurnControl, bind_turn_control, loop_clock
+from agent.turn_control import TURN_CONTROL, TurnControl, bind_turn_control, current_control, loop_clock
 
 log = logging.getLogger("agent.turn_body")
+
+CostOf = Callable[[str, Any], float]
+
+
+def voice_user_text(body: Any) -> str:
+    """What: the voice turn's user text: the Realtime question, plus the final verbatim transcript when it differs.
+    Use when: TurnRunner on a voice turn the model answers. Inputs: VoiceAskRequest (question, user_transcript,
+    transcript_final). Output: text. Side effects: none. Role: doc 07 s2.6 row 4."""
+    question = body.question.strip()
+    said = (body.user_transcript or "").strip()
+    if body.transcript_final and said and said.lower() != question.lower():
+        return f"{question}\n(the customer said: {said})"
+    return question
 
 
 class SessionFlags(Protocol):
@@ -111,17 +128,21 @@ class TurnRunner:
     Role: steps 10, 11, 13, 14 in order."""
 
     def __init__(self, agent: Any, core: CoreAgentClient, *, structured: StructuredHandler | None = None,
-                 flags: SessionFlags | None = None, escalator: Escalator | None = None,
-                 reserve_s: float = limits.ESCALATION_RESERVE_S) -> None:
-        """What: keep dependencies. Use when: app start or tests. Inputs: see class, plus the escalator (default:
-        one on the same core client) and the reserve. Output: none. Side effects: none. Role: constructor."""
-        self.agent, self.core, self.structured, self.flags = agent, core, structured, flags
+                 flags: SessionFlags | None = None, cost_of: CostOf | None = None,
+                 escalator: Escalator | None = None, reserve_s: float = limits.ESCALATION_RESERVE_S) -> None:
+        """What: keep dependencies. Use when: app start or tests. Inputs: see class; cost_of(model, usage) -> USD
+        (ModelRegistry.cost_for_model; None: cost 0); the escalator (default: one on the same core client) and the
+        reserve. Output: none. Side effects: none. Role: constructor."""
+        self.agent, self.core, self.structured, self.flags, self.cost_of = agent, core, structured, flags, cost_of
         self.escalator = escalator or Escalator(core)
         self.reserve_s = reserve_s
 
     async def __call__(self, stream: TurnStream, inp: Any, row: Any) -> TurnOutcome:
         """What: run one turn's body with a TurnControl bound once (spike 15). Use when: Ingress step 14.
         Inputs: stream, IngressInput, TurnRow. Output: TurnOutcome. Side effects: see module. Role: entry."""
+        bound = current_control()
+        if bound is not None and bound.turn_id == row.turn_id:  # Ingress already bound this turn's control
+            return await self._run(stream, inp, bound)
         control = TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
                               deadline=monotonic_deadline(row.deadline_at), events=stream,
                               demo_fault=getattr(inp, "demo_fault", None))
@@ -152,29 +173,39 @@ class TurnRunner:
                           verification="just_verified" if result.verification == "just_verified" else None,
                           pending=result.pending_summary,
                           context_snapshot=merged.get("context_snapshot") if verified else None, context_stale=stale)
-        text = result.model_text if result.model_text is not None else (inp.text or "")
-        agent_input = {**memory.update, **result.state, "messages": [build_turn_message(text, ctx)]}
-        outcome = await self._loop(stream, control, agent_input, config)  # steps 14 and 15
+        if result.model_text is not None:
+            text = result.model_text
+        elif inp.mode == "voice" and getattr(inp, "body", None) is not None and hasattr(inp.body, "question"):
+            text = voice_user_text(inp.body)
+        else:
+            text = inp.text or ""
+        merged_msg = getattr(inp, "merged_transcript", None)  # step 12: wrapped, untrusted client chatter
+        messages = ([HumanMessage(content=merged_msg)] if merged_msg else []) + [build_turn_message(text, ctx)]
+        agent_input = {**memory.update, **result.state, "messages": messages}
+        loop_config = turn_run_config(inp.session_id, control.turn_id, control.demo_fault)
+        outcome = await self._loop(stream, control, agent_input, config, loop_config)  # steps 14 and 15
         if control.awaiting_verification and self.flags is not None:  # s6.3 step 2: agent.sessions is the authority
             await self.flags.set_awaiting_verification(inp.session_id, True)
         return outcome
 
     async def _loop(self, stream: TurnStream, control: TurnControl, agent_input: dict[str, Any],
-                    config: dict[str, Any]) -> TurnOutcome:
+                    config: dict[str, Any], loop_config: dict[str, Any] | None = None) -> TurnOutcome:
         """What: step 14 under the loop timeout (time left minus the 3 s reserve), then step 15 in the reserve (D-058):
         the s6.7 apology only when both models were attempted and failed (the fallback attempt started and did not
         return, including one cut by the loop budget at its own clamp); a loop timeout otherwise, or a model attempt
         skipped by the clamp, takes the deadline path; any other outcome is finished by the escalator (route and
         limit tickets). A model-node exception is logged with the turn id before any line is chosen; one with no
         failed fallback attempt is re-raised to the internal error path.
-        Use when: _run. Inputs: stream, control, agent input, config. Output: TurnOutcome.
+        Use when: _run. Inputs: stream, control, agent input, config (thread), loop_config (the agent run: LangSmith
+        run id = turn id and fault tags; default config). Output: TurnOutcome.
         Side effects: the agent run; escalation tickets and events; an ERROR log on a model-node exception.
         Role: doc 07 s8.2 "tickets on failure paths get one attempt, created inside the 3 s reserve"; D-058."""
         esc = self.escalator
         cm = asyncio.timeout(max(control.remaining_s() - self.reserve_s, 0.0))
         try:
             async with cm:
-                outcome = await stream_agent_turn(stream, self.agent, agent_input, config, control=control)
+                outcome = await stream_agent_turn(stream, self.agent, agent_input, loop_config or config,
+                                                  control=control, cost_of=self.cost_of)
         except TimeoutError:
             if not cm.expired():  # an inner timeout is an error, not the deadline
                 raise

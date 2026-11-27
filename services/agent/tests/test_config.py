@@ -98,3 +98,11 @@ def test_bad_provider_and_bad_date_fail(tmp_path):
 def test_missing_file_fails_loudly(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_models_config(tmp_path / "nope.yaml")
+
+
+def test_effort_none_is_rejected_on_an_anthropic_role(tmp_path):
+    d = _doc()
+    assert d["roles"]["agent"]["provider"] == "anthropic"
+    d["roles"]["agent"]["effort"] = "none"
+    with pytest.raises(ValidationError, match="effort none is OpenAI only"):
+        load_models_config(_write(tmp_path, d))
