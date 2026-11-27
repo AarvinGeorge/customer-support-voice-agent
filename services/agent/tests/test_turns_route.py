@@ -59,8 +59,14 @@ class Fake(GenericFakeChatModel):
         return self._generate(messages, stop=stop, run_manager=None, **kw)
 
 
+VERIFIER_PASS = ('{"claims": [{"text": "Pro refunds within 30 days", "supported": true, '
+                 '"source_id": "refund-policy#2"}], "commitment": false}')
+
+
 class FakeRegistry:
-    """What: ModelRegistry stand-in: build(role) returns the scripted fake for agent and agent_fallback.
+    """What: ModelRegistry stand-in: build(role) returns the scripted fake for agent, an empty fake for
+    agent_fallback, a verifier that passes a draft backed by refund-policy#2 (grounding_verifier) and a classifier
+    that answers ON (scope_classifier), since build_agent_from_registry wires both gates (CS-E-02.S4).
     Use when: build_agent_runtime in tests. Inputs: replies of the primary. Output: build. Side effects: records roles.
     Role: fake (the real registry is covered by test_registry)."""
 
@@ -73,7 +79,12 @@ class FakeRegistry:
         """What: model for a role. Use when: build_agent_from_registry. Inputs: role. Output: Fake.
         Side effects: records. Role: fake."""
         self.roles.append(role)
-        return self.primary if role == "agent" else Fake(messages=iter([]), seen=[])
+        if role == "agent":
+            return self.primary
+        if role in ("grounding_verifier", "scope_classifier"):
+            reply = VERIFIER_PASS if role == "grounding_verifier" else "ON"
+            return Fake(messages=iter([AIMessage(reply) for _ in range(8)]), seen=[], disable_streaming=True)
+        return Fake(messages=iter([]), seen=[])
 
 
 def search_body() -> dict[str, Any]:
@@ -307,7 +318,8 @@ async def test_structured_input_without_its_handler_gets_a_fixed_line_and_no_mod
 # ---- voice/ask through the same Ingress ----
 
 async def test_voice_ask_returns_a_say_from_the_same_agent() -> None:
-    w = World(AIMessage(content="You can ask for a refund within 30 days."))
+    # Not a policy line: a policy draft with no search this turn is blocked by Gate 2 (review PR #52 I2).
+    w = World(AIMessage(content="Sure, let me look into that for you."))
     w.vstore.voice["vs-1"] = VoiceSessionRow("vs-1", SID, w.voice.now(), w.voice.now())
     body = {"client_turn_id": str(uuid.uuid4()), "voice_session_id": "vs-1", "realtime_call_id": "call_1",
             "question": "How long is the refund window?", "user_item_id": "item_u1",
@@ -318,7 +330,7 @@ async def test_voice_ask_returns_a_say_from_the_same_agent() -> None:
     assert r.status_code == 200, r.text
     done = events_of(r)[-1]
     assert done.type == "turn.completed" and done.mode == "voice"
-    assert done.final.say == "You can ask for a refund within 30 days."
+    assert done.final.say == "Sure, let me look into that for you."
     human = [m for m in w.registry.primary.seen[0] if isinstance(m, HumanMessage)][-1]
     assert "mode: voice" in str(human.content) and "How long is the refund window?" in str(human.content)
     assert "how long is the refund window" in str(human.content)
@@ -350,11 +362,11 @@ async def test_merged_transcript_goes_before_the_turn_message() -> None:
 
 # ---- the production wiring ----
 
-def test_build_agent_runtime_uses_both_registry_roles_all_tools_and_the_token_split() -> None:
+def test_build_agent_runtime_uses_all_four_registry_roles_all_tools_and_the_token_split() -> None:
     reg = FakeRegistry()
     rt = composition.build_agent_runtime(settings(), http=httpx.AsyncClient(), checkpointer=InMemorySaver(),
                                          registry=reg)
-    assert sorted(reg.roles) == ["agent", "agent_fallback"]
+    assert sorted(reg.roles) == ["agent", "agent_fallback", "grounding_verifier", "scope_classifier"]
     assert tuple(t.name for t in rt.tools) == TOOL_NAMES
     assert (rt.core._base, rt.core._token) == ("http://core.test:8000", "core-agent-tok")
     assert (rt.knowledge._base, rt.knowledge._token) == ("http://knowledge.test:8000", "knowledge-agent-tok")
