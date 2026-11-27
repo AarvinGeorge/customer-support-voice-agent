@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-from contracts.core_api import ContractStatus, Role, Tier, TicketCreate, TicketRef  # noqa: F401  (Role, ContractStatus kept for callers)
+from contracts.core_api import Tier, TicketCreate, TicketRef
 from contracts.policy import PolicyConfig, Priority, Queue
 
 from core.audit import AuditEvent, write_audit
@@ -30,6 +30,12 @@ Actor = Literal["customer", "agent", "operator", "system"]
 # doc 07 s7.2: the only stage changes. Creation into open or pending_approval is not a transition.
 TRANSITIONS: frozenset[tuple[str, str]] = frozenset({("open", "resolved"), ("pending_approval", "resolved"),
                                                      ("resolved", "closed")})
+# Outcomes a resolve may carry, by the stage it starts from (doc 07 s7.2, s3.5: an operator resolve is for open
+# tickets; Pending approval tickets end through approve or reject).
+OUTCOMES_BY_STAGE: dict[str, frozenset[str]] = {
+    "open": frozenset({"answered", "resolved_by_operator"}),
+    "pending_approval": frozenset({"approved_executed", "rejected", "rules_changed"}),
+}
 _ID_ATTEMPTS = 5
 
 
@@ -144,7 +150,9 @@ def insert_ticket(conn: Any, *, policy: PolicyConfig, clock: Clock, session_id: 
     unverified), account tier, stage (open or pending_approval), queue, category, summary, origin, actor, optional
     blocking, steps, confidence, transcript ref, escalation reason, pending action id (required for pending_approval),
     rng, trace id, mode, idempotency key. Output: TicketRef. Side effects: three INSERTs.
-    Role: the one writer of tickets rows; priority and target label are computed here from policy."""
+    Role: the one writer of tickets rows; priority and target label are computed here from policy. It takes no
+    account lock and never merges: a caller that makes an Open ticket (past-due follow-up) must take the account
+    lock `tickets:<account_id>` and merge by category itself; Pending approval tickets are exempt (one per action)."""
     verified = account_id is not None
     priority = priority_for(policy, tier=tier, verified=verified, blocking=blocking)
     label = target_label_for(policy, priority, tier if verified else None)
@@ -217,7 +225,9 @@ def create_ticket(conn: Any, *, policy: PolicyConfig, clock: Clock, session_id: 
                 idempotency_key=idempotency_key), clock=clock)
             ref = _ref(conn.execute(f"SELECT {_REF_COLS} FROM tickets WHERE id = %s", (tid,)).fetchone())
             return TicketOutcome(ref, merged=True, created=False)
-        where, args = "account_id = %s AND created_date = %s", (caller.account_id, clock.today())
+        # doc 07 s8.1: approvals (every approval ticket has a pending action) and merges are not counted
+        where, args = ("account_id = %s AND created_date = %s AND pending_action_id IS NULL",
+                       (caller.account_id, clock.today()))
         cap = limits.verified_per_account_per_day
     else:
         conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"tickets:session:{session_id}",))
@@ -239,10 +249,11 @@ def transition(conn: Any, *, policy: PolicyConfig, clock: Clock, ticket_id: str,
                trace_id: str | None = None) -> TicketRef:
     """What: move a ticket to a new stage by the doc 07 s7.2 table, with a stage_changed event and an audit row.
     Use when: an operator resolves or closes, or approve and reject finish a Pending approval ticket.
-    Inputs: connection, policy, clock, ticket id, target stage, actor, actor id, outcome (required for resolved:
-    answered, approved_executed, rejected, rules_changed or resolved_by_operator), optional customer-safe note,
+    Inputs: connection, policy, clock, ticket id, target stage, actor, actor id, outcome (required for resolved and checked
+    against the starting stage: open takes answered or resolved_by_operator, pending_approval takes approved_executed,
+    rejected or rules_changed), optional customer-safe note,
     trace id. Output: the updated TicketRef. Side effects: SELECT FOR UPDATE, one UPDATE, one event, one audit row.
-    Raises CoreError NOT_FOUND, INVALID_TRANSITION (nothing changes) or VALIDATION_ERROR (resolved without outcome).
+    Raises CoreError NOT_FOUND, INVALID_TRANSITION or VALIDATION_ERROR (missing or wrong outcome); nothing changes.
     Role: the single stage writer; the slice itself creates Open and Pending approval, the rest is the designed
     operator path, kept here so the table is enforced in one place."""
     row = conn.execute("SELECT stage, account_id FROM tickets WHERE id = %s FOR UPDATE", (ticket_id,)).fetchone()
@@ -250,8 +261,9 @@ def transition(conn: Any, *, policy: PolicyConfig, clock: Clock, ticket_id: str,
         raise CoreError("NOT_FOUND")
     from_stage, account_id = row
     check_transition(from_stage, to_stage)
-    if to_stage == "resolved" and outcome is None:
-        raise CoreError("VALIDATION_ERROR", "A resolved ticket needs an outcome.", details={"reason": "outcome_required"})
+    if to_stage == "resolved" and outcome not in OUTCOMES_BY_STAGE[from_stage]:
+        raise CoreError("VALIDATION_ERROR", "That outcome does not fit this ticket.",
+                        details={"reason": "outcome_invalid", "from_stage": from_stage})
     now = clock.now()
     if to_stage == "resolved":
         conn.execute("UPDATE tickets SET stage = %s, outcome = %s, outcome_note = %s, updated_at = %s WHERE id = %s",
