@@ -14,6 +14,7 @@ import httpx
 from contracts.stubs import examples as ex
 from langchain_core.messages import AIMessage, HumanMessage
 
+from agent.escalation import MODEL_UNAVAILABLE_LINE
 from escalation_world import OWNER, Fake, World, error_response, json_response, of
 from virtual_clock import run_virtual
 
@@ -104,3 +105,71 @@ def test_deadline_path_stops_the_loop_three_seconds_early_and_opens_the_deadline
     assert types.index("error") < types.index("escalated") < types.index("turn.completed")
     assert [(e.reason, e.origin) for e in of(events, "escalated")] == [("deadline", "code")]
     assert of(events, "error")[0].class_ == "turn_deadline_exceeded"
+
+
+def test_voice_both_models_hang_to_their_clamps_gives_the_apology_by_17_s_and_no_ticket() -> None:
+    """D-058 and 07 s8.3 voice row: 20 s deadline; the primary hangs to its 10 s clamp, the fallback is attempted and
+    hangs to its clamp (min(10, 10 - 3) = 7 s, ends at 17 s, the same instant as the loop budget). Both models were
+    attempted and failed, so the s6.7 apology with the ticket offer applies, not the deadline path."""
+
+    async def scenario() -> tuple[Any, list[Any], float]:
+        """What: one voice turn with both models hung. Use when: this test. Inputs: none.
+        Output: outcome, events, elapsed. Side effects: none. Role: body."""
+        w = World(model=Fake(messages=iter([AIMessage("late")]), hang_s=600),
+                  fallback=Fake(messages=iter([AIMessage("late")]), hang_s=600), verified=False,
+                  deadlines={"chat": 20.0, "voice": 20.0})
+        start = asyncio.get_running_loop().time()
+        outcome, events = await w.send(mode="voice", text="why was I charged twice?")
+        return outcome, events, asyncio.get_running_loop().time() - start
+
+    (outcome, events, elapsed), _ = run_virtual(scenario())
+    assert outcome.final.text == MODEL_UNAVAILABLE_LINE and outcome.end_reason == "escalated"
+    assert outcome.final.ticket is None and elapsed <= 17.1, elapsed
+    assert [(e.reason, e.ticket, e.offer_ticket_button) for e in of(events, "escalated")] == [
+        ("model_unavailable", None, True)]
+
+
+def test_fallback_skipped_by_the_clamp_takes_the_deadline_path_with_its_ticket() -> None:
+    """D-058: 8 s chat deadline; the primary hangs to its clamp (min(10, 8 - 3) = 5 s); 0 s is left after the
+    reserve, so the fallback is skipped (under 2 s) and the turn takes the deadline path with its ticket."""
+    times: list[tuple[float, float]] = []
+
+    async def scenario() -> tuple[Any, list[Any]]:
+        """What: one chat turn with the fallback skipped. Use when: this test. Inputs: none. Output: outcome, events.
+        Side effects: none. Role: body."""
+        w = World(model=Fake(messages=iter([AIMessage("late")]), hang_s=600),
+                  fallback=Fake(messages=iter([AIMessage("fallback")])), verified=False,
+                  deadlines={"chat": 8.0, "voice": 8.0},
+                  overrides={("POST", "/v1/tickets"): _ticket_recorder(times, 0.5)})
+        return await w.send(text="why was I charged twice?")
+
+    (outcome, events), _ = run_virtual(scenario())
+    assert outcome.end_reason == "deadline" and outcome.final.ticket.short_id == "8213" and len(times) == 1
+    assert [e.reason for e in of(events, "escalated")] == ["deadline"]
+    assert of(events, "model.fallback") == []
+
+
+def test_a_hung_thread_read_in_the_reserve_is_bounded_and_gives_no_messages() -> None:
+    """Review M2: Escalator._messages bounds the checkpoint read to min(2 s, time left) (doc 07 s8.1 checkpointer)."""
+    from agent.escalation import Escalator
+    from agent.turn_control import TurnControl
+
+    class HungAgent:
+        """What: an agent whose checkpoint read hangs. Use when: this test. Inputs: none. Output: aget_state.
+        Side effects: none. Role: double."""
+
+        async def aget_state(self, config: Any) -> Any:
+            """What: hang. Use when: the read. Inputs: config. Output: never. Side effects: none. Role: double."""
+            await asyncio.sleep(600)
+
+    async def scenario() -> tuple[list[Any], float]:
+        """What: one bounded read with 3 s left. Use when: this test. Inputs: none. Output: messages, elapsed.
+        Side effects: none. Role: body."""
+        loop = asyncio.get_running_loop()
+        control = TurnControl(session_id="s", turn_id="t", mode="chat", deadline=loop.time() + 3.0)
+        start = loop.time()
+        msgs = await Escalator(None)._messages(HungAgent(), {}, control)  # type: ignore[arg-type]
+        return msgs, loop.time() - start
+
+    (msgs, elapsed), _ = run_virtual(scenario())
+    assert msgs == [] and abs(elapsed - 2.0) < 0.05, elapsed

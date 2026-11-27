@@ -7,6 +7,7 @@ Role: Done when of CS-E-03.S4.T1 (timing proofs of the reserve are in test_escal
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -20,7 +21,7 @@ import agent.assembly as assembly
 from agent.escalation import MODEL_UNAVAILABLE_LINE, TICKET_OFFER_OPENED
 from agent.middleware.router import escalate_from_hook
 from agent.turn_control import Route, require_control
-from escalation_world import OWNER, SID, Boom, World, error_response, of
+from escalation_world import OWNER, SID, Boom, Fake, World, error_response, of
 
 def call(name: str, args: dict[str, Any], cid: str = "c1") -> AIMessage:
     """What: an AI message with one tool call. Use when: scripting the fake model. Inputs: tool, args, id.
@@ -266,3 +267,27 @@ async def test_commit_failure_ticket_emits_escalated_tool_failure() -> None:
     outcome, events = await w.send(confirm={"pending_action_id": ex.PENDING_ID, "decision": "confirm"})
     assert outcome.end_reason == "escalated" and len(w.transport.tickets) == 1
     assert [(e.reason, e.origin) for e in of(events, "escalated")] == [("tool_failure", "code")]
+
+
+class Bug(Fake):
+    """What: a model call that hits a programming bug (not a provider error). Use when: the D-058 logging test.
+    Inputs: none. Output: raises KeyError. Side effects: none. Role: double."""
+
+    async def _agenerate(self, messages: Any, *args: Any, **kwargs: Any) -> Any:
+        """What: raise KeyError. Use when: each call. Inputs: ignored. Output: none. Side effects: raises.
+        Role: double."""
+        raise KeyError("programming bug")
+
+
+async def test_unexpected_model_node_exception_is_logged_with_the_turn_id_before_the_apology(
+        caplog: pytest.LogCaptureFixture) -> None:
+    """D-058: no silent apologies. A bug in the model call is logged (with its traceback and the turn id)."""
+    w = World(model=Bug(messages=iter([])), fallback=Bug(messages=iter([])))
+    with caplog.at_level(logging.ERROR, logger="agent.turn_body"):
+        outcome, events = await w.send(text="my SSO login keeps failing")
+    assert outcome.final.text == MODEL_UNAVAILABLE_LINE
+    turn = outcome_turn(events)
+    recs = [r for r in caplog.records if r.name == "agent.turn_body"]
+    assert len(recs) == 1, caplog.records
+    assert turn in recs[0].getMessage() and recs[0].exc_info is not None
+    assert "programming bug" in caplog.text

@@ -16,6 +16,7 @@ Role: composition of the ingress steps between the turn row and the final row. S
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Protocol
@@ -30,6 +31,8 @@ from agent.prompt import TurnContext, build_turn_message
 from agent.deadline import TurnBudgetExhausted
 from agent.sse import TurnOutcome, TurnStream, stream_agent_turn
 from agent.turn_control import TURN_CONTROL, TurnControl, bind_turn_control, loop_clock
+
+log = logging.getLogger("agent.turn_body")
 
 
 class SessionFlags(Protocol):
@@ -158,12 +161,15 @@ class TurnRunner:
 
     async def _loop(self, stream: TurnStream, control: TurnControl, agent_input: dict[str, Any],
                     config: dict[str, Any]) -> TurnOutcome:
-        """What: step 14 under the loop timeout (time left minus the 3 s reserve), then step 15 in the reserve:
-        a loop timeout takes the deadline path, a skipped model attempt takes the deadline path, a failed model node
-        (control.model_node_failed) takes the s6.7 apology (or the deadline path when no loop time is left), any other outcome is finished by the escalator (route and limit tickets).
+        """What: step 14 under the loop timeout (time left minus the 3 s reserve), then step 15 in the reserve (D-058):
+        the s6.7 apology only when both models were attempted and failed (the fallback attempt started and did not
+        return, including one cut by the loop budget at its own clamp); a loop timeout otherwise, or a model attempt
+        skipped by the clamp, takes the deadline path; any other outcome is finished by the escalator (route and
+        limit tickets). A model-node exception is logged with the turn id before any line is chosen; one with no
+        failed fallback attempt is re-raised to the internal error path.
         Use when: _run. Inputs: stream, control, agent input, config. Output: TurnOutcome.
-        Side effects: the agent run; escalation tickets and events. Role: doc 07 s8.2 "tickets on failure paths
-        get one attempt, created inside the 3 s reserve"."""
+        Side effects: the agent run; escalation tickets and events; an ERROR log on a model-node exception.
+        Role: doc 07 s8.2 "tickets on failure paths get one attempt, created inside the 3 s reserve"; D-058."""
         esc = self.escalator
         cm = asyncio.timeout(max(control.remaining_s() - self.reserve_s, 0.0))
         try:
@@ -172,13 +178,17 @@ class TurnRunner:
         except TimeoutError:
             if not cm.expired():  # an inner timeout is an error, not the deadline
                 raise
+            if control.fallback_unfinished:  # both models attempted; the fallback ended at its clamp (s8.3 voice row)
+                return await esc.model_unavailable(stream, control, self.agent, config)
             return await esc.deadline(stream, control, self.agent, config)
         except TurnBudgetExhausted:  # a model attempt was skipped by the clamp (doc 07 s8.2 deadline path)
             return await esc.deadline(stream, control, self.agent, config)
         except Exception:
             if not control.model_node_failed:  # not a model failure: the internal error path
                 raise
-            if control.remaining_s() - self.reserve_s <= 0:
-                return await esc.deadline(stream, control, self.agent, config)
+            log.exception("model node failed session_id=%s turn_id=%s fallback_attempted=%s", control.session_id,
+                          control.turn_id, control.fallback_used)
+            if not control.fallback_unfinished:  # no failed fallback attempt: not s6.7, the internal error path
+                raise
             return await esc.model_unavailable(stream, control, self.agent, config)
         return await esc.finish(stream, control, outcome, self.agent, config)
