@@ -116,7 +116,7 @@ teardown() {
   if [ "${KEEP_STACK:-}" = 1 ]; then
     echo "live_smoke: KEEP_STACK=1, $COMPOSE_PROJECT_NAME left up on 127.0.0.1:$EDGE_PORT" >&2
   else
-    docker compose down -v --remove-orphans --rmi local >>"$OUT/build.log" 2>&1 || echo "live_smoke: teardown of $COMPOSE_PROJECT_NAME failed" >&2
+    docker compose --profile seed --profile jobs down -v --remove-orphans --rmi local >>"$OUT/build.log" 2>&1 || echo "live_smoke: teardown of $COMPOSE_PROJECT_NAME failed" >&2
     left="$(docker ps -a -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" | wc -l | tr -d ' ')"
     echo "live_smoke: teardown $COMPOSE_PROJECT_NAME, containers left: $left; output in $OUT" >&2
     if [ "$left" != 0 ] && [ "$code" = 0 ]; then code=2; fi   # a pass that leaves containers is not clean (review M2)

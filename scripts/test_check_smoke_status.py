@@ -262,5 +262,5 @@ def test_live_smoke_refuses_without_run_real_and_calls_no_docker_or_gh(tmp_path:
 def test_live_smoke_never_names_the_owner_stack_and_traps_interrupts() -> None:
     text = (HERE / "live_smoke.sh").read_text()
     assert 'COMPOSE_PROJECT_NAME="cs-smoke-$STAMP"' in text and "free_port 3100 3199" in text
-    assert "*demo*|*prod*) die" in text and "trap 'exit 130' INT" in text and "--rmi local" in text
+    assert "*demo*|*prod*) die" in text and "trap 'exit 130' INT" in text and "--profile seed --profile jobs down -v --remove-orphans --rmi local" in text
     assert "LANGSMITH_PROJECT=cs-smoke" in text and "commit_status_finish" in text
