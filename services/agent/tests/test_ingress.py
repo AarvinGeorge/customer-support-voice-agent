@@ -66,9 +66,10 @@ def inp(client_turn_id: str | None = None, text: str = "hello", mode: str = "cha
                         mode=mode, input_kind="voice" if mode == "voice" else "text", text=text, **kw)
 
 
-async def drain(result: IngressStream) -> list[Any]:
-    """What: read every frame, await the task, parse events. Use when: tests. Inputs: stream result.
-    Output: events. Side effects: none. Role: helper."""
+async def drain(result: IngressError | IngressStream) -> list[Any]:
+    """What: read every frame, await the task, parse events. Use when: tests. Inputs: stream result
+    (an IngressError fails the test). Output: events. Side effects: none. Role: helper."""
+    assert isinstance(result, IngressStream), result
     frames = [f async for f in result.stream.frames()]
     if result.task is not None:
         await result.task
@@ -200,7 +201,7 @@ async def test_deadline_gives_error_event_and_failed_row():
     assert [e.type for e in events] == ["turn.started", "error", "turn.completed"]
     assert events[1].class_ == "turn_deadline_exceeded" and events[-1].end_reason == "deadline"
     row = next(iter(store.turns.values()))
-    assert row.status == "failed" and row.error["code"] == "TURN_DEADLINE" and lock.held == {}
+    assert row.status == "failed" and row.error is not None and row.error["code"] == "TURN_DEADLINE" and lock.held == {}
 
 
 async def test_redis_down_fails_closed_with_503():
@@ -269,3 +270,142 @@ async def test_redis_lock_uses_the_doc07_key_ttl_and_owner_token():
     assert await lock.acquire(SID, "tok-b", 60_000) is False
     assert await lock.release(SID, "tok-b") is False and f"lock:turn:{SID}" in r.kv
     assert await lock.release(SID, "tok-a") is True and r.kv == {}
+
+
+class Clock:
+    """What: a settable clock for Ingress(now=...). Use when: sweep timing tests. Inputs: start time.
+    Output: callable returning the current fake time. Side effects: none. Role: fake."""
+
+    def __init__(self, t: datetime) -> None:
+        """What: set the start. Use when: tests. Inputs: time. Output: none. Side effects: none. Role: fake."""
+        self.t = t
+
+    def __call__(self) -> datetime:
+        """What: now. Use when: Ingress reads the clock. Inputs: none. Output: time. Side effects: none. Role: fake."""
+        return self.t
+
+
+async def kill_holder(res: IngressStream, store: MemoryTurnStore, lock: MemoryTurnLock) -> None:
+    """What: end a running turn the way SIGKILL does: no final row, no lock release, task gone.
+    Use when: review PR #18 I1 tests. Inputs: the holder's stream result, store, lock. Output: none.
+    Side effects: cancels the task with cleanup disabled, then restores the fakes. Role: helper."""
+    real_release, real_finish = lock.release, store.finish_turn
+
+    async def dead(*_: Any) -> Any:
+        """What: a dead process does nothing. Use when: kill_holder. Inputs: any. Output: none.
+        Side effects: none. Role: fake."""
+        return False
+
+    lock.release, store.finish_turn = dead, dead  # type: ignore[method-assign]
+    assert res.task is not None
+    res.task.cancel()
+    with pytest.raises(BaseException):
+        await res.task
+    lock.release, store.finish_turn = real_release, real_finish  # type: ignore[method-assign]
+
+
+@pytest.mark.parametrize("mode,deadline_s", [("chat", 45), ("voice", 20)])
+async def test_killed_holder_resend_with_same_client_turn_id_replays_a_retryable_failure(mode, deadline_s):
+    t0 = datetime.now(UTC)
+    clock = Clock(t0)
+    ing, store, lock, agent = make(agent=Agent(gate=asyncio.Event()), now=clock)
+    call = {"realtime_call_id": "call_7"} if mode == "voice" else {}
+    holder = await ing.handle(inp("c-dead", mode=mode, **call))
+    assert isinstance(holder, IngressStream)
+    await asyncio.sleep(0)  # the holder is inside the agent loop
+    await kill_holder(holder, store, lock)
+    row = next(iter(store.turns.values()))
+    assert row.status == "running" and lock.held  # what a killed process leaves behind
+
+    clock.t = t0 + timedelta(seconds=deadline_s + 9)  # before deadline + 10 s: still in progress
+    early = await ing.handle(inp("c-dead", mode=mode, **call))
+    assert isinstance(early, IngressError) and early.code == "TURN_IN_PROGRESS"
+
+    clock.t = t0 + timedelta(seconds=deadline_s + 11)  # past the sweep threshold, lock still held (60 s TTL)
+    res = await ing.handle(inp("c-dead", mode=mode, **call))
+    assert isinstance(res, IngressStream), res
+    events = await drain(res)
+    assert [e.type for e in events] == ["error", "turn.completed"]
+    err, done = events
+    assert (err.class_, err.retryable, err.changed) == ("turn_deadline_exceeded", True, None)
+    assert err.message and done.final.text == err.message and done.final.say
+    assert done.replayed is True and done.end_reason == "swept" and done.turn_id == row.turn_id
+    assert len(agent.calls) == 1  # no new model run for the resend
+    assert store.turns[row.turn_id].status == "failed"
+
+
+async def test_replay_of_a_swept_row_without_a_stored_error_still_sends_a_retryable_error():
+    ing, store, _, _ = make()
+    legacy = TurnRow(turn_id="019a7c2e-0000-7000-8000-0000000000bb", session_id=SID, client_turn_id="old",
+                     mode="chat", input_kind="text", status="failed", end_reason="swept",
+                     deadline_at=datetime.now(UTC), started_at=datetime.now(UTC))
+    store.turns[legacy.turn_id] = legacy
+    events = await drain(await ing.handle(inp("old")))
+    assert [e.type for e in events] == ["error", "turn.completed"]
+    assert events[0].class_ == "turn_deadline_exceeded" and events[0].retryable is True
+    assert events[1].final.text and events[1].replayed is True
+
+
+class RecordingPool:
+    """What: psycopg pool stand-in that records SQL and params. Use when: PgTurnStore unit tests.
+    Inputs: none. Output: connection() context manager. Side effects: records. Role: fake."""
+
+    def __init__(self) -> None:
+        """What: empty log. Use when: tests. Inputs: none. Output: none. Side effects: none. Role: fake."""
+        self.sql: list[tuple[str, tuple[Any, ...]]] = []
+
+    def connection(self) -> Any:
+        """What: a connection cm. Use when: PgTurnStore. Inputs: none. Output: async cm. Side effects: none. Role: fake."""
+        pool = self
+
+        class Cur:
+            """What: cursor. Use when: execute. Inputs: none. Output: rowcount. Side effects: none. Role: fake."""
+            rowcount = 1
+
+        class Conn:
+            """What: connection. Use when: PgTurnStore. Inputs: none. Output: execute. Side effects: records. Role: fake."""
+
+            async def __aenter__(self) -> Any:
+                """What: enter. Use when: async with. Inputs: none. Output: self. Side effects: none. Role: fake."""
+                return self
+
+            async def __aexit__(self, *exc: Any) -> None:
+                """What: exit. Use when: async with. Inputs: exc. Output: none. Side effects: none. Role: fake."""
+
+            async def execute(self, sql: str, params: tuple[Any, ...]) -> Cur:
+                """What: record. Use when: PgTurnStore. Inputs: sql, params. Output: cursor. Side effects: records.
+                Role: fake."""
+                pool.sql.append((sql, params))
+                return Cur()
+
+        return Conn()
+
+
+async def test_pg_sweep_stores_a_retryable_error_and_a_final_answer():
+    import json as _json
+
+    from agent.ingress import PgTurnStore
+    pool = RecordingPool()
+    assert await PgTurnStore(pool).sweep(SID, datetime.now(UTC)) == 1
+    sql, params = pool.sql[0]
+    assert "end_reason = 'swept'" in sql and "error = " in sql and "final = " in sql
+    stored = [_json.loads(p) for p in params if isinstance(p, str) and p.startswith("{")]
+    err = next(p for p in stored if "class" in p)
+    final = next(p for p in stored if "text" in p)
+    assert (err["class"], err["retryable"], err["changed"]) == ("turn_deadline_exceeded", True, None)
+    assert final["text"] == err["message"]
+
+
+async def test_an_inner_timeout_error_is_not_reported_as_the_turn_deadline():
+    class Boom(Agent):
+        """What: agent body whose own client times out at once. Use when: review PR #18 M2. Inputs: none.
+        Output: raises TimeoutError. Side effects: none. Role: fake."""
+
+        async def __call__(self, stream: TurnStream, inp: IngressInput, row: TurnRow) -> TurnOutcome:
+            """What: raise. Use when: step 14. Inputs: stream, input, row. Output: none. Side effects: none. Role: fake."""
+            raise TimeoutError("httpx read timeout")
+
+    ing, store, _, _ = make(agent=Boom())
+    events = await drain(await ing.handle(inp("c-1")))
+    assert events[-1].end_reason != "deadline"
+    assert not any(e.type == "error" and e.code == "TURN_DEADLINE" for e in events)

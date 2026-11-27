@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
-from agent.ingress import DuplicateTurn, SessionRow, TurnRow
+from agent.ingress import DuplicateTurn, SessionRow, TurnRow, swept_error, swept_final
 from agent.sse import TurnOutcome
 
 
@@ -41,7 +41,9 @@ class MemoryTurnStore:
         n = 0
         for k, t in self.turns.items():
             if t.session_id == session_id and t.status == "running" and t.deadline_at + timedelta(seconds=10) < now:
-                self.turns[k] = replace(t, status="failed", end_reason="swept")
+                self.turns[k] = replace(t, status="failed", end_reason="swept",
+                                        error=swept_error().model_dump(mode="json", by_alias=True),
+                                        final=swept_final().model_dump(mode="json"))
                 n += 1
         return n
 
