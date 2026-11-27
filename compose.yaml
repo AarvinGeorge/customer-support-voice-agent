@@ -50,22 +50,35 @@ x-agent: &agent
     FEATURE_A4: ${FEATURE_A4:-false}
 
 services:
-  # STUB (lane C owns the Caddyfile, CS-E-01.S3.T3): placeholder so the edge network and port wiring exist.
-  # Profile "edge" keeps it out of the default `up`; lane C removes the profile and adds the Caddyfile mount.
+  # Edge (CS-E-01.S3.T3, lane C). SITE_ADDRESS is required: the domain on the VM, or :80 locally (the override defaults it).
   caddy:
-    profiles: [edge]
-    image: caddy:2-alpine
+    image: caddy:2.11-alpine
     restart: unless-stopped
     ports: ["80:80", "443:443"]
     networks: [edge]
-    depends_on: [web]
+    depends_on:
+      web: {condition: service_healthy}
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-}   # no default: empty makes Caddy refuse to start (VM must set the domain; local gets :80 from compose.override.yaml)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
 
-  # STUB (lane C owns the Next.js app and its Dockerfile, CS-E-04.S4.T1): placeholder image on the edge network.
+  # Next.js app (CS-E-04.S4.T1 Dockerfile). Holds no secret (doc 07 s1.4), so no environment block.
   web:
-    profiles: [edge]
-    image: nginx:alpine
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
     restart: unless-stopped
     networks: [edge]
+    expose: ["3000"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
   agent_a:
     <<: *agent
@@ -213,3 +226,5 @@ networks:
 
 volumes:
   pgdata: {}
+  caddy_data: {}
+  caddy_config: {}
