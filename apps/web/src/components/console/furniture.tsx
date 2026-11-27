@@ -165,28 +165,6 @@ const TOOLTIP = "flex w-max max-w-[min(30rem,calc(100vw-2rem))] flex-col gap-0.5
 const CHIP = `inline-flex max-w-full items-center gap-1.5 rounded-full border bg-raised px-2.5 py-1 text-label-sm outline-none transition-colors duration-150 ease-out-expo focus-visible:ring-2 focus-visible:ring-ring ${CLEAR}`;
 
 /**
- * What: the answer text as markdown (paragraphs, lists, emphasis, links, inline code), streamed
- *   or settled.
- * Use when: an assistant turn has text.
- * Inputs: { text, streaming }.
- * Output: Streamdown output in Body type; only http(s) links are live (new tab, rel noopener
- *   noreferrer); other links render as their text; images never render.
- * Side effects: none (no element can fetch a remote resource).
- * Role: markdown renderer (doc 07 s6.2 FinalAnswer.text "markdown allowed"). Model text is
- *   untrusted: raw HTML stays text (ANSWER_REHYPE drops the raw plugin), every other element is unwrapped
- *   to its text (MARKDOWN_ELEMENTS), and img maps to nothing, so a prompt-injected answer cannot
- *   load a tracking image or link to mailto, tel, same-origin or other schemes.
- */
-/**
- * What: the only elements model markdown may produce; anything else keeps its text only.
- * Use when: AnswerMarkdown (allowedElements with unwrapDisallowed).
- * Inputs: none.
- * Output: a tag list.
- * Side effects: none.
- * Role: allow list (review PR #29 I1 and M6: no images, media, headings, tables or raw HTML
- *   widgets in a support answer).
- */
-/**
  * What: the rehype plugins for model markdown: Streamdown's sanitize and harden, without its raw
  *   HTML plugin, so raw HTML in the text stays literal text and never becomes DOM.
  * Use when: AnswerMarkdown.
@@ -202,8 +180,30 @@ const ANSWER_REHYPE = (["sanitize", "harden"] as const).map((name) => {
   return plugin;
 });
 
+/**
+ * What: the only elements model markdown may produce; anything else keeps its text only.
+ * Use when: AnswerMarkdown (allowedElements with unwrapDisallowed).
+ * Inputs: none.
+ * Output: a tag list.
+ * Side effects: none.
+ * Role: allow list (review PR #29 I1 and M6: no images, media, headings, tables or raw HTML
+ *   widgets in a support answer).
+ */
 const MARKDOWN_ELEMENTS = ["p", "br", "ul", "ol", "li", "strong", "em", "del", "code", "a", "span"] as const;
 
+/**
+ * What: the answer text as markdown (paragraphs, lists, emphasis, links, inline code), streamed
+ *   or settled.
+ * Use when: an assistant turn has text.
+ * Inputs: { text, streaming }.
+ * Output: Streamdown output in Body type; only http(s) links are live (new tab, rel noopener
+ *   noreferrer); other links render as their text; images never render.
+ * Side effects: none (no element can fetch a remote resource).
+ * Role: markdown renderer (doc 07 s6.2 FinalAnswer.text "markdown allowed"). Model text is
+ *   untrusted: raw HTML stays text (ANSWER_REHYPE drops the raw plugin), every other element is unwrapped
+ *   to its text (MARKDOWN_ELEMENTS), and img maps to nothing, so a prompt-injected answer cannot
+ *   load a tracking image or link to mailto, tel, same-origin or other schemes.
+ */
 export function AnswerMarkdown({ text, streaming }: { text: string; streaming: boolean }) {
   return (
     <div className="answer-markdown max-w-[70ch] text-body text-ink">

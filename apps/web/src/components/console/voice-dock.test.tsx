@@ -63,6 +63,16 @@ const snap = (state: VoiceState, over: Partial<VoiceSnapshot> = {}): VoiceSnapsh
 });
 
 describe("VoiceBars", () => {
+  it("a running frame loop reads the latest levels prop after a re-render (no restart)", () => {
+    const f = frames();
+    const view = render(<VoiceBars levels={() => ({ mic: 0, agent: 0 })} reducedMotion={false} schedule={f.schedule} cancel={f.cancel} />);
+    act(() => f.step(10));
+    expect(Math.max(...heights("you"))).toBe(2);
+    view.rerender(<VoiceBars levels={() => ({ mic: 0.9, agent: 0 })} reducedMotion={false} schedule={f.schedule} cancel={f.cancel} />);
+    act(() => f.step(130));
+    expect(Math.max(...heights("you"))).toBeGreaterThan(8);
+  });
+
   it("moves the You row with the mic and the Agent row with agent audio, separately", () => {
     const f = frames();
     const lv = { mic: 0.8, agent: 0 };

@@ -4,7 +4,7 @@ Role: guards every event type the browser and the event log read."""
 import pytest
 from pydantic import ValidationError
 
-from contracts.events import EVENT_TYPES, format_sse, parse_event
+from contracts.events import EVENT_TYPES, StepCompletedEvent, format_sse, parse_event
 
 ENV = {"v": 1, "seq": 1, "session_id": "s", "turn_id": "t", "trace_id": "t",
        "ts": "2026-11-27T13:00:00Z", "mode": "chat"}
@@ -51,10 +51,12 @@ def test_step_completed_model_and_rule_fields():
                          attempt=1, rule={"decision": "allowed", "reason_code": "PRO_WITHIN_LIMITS",
                                           "policy_ref": {"article": "refund-policy",
                                                          "section": "2", "title": "Pro refunds"}}))
+    assert isinstance(ev, StepCompletedEvent) and ev.rule is not None
     assert ev.rule.decision == "allowed"
     ev = parse_event(_ev("step.completed", step_id="t:2", status="ok", ms=1200,
                          title="Drafted answer", summary={}, attempt=1, model="m",
                          input_tokens=10, output_tokens=5, cache_read_tokens=0))
+    assert isinstance(ev, StepCompletedEvent)
     assert ev.input_tokens == 10
     with pytest.raises(ValidationError):
         parse_event(_ev("step.completed", step_id="t:3", status="ok", ms=1, title="x",

@@ -14,7 +14,7 @@
  *   that replaces the bar during a call is CS-E-05.S4.T1.
  */
 import { ArrowUp, Mic, PhoneOff } from "lucide-react";
-import { useEffect, useId, useState, type KeyboardEvent, type Ref } from "react";
+import { useId, useState, type KeyboardEvent, type Ref } from "react";
 
 import { messageLimit } from "@/lib/turns/furniture";
 import { cn } from "@/lib/utils";
@@ -60,12 +60,17 @@ export function InputBar({ onSend, busy, disabled, placeholder, inputRef, locked
   const canSend = !busy && !disabled && locked === null && text.trim() !== "" && !limit.over;
   const restoreId = restore?.id ?? null;
 
-  useEffect(() => {
-    if (restore === null) return;
-    if (text === "") setText(restore.text);
-    else setHeld((h) => (h === null ? restore.text : `${h}\n${restore.text}`));
-    // Only a new notice id restores; later renders of the same notice keep what the customer typed.
-  }, [restoreId]);
+  // Only a new notice id restores; later renders of the same notice keep what the customer typed.
+  // Done while rendering, keyed on the id (react.dev, "You Might Not Need an Effect": Adjusting
+  // some state when a prop changes).
+  const [seenRestoreId, setSeenRestoreId] = useState<number | null>(null);
+  if (restoreId !== seenRestoreId) {
+    setSeenRestoreId(restoreId);
+    if (restore !== null) {
+      if (text === "") setText(restore.text);
+      else setHeld((h) => (h === null ? restore.text : `${h}\n${restore.text}`));
+    }
+  }
 
   /**
    * What: puts the held (refused) text in front of whatever is in the field.
