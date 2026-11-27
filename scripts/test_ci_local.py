@@ -1,0 +1,81 @@
+"""What: tests that .github/workflows/ci.yml and scripts/ci_local.sh stay ONE source of truth (D-068), and that
+ci_local.sh goes red on a failing step and refuses an unknown job.
+Use when: CI job `python (scripts)` (pytest over scripts/), or after editing ci.yml or ci_local.sh.
+Inputs: the repo's ci.yml and ci_local.sh. Output: pass or fail.
+Side effects: runs ci_local.sh (descriptors job only, logs under pytest tmp). Role: drift guard for the local CI gate."""
+import re
+import subprocess
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent
+CI = ROOT / ".github" / "workflows" / "ci.yml"
+LOCAL = ROOT / "scripts" / "ci_local.sh"
+
+
+def _jobs_listed() -> list[str]:
+    """What: ci_local.sh --list. Use when: comparing with ci.yml. Inputs: none. Output: job names.
+    Side effects: runs the script. Role: helper."""
+    return subprocess.run(["bash", str(LOCAL), "--list"], check=True, capture_output=True, text=True).stdout.split()
+
+
+def _workflow() -> dict:
+    """What: the parsed ci.yml. Use when: each structural test. Inputs: none. Output: dict. Side effects: none. Role: helper."""
+    return yaml.safe_load(CI.read_text())
+
+
+def test_every_ci_job_calls_ci_local_and_covers_every_job() -> None:
+    """What: the jobs ci.yml runs equal the jobs ci_local.sh defines, and no run step holds its own check command.
+    Use when: CI. Inputs: none. Output: assertions. Side effects: none. Role: one source of truth."""
+    wf = _workflow()
+    called: set[str] = set()
+    for job_id, job in wf["jobs"].items():
+        runs = [s["run"] for s in job["steps"] if "run" in s]
+        assert runs, f"{job_id} has no run step"
+        for run in runs:
+            assert run.startswith("set -euo pipefail"), f"{job_id}: run step must start with set -euo pipefail"
+            body = [ln.strip() for ln in run.splitlines()[1:] if ln.strip()]
+            assert len(body) == 1 and body[0].startswith("scripts/ci_local.sh "), f"{job_id}: run step must only call ci_local.sh: {body}"
+            arg = body[0].split(" ", 1)[1].strip('"')
+            if "${{ matrix.project }}" in arg:
+                called.update(f"python:{p}" for p in job["strategy"]["matrix"]["project"])
+            else:
+                called.add(arg)
+    assert called == set(_jobs_listed())
+
+
+def test_tool_versions_match_the_workflow_setup() -> None:
+    """What: the uv and node versions ci.yml installs equal the ones ci_local.sh enforces. Use when: CI.
+    Inputs: none. Output: assertions. Side effects: none. Role: version parity."""
+    text = LOCAL.read_text()
+    uv = re.search(r'^UV_VERSION="([^"]+)"', text, re.M).group(1)  # type: ignore[union-attr]
+    node = re.search(r'^NODE_MAJOR="([^"]+)"', text, re.M).group(1)  # type: ignore[union-attr]
+    for job in _workflow()["jobs"].values():
+        for step in job["steps"]:
+            if str(step.get("uses", "")).startswith("astral-sh/setup-uv"):
+                assert step["with"]["version"] == uv
+            if str(step.get("uses", "")).startswith("actions/setup-node"):
+                assert step["with"]["node-version"] == node
+
+
+def test_unknown_job_is_refused(tmp_path: Path) -> None:
+    """What: an unknown job name exits 2 before running anything. Use when: CI. Inputs: tmp log dir.
+    Output: assertions. Side effects: none. Role: no silent no-op run."""
+    r = subprocess.run(["bash", str(LOCAL), "descriptors", "no-such-job"], capture_output=True, text=True,
+                       env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path), "CI_LOG_DIR": str(tmp_path)})
+    assert r.returncode == 2 and "unknown job: no-such-job" in r.stderr
+    assert "--- descriptors" not in r.stdout
+
+
+def test_a_failing_step_turns_the_run_red(tmp_path: Path) -> None:
+    """What: the descriptors step against a base ref that does not exist fails, and the run exits 1 with a FAIL row.
+    Use when: CI. Inputs: tmp log dir. Output: assertions. Side effects: logs in tmp_path. Role: proves ci_local can go red."""
+    import os
+
+    env = {**os.environ, "CI_LOG_DIR": str(tmp_path), "CI_DESCRIPTORS_BASE": "refs/heads/no-such-base-ref"}
+    env.pop("GITHUB_ACTIONS", None)
+    r = subprocess.run(["bash", str(LOCAL), "descriptors"], capture_output=True, text=True, env=env)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert re.search(r"descriptors .* FAIL", r.stdout)
+    assert r.stdout.strip().splitlines()[-1].startswith("ci_local: 0 passed, 1 failed")
