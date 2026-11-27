@@ -23,9 +23,19 @@ def load_hook() -> Any:
 async def test_hook_runs_setup_on_the_owner_url(monkeypatch):
     calls: list[Any] = []
 
+    class FakeConn:
+        """What: records SQL. Use when: this test. Inputs: none. Output: none.
+        Side effects: appends. Role: fake psycopg connection."""
+
+        async def execute(self, sql: str, *a: Any) -> None:
+            """What: record. Use when: hook runs SQL. Inputs: sql. Output: none. Side effects: appends. Role: fake."""
+            calls.append(sql)
+
     class FakeSaver:
         """What: records setup. Use when: this test. Inputs: none. Output: none.
         Side effects: appends. Role: fake AsyncPostgresSaver."""
+
+        conn = FakeConn()
 
         async def setup(self) -> None:
             """What: record. Use when: hook calls it. Inputs: none. Output: none.
@@ -48,7 +58,9 @@ async def test_hook_runs_setup_on_the_owner_url(monkeypatch):
     monkeypatch.setattr(hook.AsyncPostgresSaver, "from_conn_string",
                         staticmethod(lambda url: calls.append(url) or FakeCM()))
     await hook.run("postgresql://agent_owner@postgres/quillstack")
-    assert calls == ["postgresql://agent_owner@postgres/quillstack", "setup", "closed"]
+    # review PR #14 I1: the app role must not be able to rewrite the checkpointer's migration ledger
+    assert calls == ["postgresql://agent_owner@postgres/quillstack", "setup",
+                     "REVOKE ALL ON agent.checkpoint_migrations FROM agent_app", "closed"]
 
 
 def test_hook_has_async_run_entry_point():

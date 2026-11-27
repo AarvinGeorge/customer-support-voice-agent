@@ -1,5 +1,5 @@
 """What: fixtures for the Postgres-backed core tests (marker `pg`), run against the Compose Postgres.
-Use when: running `uv run --env-file ../../.env pytest -m pg` with the postgres service up (see compose.pgtest.yaml).
+Use when: running `uv run --env-file ../../.env pytest -m pg` with the postgres service up (scripts/pg_tests.sh; infra/compose.pgtest.yaml).
 Inputs: env CORE_DB_OWNER_URL and CORE_DB_URL (compose hostnames), PG_TEST_HOST (default 127.0.0.1),
 PG_TEST_PORT (default 55432).
 Output: fixtures `owner_url`, `app_url`, `migrated`, `app_conn`, `owner_conn`, `seed`.
@@ -26,7 +26,7 @@ MIGRATIONS = ROOT / "services" / "core" / "migrations"
 def _to_host(url: str) -> str:
     """What: swap the compose hostname in a database URL for the published test host and port.
     Use when: building owner_url and app_url. Inputs: URL with host postgres. Output: URL for the host machine.
-    Side effects: none. Role: host-run pytest reaches the stack through compose.pgtest.yaml's published port."""
+    Side effects: none. Role: host-run pytest reaches the stack through infra/compose.pgtest.yaml's published port."""
     parts = urlsplit(url)
     netloc = f"{parts.username}:{parts.password}@" if parts.username else ""
     netloc += f"{os.environ.get('PG_TEST_HOST', '127.0.0.1')}:{os.environ.get('PG_TEST_PORT', '55432')}"
@@ -38,7 +38,7 @@ def _need(name: str) -> str:
     Output: value. Side effects: pytest.fail when unset. Role: never skip silently."""
     value = os.environ.get(name, "")
     if not value:
-        pytest.fail(f"{name} is not set; run: uv run --env-file ../../.env pytest -m pg (stack up, see compose.pgtest.yaml)")
+        pytest.fail(f"{name} is not set; run: uv run --env-file ../../.env pytest -m pg (stack up, scripts/pg_tests.sh; infra/compose.pgtest.yaml)")
     return value
 
 
