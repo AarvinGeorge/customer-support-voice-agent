@@ -7,6 +7,7 @@ and a spoofed header from outside the edge subnet is ignored)."""
 from __future__ import annotations
 
 import logging
+import uuid
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,15 +15,20 @@ import fakeredis
 import httpx
 from contracts import limits as L
 from contracts.errors import ErrorEnvelope
+from langchain_core.messages import AIMessage
 from redis.exceptions import ConnectionError as RedisConnectionError
+from starlette.datastructures import Headers
 
 from agent.access import sign_cookie
+from agent.ingress import SessionRow
 from agent.limits.ratelimit import RULES, RateLimiter, client_ip
 from agent.main import create_app
 from test_access_api import CODE, KEY, MemorySessions, settings
+from test_turns_route import OTHER_SID, SID, VISITOR, World
+from test_turns_route import settings as turn_settings
 
 EDGE = "172.30.0.0/24"
-SID = "019a7c2e-5b10-7000-8000-00000000b001"
+SID_B = "019a7c2e-5b10-7000-8000-00000000b003"
 
 
 class Clock:
@@ -134,10 +140,12 @@ async def test_fail_open_when_redis_raises_and_it_is_logged(caplog):
 
 # ---- client IP ----
 
-def req(peer: str | None, xff: str | None, trusted: str = EDGE) -> Any:
-    """What: a stand-in Request with client, headers and settings. Use when: client_ip tests.
-    Inputs: socket peer, X-Forwarded-For, trusted list. Output: namespace. Side effects: none. Role: helper."""
-    headers = {"x-forwarded-for": xff} if xff is not None else {}
+def req(peer: str | None, xff: str | list[str] | None, trusted: str = EDGE) -> Any:
+    """What: a stand-in Request with client, headers (one X-Forwarded-For line or several) and settings.
+    Use when: client_ip tests. Inputs: socket peer, header value(s), trusted list. Output: namespace.
+    Side effects: none. Role: helper."""
+    lines = [xff] if isinstance(xff, str) else (xff or [])
+    headers = Headers(raw=[(b"x-forwarded-for", v.encode()) for v in lines])
     app = SimpleNamespace(state=SimpleNamespace(settings=SimpleNamespace(forwarded_allow_ips=trusted)))
     return SimpleNamespace(client=SimpleNamespace(host=peer) if peer else None, headers=headers, app=app)
 
@@ -166,6 +174,19 @@ def test_missing_or_garbage_xff_or_peer_falls_back_safely():
 def test_trusted_list_accepts_commas_single_ips_and_star():
     assert client_ip(req("10.0.0.5", "203.0.113.9", trusted="10.0.0.5, 172.30.0.0/24")) == "203.0.113.9"
     assert client_ip(req("8.8.8.8", "203.0.113.9", trusted="*")) == "203.0.113.9"
+
+
+def test_ip_text_is_canonical_and_every_xff_header_line_is_read():
+    assert client_ip(req("172.30.0.2", "2001:DB8:0:0:0:0:0:1")) == "2001:db8::1"
+    assert client_ip(req("172.30.0.2", "2001:db8::1")) == "2001:db8::1"
+    # two header lines are one list: the rightmost entry (Caddy's) wins, like uvicorn
+    assert client_ip(req("172.30.0.2", ["6.6.6.6", "203.0.113.9"])) == "203.0.113.9"
+
+
+def test_labels_are_derived_from_the_limit_and_window():
+    for rule in RULES.values():
+        unit = {60: "minute", 3600: "hour"}.get(rule.window_s, f"{rule.window_s // 60} minutes")
+        assert rule.label == f"{rule.limit}/{unit}"
 
 
 # ---- routes ----
@@ -203,14 +224,37 @@ async def own_session(app: Any, c: httpx.AsyncClient) -> str:
     return r.json()["session_id"]
 
 
+# Turn counting uses the real composed Ingress (test_turns_route.World): only a turn that starts counts (07 s2.4).
+
+def turn_body(text: str = "hi") -> dict[str, Any]:
+    """What: a valid TurnRequest body with a fresh client_turn_id. Use when: turn tests. Inputs: text.
+    Output: dict. Side effects: none. Role: helper."""
+    return {"client_turn_id": str(uuid.uuid4()), "text": text}
+
+
+def world(n_replies: int = 0, redis: Any = None) -> World:
+    """What: a World (real Ingress and agent graph, fake models) with fakeredis and the edge subnet trusted.
+    Use when: turn tests. Inputs: number of scripted one-line answers, redis client. Output: World.
+    Side effects: none. Role: helper."""
+    w = World(*[AIMessage(content="Ok, happy to help with Quillstack.") for _ in range(n_replies)])
+    w.app.state.settings = turn_settings(forwarded_allow_ips=EDGE)
+    w.app.state.redis = redis if redis is not None else fresh_redis()
+    return w
+
+
+async def session_hits(redis: Any, visitor: str = VISITOR, sid: str = SID) -> int:
+    """What: hits recorded in a session's SESSION_TURNS window. Use when: counting tests.
+    Inputs: redis, visitor, sid. Output: int. Side effects: none. Role: helper."""
+    return await redis.zcard(f"rl:SESSION_TURNS:{visitor}:{sid}")
+
+
 async def test_eleventh_turn_in_a_minute_gets_429_session_turns_with_envelope_and_header():
-    app = app_with_redis(fresh_redis())
-    async with http(app, cookies=cookie()) as c:
-        sid = await own_session(app, c)
+    w = world(10)
+    async with w.client() as c:
         for i in range(10):
-            r = await c.post(f"/api/sessions/{sid}/turns", json={})
-            assert r.status_code != 429, f"turn {i + 1}: {r.status_code} {r.text}"
-        r = await c.post(f"/api/sessions/{sid}/turns", json={})
+            r = await c.post(f"/api/sessions/{SID}/turns", json=turn_body())
+            assert r.status_code == 200, f"turn {i + 1}: {r.status_code} {r.text}"
+        r = await c.post(f"/api/sessions/{SID}/turns", json=turn_body())
     assert r.status_code == 429
     env = ErrorEnvelope.model_validate(r.json())
     assert env.error.class_ == "rate_limited" and env.error.code == "SESSION_TURNS"
@@ -219,34 +263,138 @@ async def test_eleventh_turn_in_a_minute_gets_429_session_turns_with_envelope_an
     assert r.headers["retry-after"] == str(env.error.retry_after_s)
     assert env.error.details == {"limit": "10/minute", "scope": "session"}
     assert env.error.trace_id == r.headers["x-trace-id"]
+    assert len(w.registry.primary.seen) == 10 and w.lock.held == {}  # the refused turn ran nothing, lock released
 
 
-async def test_session_turn_window_is_per_session_and_per_visitor():
-    app = app_with_redis(fresh_redis())
-    async with http(app, cookies=cookie()) as c:
-        a = await own_session(app, c)
-        b = await own_session(app, c)
-        for _ in range(11):
-            await c.post(f"/api/sessions/{a}/turns", json={})
-        assert (await c.post(f"/api/sessions/{a}/turns", json={})).json()["error"]["code"] == "SESSION_TURNS"
-        assert (await c.post(f"/api/sessions/{b}/turns", json={})).status_code != 429
-
-
-async def test_ip_hourly_row_on_turns_and_voice_ask_shares_one_window():
+async def test_replays_do_not_count_toward_session_turns():
     redis = fresh_redis()
-    app = app_with_redis(redis)
-    async with http(app, cookies=cookie()) as c:
-        sids = [await own_session(app, c) for _ in range(7)]
-        # 7 sessions x 9 turns each = 63 calls, each session stays under 10/minute; IP crosses 60/hour.
-        codes = []
-        for sid in sids:
-            for _ in range(9):
-                r = await c.post(f"/api/sessions/{sid}/turns", json={})
+    w = world(1, redis)
+    body = turn_body()
+    async with w.client() as c:
+        codes = [(await c.post(f"/api/sessions/{SID}/turns", json=body)).status_code for _ in range(13)]
+    assert codes == [200] * 13  # one real turn, twelve replays
+    assert await session_hits(redis) == 1 and len(w.registry.primary.seen) == 1
+
+
+async def test_a_resend_at_a_full_window_still_gets_its_replay():
+    w = world(10)
+    first = turn_body()
+    async with w.client() as c:
+        await c.post(f"/api/sessions/{SID}/turns", json=first)
+        for _ in range(9):
+            await c.post(f"/api/sessions/{SID}/turns", json=turn_body())
+        assert (await c.post(f"/api/sessions/{SID}/turns", json=turn_body())).status_code == 429
+        again = await c.post(f"/api/sessions/{SID}/turns", json=first)
+    assert again.status_code == 200 and "replayed" in again.text
+
+
+async def test_the_capped_turn_does_not_count():
+    redis = fresh_redis()
+    w = world(0, redis)
+    w.turns.sessions[SID] = SessionRow(session_id=SID, visitor_id=VISITOR, user_turns=40)
+    async with w.client() as c:
+        codes = [(await c.post(f"/api/sessions/{SID}/turns", json=turn_body())).status_code for _ in range(12)]
+    assert codes == [200] * 12 and await session_hits(redis) == 0
+
+
+async def test_requests_refused_before_a_turn_starts_do_not_count():
+    redis = fresh_redis()
+    w = world(0, redis)
+    async with w.client() as c:
+        bad = [(await c.post(f"/api/sessions/{SID}/turns", json={"client_turn_id": "x", "text": "hi"})).status_code
+               for _ in range(12)]
+        foreign = [(await c.post(f"/api/sessions/{OTHER_SID}/turns", json=turn_body())).status_code
+                   for _ in range(12)]
+        ghost = f"/api/sessions/{uuid.uuid4()}/turns"
+        missing = [(await c.post(ghost, json=turn_body())).status_code for _ in range(12)]
+    async with w.client(cookie=False) as anon:
+        unauth = [(await anon.post(f"/api/sessions/{SID}/turns", json=turn_body())).status_code for _ in range(12)]
+    assert set(bad) == {422} and set(foreign) == {404} and set(missing) == {404} and set(unauth) == {401}
+    assert [k async for k in redis.scan_iter("rl:*")] == []  # neither window was touched
+
+
+async def test_a_refused_voice_ask_before_ingress_does_not_count():
+    redis = fresh_redis()
+    w = world(0, redis)
+    ask = {"client_turn_id": str(uuid.uuid4()), "voice_session_id": "nope", "realtime_call_id": "call-1",
+           "question": "hi", "transcript_final": True, "last_assistant_interrupted": False}
+    async with w.client() as c:
+        codes = [(await c.post(f"/api/sessions/{SID}/voice/ask", json=ask)).status_code for _ in range(12)]
+    assert set(codes) == {429}  # VOICE_SESSION_EXPIRED, step 3
+    assert [k async for k in redis.scan_iter("rl:*")] == []
+
+
+async def test_session_window_is_per_session_and_per_visitor():
+    redis = fresh_redis()
+    w = world(11, redis)
+    w.turns.sessions[SID_B] = SessionRow(session_id=SID_B, visitor_id=VISITOR)
+    async with w.client() as c:
+        for _ in range(11):
+            await c.post(f"/api/sessions/{SID}/turns", json=turn_body())
+        a = await c.post(f"/api/sessions/{SID}/turns", json=turn_body())
+        b = await c.post(f"/api/sessions/{SID_B}/turns", json=turn_body())
+    assert a.status_code == 429 and b.status_code == 200
+
+
+async def test_ip_hourly_row_is_one_window_across_sessions():
+    redis = fresh_redis()
+    w = world(60, redis)
+    sids = [str(uuid.UUID(int=0x019A7C2E5B1070008000000000C00000 + i)) for i in range(7)]
+    for s in sids:
+        w.turns.sessions[s] = SessionRow(session_id=s, visitor_id=VISITOR)
+    codes: list[Any] = []
+    async with w.client() as c:
+        for s in sids:
+            for _ in range(9):  # 63 turns, each session under 10 a minute
+                r = await c.post(f"/api/sessions/{s}/turns", json=turn_body())
                 codes.append(r.json()["error"]["code"] if r.status_code == 429 else r.status_code)
-        assert codes[:60].count("IP_HOURLY") == 0 and codes[60:] == ["IP_HOURLY"] * 3
-        r = await c.post(f"/api/sessions/{sids[0]}/voice/ask", json={})
-    assert r.status_code == 429 and r.json()["error"]["code"] == "IP_HOURLY"
-    assert r.json()["error"]["details"] == {"limit": "60/hour", "scope": "ip"}
+    assert codes[:60] == [200] * 60 and codes[60:] == ["IP_HOURLY"] * 3
+    r429 = ErrorEnvelope.model_validate((await _last_ip_refusal(w)).json())
+    assert r429.error.details == {"limit": "60/hour", "scope": "ip"}
+
+
+async def _last_ip_refusal(w: World) -> httpx.Response:
+    """What: one more turn after the IP window is full. Use when: the IP_HOURLY test. Inputs: world.
+    Output: the 429 response. Side effects: none (refused). Role: helper."""
+    async with w.client() as c:
+        return await c.post(f"/api/sessions/{SID}/turns", json=turn_body())
+
+
+async def test_a_turn_refused_by_the_ip_row_does_not_consume_a_session_slot():
+    redis = fresh_redis()
+    lim = RateLimiter(redis, clock=Clock())
+    for _ in range(60):
+        await lim.hit(RULES["IP_HOURLY"], "9.9.9.9")
+    rej = await lim.hit_all([(RULES["SESSION_TURNS"], "v:s"), (RULES["IP_HOURLY"], "9.9.9.9")])
+    assert rej is not None and rej.rule.code == "IP_HOURLY"
+    assert await redis.zcard("rl:SESSION_TURNS:v:s") == 0
+
+
+# ---- session id key (I2) ----
+
+async def test_case_and_hyphen_variants_of_a_session_id_share_one_window():
+    redis = fresh_redis()
+    w = world(10, redis)
+    variants = [SID, SID.upper(), SID.replace("-", ""), "{" + SID + "}", "urn:uuid:" + SID]
+    async with w.client() as c:
+        for i in range(10):
+            r = await c.post(f"/api/sessions/{variants[i % 5]}/turns", json=turn_body())
+            assert r.status_code == 200, (variants[i % 5], r.text)
+        eleventh = await c.post(f"/api/sessions/{SID.upper()}/turns", json=turn_body())
+    assert eleventh.status_code == 429
+    assert [k async for k in redis.scan_iter("rl:SESSION_TURNS:*")] == [f"rl:SESSION_TURNS:{VISITOR}:{SID}".encode()]
+
+
+async def test_invalid_session_ids_are_404_before_any_counting():
+    redis = fresh_redis()
+    w = world(0, redis)
+    async with w.client() as c:
+        for bad in ("not-a-uuid", "123", "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"):
+            for path in ("turns", "voice/token", "transcript"):
+                r = await c.post(f"/api/sessions/{bad}/{path}", json={})
+                assert r.status_code == 404 and r.json()["error"]["code"] == "NOT_FOUND", (bad, path, r.text)
+    assert [k async for k in redis.scan_iter("rl:*")] == []
+
 
 
 async def test_session_creation_is_limited_to_20_per_hour_per_ip():

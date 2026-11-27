@@ -1,7 +1,7 @@
 """What: Redis sliding-window rate limits for the keyed rows of doc 07 s9, the 429 envelope, client IP resolution,
 and the FastAPI dependencies that apply them.
-Use when: a route adds `dependencies=[Depends(limit_turn)]` (or limit_session_create, limit_session_post,
-limit_voice_token, limit_access); create_app calls install_limits once for the 429 handler.
+Use when: a route adds `dependencies=[Depends(limit_session_create)]` (or limit_session_post, limit_voice_token,
+limit_access), or passes turn_counter to Ingress for turns; create_app calls install_limits once for the 429 handler.
 Inputs: app.state.redis (async Redis client shared by both replicas), app.state.settings (forwarded_allow_ips),
 the request (path param sid, request.state.visitor_id from the access gate, socket peer, X-Forwarded-For).
 Output: RULES, RateLimiter, client_ip, RateLimited, the dependencies, install_limits.
@@ -11,8 +11,9 @@ Role: ingress step 2 (doc 07 s2.4). Fails OPEN when Redis is down or missing (lo
 the turn lock and voice call dedupe are different code and fail closed.
 Not built (doc 09 s1.2): the per-replica admission semaphore (8 concurrent, 503 BUSY) and the operator login route
 (its rule OPERATOR_ATTEMPTS is defined here so the row is not lost).
-Counting note: the dependency counts every request that reaches the route, replays and the capped 41st turn
-included; doc 07 s2.4 would exempt those (they are decided inside Ingress). See the S2 report, open concerns.
+Counting (doc 07 s2.4): SESSION_TURNS and IP_HOURLY are recorded by Ingress at step 9, through the `count_turn`
+callback from turn_counter, so replays, the capped turn, and requests refused earlier (401, 404, 422, 409) do not
+count. The other rows are route dependencies and count each request that reaches the route.
 """
 from __future__ import annotations
 
@@ -20,15 +21,16 @@ import ipaddress
 import logging
 import math
 import time
+import uuid
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Callable
-from uuid import uuid4
-
+from typing import Any, Awaitable, Callable
 from contracts import limits as L
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from agent.access import NotOwned
+from agent.ingress import IngressError
 from agent.web import error_response
 
 log = logging.getLogger("agent.limits")
@@ -49,20 +51,22 @@ class Rule:
     message: str
 
 
-def _rule(code: str, limit: int, window_s: int, scope: str, label: str, what: str) -> Rule:
-    """What: build a Rule with the standard message. Use when: filling RULES. Inputs: row fields, what is limited.
-    Output: Rule. Side effects: none. Role: helper."""
-    return Rule(code, limit, window_s, scope, label, f"You are {what} too quickly. Please wait a moment and try again.")
+def _rule(code: str, limit: int, window_s: int, scope: str, what: str) -> Rule:
+    """What: build a Rule with the standard message and a label derived from the numbers (10/minute, 5/15 minutes).
+    Use when: filling RULES. Inputs: row fields, what is limited. Output: Rule. Side effects: none. Role: helper."""
+    unit = {60: "minute", 3600: "hour"}.get(window_s, f"{window_s // 60} minutes")
+    return Rule(code, limit, window_s, scope, f"{limit}/{unit}",
+                f"You are {what} too quickly. Please wait a moment and try again.")
 
 
 RULES: dict[str, Rule] = {r.code: r for r in (
-    _rule("SESSION_TURNS", L.SESSION_TURNS_PER_MINUTE, 60, "session", "10/minute", "sending messages"),
-    _rule("IP_HOURLY", L.IP_TURNS_PER_HOUR, 3600, "ip", "60/hour", "sending messages"),
-    _rule("IP_SESSIONS", L.IP_SESSIONS_PER_HOUR, 3600, "ip", "20/hour", "starting conversations"),
-    _rule("SESSION_POSTS", L.SESSION_POSTS_PER_HOUR, 3600, "session", "120/hour", "sending updates"),
-    _rule("VOICE_SESSIONS", L.IP_VOICE_TOKENS_PER_HOUR, 3600, "ip", "3/hour", "starting voice calls"),
-    _rule("ACCESS_ATTEMPTS", L.IP_ACCESS_ATTEMPTS_PER_HOUR, 3600, "ip", "10/hour", "trying access codes"),
-    _rule("OPERATOR_ATTEMPTS", 5, 900, "ip", "5/15 minutes", "trying operator sign-ins"),  # route designed only
+    _rule("SESSION_TURNS", L.SESSION_TURNS_PER_MINUTE, 60, "session", "sending messages"),
+    _rule("IP_HOURLY", L.IP_TURNS_PER_HOUR, 3600, "ip", "sending messages"),
+    _rule("IP_SESSIONS", L.IP_SESSIONS_PER_HOUR, 3600, "ip", "starting conversations"),
+    _rule("SESSION_POSTS", L.SESSION_POSTS_PER_HOUR, 3600, "session", "sending updates"),
+    _rule("VOICE_SESSIONS", L.IP_VOICE_TOKENS_PER_HOUR, 3600, "ip", "starting voice calls"),
+    _rule("ACCESS_ATTEMPTS", L.IP_ACCESS_ATTEMPTS_PER_HOUR, 3600, "ip", "trying access codes"),
+    _rule("OPERATOR_ATTEMPTS", 5, 900, "ip", "trying operator sign-ins"),  # route designed only
 )}
 
 
@@ -100,15 +104,14 @@ class RateLimiter:
         self._redis = redis
         self._clock = clock
 
-    async def hit(self, rule: Rule, subject: str) -> Rejection | None:
-        """What: record one hit and say whether the window is now over its limit.
-        Use when: ingress step 2. Inputs: rule, subject (session or IP key). Output: None or Rejection with
-        retry_after_s = ceil(oldest hit + window - now), minimum 1. Side effects: Redis writes (above); a refused
-        hit is removed again so a blocked client does not extend its own window. Any Redis error is logged and
-        the hit is allowed (fail open). Role: the limiter core."""
+    async def _hit(self, rule: Rule, subject: str) -> tuple[Rejection | None, str | None]:
+        """What: record one hit; say whether the window is now over its limit.
+        Use when: hit and hit_all. Inputs: rule, subject. Output: (Rejection or None, key and member of the
+        recorded hit as "key|member", or None when nothing was recorded). Side effects: Redis writes; a refused
+        hit is removed again. Any Redis error is logged and the hit is allowed (fail open). Role: limiter core."""
         key = f"rl:{rule.code}:{subject}"
         now = self._clock()
-        member = f"{now:.6f}:{uuid4().hex}"
+        member = f"{now:.6f}:{uuid.uuid4().hex}"
         try:
             async with self._redis.pipeline(transaction=True) as pipe:
                 pipe.zremrangebyscore(key, 0, now - rule.window_s)
@@ -118,13 +121,39 @@ class RateLimiter:
                 pipe.expire(key, rule.window_s + 1)
                 _, _, count, oldest, _ = await pipe.execute()
             if count <= rule.limit:
-                return None
+                return None, f"{key}|{member}"
             await self._redis.zrem(key, member)
             reset = float(oldest[0][1]) + rule.window_s
-            return Rejection(rule, max(1, math.ceil(reset - now)))
+            return Rejection(rule, max(1, math.ceil(reset - now))), None
         except Exception as exc:  # noqa: BLE001 - any Redis or network fault must not block the request
             log.warning("rate limit %s failing open: redis error %s", rule.code, type(exc).__name__)
-            return None
+            return None, None
+
+    async def hit(self, rule: Rule, subject: str) -> Rejection | None:
+        """What: record one hit and say whether it was refused.
+        Use when: a single row applies. Inputs: rule, subject. Output: None (allowed) or Rejection with
+        retry_after_s = ceil(oldest hit + window - now), minimum 1. Side effects: see _hit. Role: limiter API."""
+        return (await self._hit(rule, subject))[0]
+
+    async def hit_all(self, checks: list[tuple[Rule, str]]) -> Rejection | None:
+        """What: record hits for several rows; if one refuses, take back the hits already recorded for the others.
+        Use when: a turn starts (SESSION_TURNS then IP_HOURLY). Inputs: (rule, subject) pairs in order.
+        Output: None or the first Rejection. Side effects: Redis writes; ZREM of the earlier hits on a refusal
+        (best effort, logged). Role: a request refused by one row does not use up a slot in another."""
+        taken: list[str] = []
+        for rule, subject in checks:
+            rejection, token = await self._hit(rule, subject)
+            if rejection is not None:
+                for t in taken:
+                    key, member = t.split("|", 1)
+                    try:
+                        await self._redis.zrem(key, member)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("rate limit refund failed: redis error %s", type(exc).__name__)
+                return rejection
+            if token:
+                taken.append(token)
+        return None
 
 
 @lru_cache(maxsize=16)
@@ -155,29 +184,39 @@ def _in(nets: tuple[Any, ...] | None, ip: str) -> bool:
     return any(addr in n for n in nets)
 
 
+def _canon(ip: str) -> str:
+    """What: canonical text of an address. Use when: building a key. Inputs: address text.
+    Output: the canonical form, or the input when it does not parse. Side effects: none. Role: helper
+    (2001:DB8::1 and 2001:db8:0:0:0:0:0:1 share one window)."""
+    try:
+        return str(ipaddress.ip_address(ip))
+    except ValueError:
+        return ip
+
+
 def client_ip(request: Request) -> str:
     """What: the client address used as the IP key.
     Use when: an IP-keyed row is checked. Inputs: request (socket peer, X-Forwarded-For, settings).
-    Output: the address, or "unknown" without a peer. Side effects: none.
-    Role: doc 07 s9 and D-047. X-Forwarded-For is read only when the immediate peer is inside
-    FORWARDED_ALLOW_IPS (the edge subnet, where Caddy runs); then the entries are walked right to left past trusted
-    hops and the first untrusted valid address wins, so a value the client put on the left is never used. From any
-    other peer the header is ignored and the socket peer is the key."""
+    Output: the canonical address, or "unknown" without a peer. Side effects: none.
+    Role: doc 07 s9 and D-047. X-Forwarded-For (all header lines, as one list) is read only when the immediate peer
+    is inside FORWARDED_ALLOW_IPS (the edge subnet, where Caddy runs); then the entries are walked right to left
+    past trusted hops and the first untrusted valid address wins, so a value the client put on the left is never
+    used. From any other peer the header is ignored and the socket peer is the key."""
     peer = request.client.host if request.client else None
     if not peer:
         return "unknown"
     nets = _trusted(getattr(request.app.state.settings, "forwarded_allow_ips", "") or "")
-    xff = request.headers.get("x-forwarded-for")
+    xff = ",".join(request.headers.getlist("x-forwarded-for"))
     if not xff or not _in(nets, peer):
-        return peer
+        return _canon(peer)
     for raw in reversed([p.strip() for p in xff.split(",")]):
         try:
             ipaddress.ip_address(raw)
         except ValueError:
-            return peer  # a malformed hop: do not guess
+            return _canon(peer)  # a malformed hop: do not guess
         if nets is None or not _in(nets, raw):  # "*" trusts every peer: the rightmost entry is the client
-            return raw
-    return peer
+            return _canon(raw)
+    return _canon(peer)
 
 
 async def enforce(request: Request, rule: Rule, subject: str) -> None:
@@ -193,20 +232,48 @@ async def enforce(request: Request, rule: Rule, subject: str) -> None:
         raise RateLimited(rejection)
 
 
+def canonical_sid(sid: str) -> str:
+    """What: the one spelling of a session id: lowercase hyphenated UUID.
+    Use when: a route names a session (rate-limit key, ownership, lock, thread). Inputs: path text.
+    Output: canonical string. Side effects: none. Role: Postgres accepts case, brace and hyphen variants of a uuid,
+    so without this one session would get many windows. Raises NotOwned (404 NOT_FOUND, no hint) when it does not parse."""
+    try:
+        return str(uuid.UUID(sid))
+    except ValueError as exc:
+        raise NotOwned(sid) from exc
+
+
 def _session_subject(request: Request) -> str:
     """What: the key for a session-scoped row. Use when: session rows. Inputs: request (path sid, visitor id).
-    Output: "<visitor_id>:<sid>". Side effects: none. Role: the contract key is session_id; the visitor id is
-    added so a caller who names someone else's session id burns only their own window (ownership is checked later
-    in the handler, 404)."""
-    return f"{getattr(request.state, 'visitor_id', '-')}:{request.path_params.get('sid', '-')}"
+    Output: "<visitor_id>:<canonical sid>". Side effects: none (raises NotOwned for an invalid id, before any count).
+    Role: the contract key is session_id; the visitor id is added so a caller who names someone else's session id
+    burns only their own window (ownership is checked later in the handler, 404)."""
+    return f"{getattr(request.state, 'visitor_id', '-')}:{canonical_sid(request.path_params.get('sid', ''))}"
 
 
-async def limit_turn(request: Request) -> None:
-    """What: SESSION_TURNS (10/minute per session) then IP_HOURLY (60/hour per IP).
-    Use when: POST /turns and POST /voice/ask. Inputs: request. Output: none; raises RateLimited.
-    Side effects: Redis writes. Role: doc 07 s9 rows 1 and 2."""
-    await enforce(request, RULES["SESSION_TURNS"], _session_subject(request))
-    await enforce(request, RULES["IP_HOURLY"], client_ip(request))
+def turn_counter(request: Request, sid: str) -> Callable[[], Awaitable[IngressError | None]]:
+    """What: the callback Ingress calls when a turn starts (step 9): record SESSION_TURNS then IP_HOURLY.
+    Use when: building IngressInput for /turns and /voice/ask. Inputs: request, canonical session id.
+    Output: async callable returning None (go on) or an IngressError 429 (the route answers it).
+    Side effects: Redis writes when called; none otherwise. Role: doc 07 s2.4 Counting; a refusal by one row
+    takes back the other's hit."""
+    async def count() -> IngressError | None:
+        """What: count this turn. Use when: Ingress step 9. Inputs: none. Output: None or IngressError 429.
+        Side effects: Redis writes. Role: closure over the request."""
+        redis = getattr(request.app.state, "redis", None)
+        if redis is None:
+            log.warning("rate limit SESSION_TURNS failing open: no redis client")
+            return None
+        subject = f"{getattr(request.state, 'visitor_id', '-')}:{sid}"
+        rej = await RateLimiter(redis).hit_all([(RULES["SESSION_TURNS"], subject),
+                                                (RULES["IP_HOURLY"], client_ip(request))])
+        if rej is None:
+            return None
+        return IngressError(429, "rate_limited", rej.rule.code, rej.rule.message, retryable=True,
+                            retry_after_s=rej.retry_after_s,
+                            details={"limit": rej.rule.label, "scope": rej.rule.scope})
+
+    return count
 
 
 async def limit_session_create(request: Request) -> None:
@@ -224,6 +291,7 @@ async def limit_session_post(request: Request) -> None:
 async def limit_voice_token(request: Request) -> None:
     """What: VOICE_SESSIONS (3/hour per IP). Use when: POST /voice/token. Inputs: request.
     Output: none; raises RateLimited. Side effects: Redis writes. Role: doc 07 s9 row 5."""
+    canonical_sid(request.path_params.get("sid", ""))  # invalid id: 404 before any count
     await enforce(request, RULES["VOICE_SESSIONS"], client_ip(request))
 
 

@@ -31,7 +31,7 @@ from langchain_core.utils.uuid import uuid7
 from agent.access import owned_session
 from agent.assembly import run_config
 from agent.ingress import Ingress, IngressInput, SessionRow, TurnRow, to_response
-from agent.limits.ratelimit import limit_session_post, limit_turn, limit_voice_token
+from agent.limits.ratelimit import canonical_sid, limit_session_post, limit_voice_token, turn_counter
 from agent.models.config import RoleSpec
 from agent.prompt import _escape_frame  # pyright: ignore[reportPrivateUsage]  (the frame-tag escaper, M5)
 from agent.realtime import MintedSecret, MintError, SessionSummary, build_session_config, render_instructions, \
@@ -305,6 +305,7 @@ def install_voice(app: FastAPI) -> None:
         """What: mint a Realtime client secret for this session and record the voice session.
         Use when: the mic click. Inputs: session id, `{}`. Output: VoiceToken (max_session_s 600).
         Side effects: one OpenAI call, INSERT agent.voice_sessions. Role: doc 07 s2.2, s6.6."""
+        sid = canonical_sid(sid)
         owned = await owned_session(request.app.state.session_store, sid, request.state.visitor_id)
         sid = owned.session_id  # canonical spelling from the row, never the path alias (review M4)
         deps: VoiceDeps | None = getattr(request.app.state, "voice", None)
@@ -325,12 +326,13 @@ def install_voice(app: FastAPI) -> None:
                          max_session_s=limits.VOICE_SESSION_MAX_S)
         return JSONResponse(out.model_dump(mode="json"), headers={"Cache-Control": "no-store"})
 
-    @app.post("/api/sessions/{sid}/voice/ask", dependencies=[Depends(limit_turn)])
+    @app.post("/api/sessions/{sid}/voice/ask")
     async def post_voice_ask(sid: str, body: VoiceAskRequest, request: Request) -> Any:
         """What: run one voice turn: step 3 here, then the shared ingress with mode="voice" (steps 4 to 16).
         Use when: the browser relays an ask_support_agent function call.
         Inputs: session id, VoiceAskRequest. Output: text/event-stream; turn.completed.final.say is spoken.
         Side effects: a full agent turn. Role: doc 07 s2.2, s2.4 (20 s deadline from TURN_DEADLINE_S)."""
+        sid = canonical_sid(sid)
         owned = await owned_session(request.app.state.session_store, sid, request.state.visitor_id)
         sid = owned.session_id  # canonical (review M4)
         deps: VoiceDeps | None = getattr(request.app.state, "voice", None)
@@ -345,7 +347,7 @@ def install_voice(app: FastAPI) -> None:
         result = await deps.ingress.handle(IngressInput(
             session_id=sid, visitor_id=request.state.visitor_id, client_turn_id=str(body.client_turn_id),
             mode="voice", input_kind="voice", text=body.question, realtime_call_id=body.realtime_call_id,
-            body=body, redact_context=_redact_context(owned)))
+            body=body, redact_context=_redact_context(owned), count_turn=turn_counter(request, sid)))
         return to_response(request, result)
 
     @app.post("/api/sessions/{sid}/transcript", status_code=204, dependencies=[Depends(limit_session_post)])
@@ -354,6 +356,7 @@ def install_voice(app: FastAPI) -> None:
         Use when: the browser flushes final transcription items. Inputs: session id, TranscriptPost.
         Output: 204. Side effects: INSERT agent.transcript_items (redacted, re-posts ignored).
         Role: doc 07 s2.2, s2.6 (untrusted display text)."""
+        sid = canonical_sid(sid)
         session = await owned_session(request.app.state.session_store, sid, request.state.visitor_id)
         sid = session.session_id  # canonical (review M4)
         deps: VoiceDeps | None = getattr(request.app.state, "voice", None)
