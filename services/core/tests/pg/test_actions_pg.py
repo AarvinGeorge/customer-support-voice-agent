@@ -39,7 +39,7 @@ START = datetime(2026, 11, 27, 9, 30, tzinfo=NY)
 
 def build_world(c: psycopg.Connection) -> SimpleNamespace:
     """What: insert a Pro account (owner, member), a Business account, a past-due Pro account, their charges and
-    verified sessions. Use when: the world fixture runs. Inputs: an autocommit connection. Output: namespace of ids.
+    verified sessions. Use when: the world fixture runs. Inputs: a connection (the caller owns the transaction). Output: namespace of ids.
     Side effects: INSERTs. Role: one data set for every prepare and commit path."""
     n = random.randrange(10000, 30000)
     w = SimpleNamespace(pro=f"QS-{n}", biz=f"QS-{n + 30000}", due=f"QS-{n + 60000}")
@@ -79,6 +79,15 @@ def build_world(c: psycopg.Connection) -> SimpleNamespace:
     return w
 
 
+def build_world_atomic(url: str) -> SimpleNamespace:
+    """What: build the world in ONE transaction that commits only if every INSERT succeeds. Use when: the world
+    fixture runs (a failed build must leave no committed rows, or teardown never runs and later tests collide with the
+    leftovers). Inputs: a database url. Output: namespace of ids. Side effects: committed INSERTs on success, none on
+    failure (rolled back). Role: fixture setup that cannot leak."""
+    with psycopg.connect(url) as c:
+        return build_world(c)
+
+
 @pytest.fixture
 def world(request, app_url, owner_url, migrated):
     """What: a TestClient on the real pool with a shared FixedClock, the data set and call helpers; removes every row
@@ -87,8 +96,7 @@ def world(request, app_url, owner_url, migrated):
     Side effects: committed rows, removed at teardown. Role: end-to-end harness."""
     settings = Settings(token_agent=TOKENS["agent_tools"], token_commit=TOKENS["agent_commit"], token_ops=TOKENS["ops"],
                         db_url=app_url, demo_faults=bool(getattr(request, "param", False)), policy_path=str(POLICY_PATH))
-    with psycopg.connect(app_url, autocommit=True) as c:
-        w = build_world(c)
+    w = build_world_atomic(app_url)
     w.clock = FixedClock(START)
     w.app_url = app_url
     with TestClient(create_app(settings, clock=w.clock)) as client:
@@ -617,8 +625,8 @@ def test_refused_commits_and_prepares_are_audited(world):
 
 def test_world_ids_stay_valid_when_every_random_draw_is_at_the_top_of_its_range(app_url, migrated, monkeypatch):
     """What: build the world with every random draw at its maximum and roll it back. Use when: guarding the id
-    patterns (CH-8 digits, U-4 digits, QS-5 digits) against overflow of the random prefixes (CI flake: pfx 9998 or
-    9999 plus the two increments gave CH-100000500). Inputs: app_url, migrated, monkeypatch. Output: none.
+    patterns (CH-8 digits, U-4 digits, QS-5 digits) against overflow of the random prefixes (CI flake: the draw 9998 plus the two
+    increments gave CH-100000500). Inputs: app_url, migrated, monkeypatch. Output: none.
     Side effects: INSERTs inside a transaction that is rolled back. Role: regression for the pg setup flake."""
     monkeypatch.setattr(random, "randrange", lambda a, b=None: (b if b is not None else a) - 1)
     with psycopg.connect(app_url) as c:
@@ -626,3 +634,18 @@ def test_world_ids_stay_valid_when_every_random_draw_is_at_the_top_of_its_range(
             build_world(c)
         finally:
             c.rollback()
+
+
+def test_a_failed_world_build_leaves_no_committed_rows(app_url, migrated, monkeypatch):
+    """What: force the old overflow draw (prefix 9998) midway through the build and assert nothing stays committed.
+    Use when: guarding the fixture against leaking accounts and users (the CI cascade: leftovers U-7281 broke the next
+    module). Inputs: app_url, migrated, monkeypatch. Output: none. Side effects: attempts INSERTs, all rolled back.
+    Role: regression for the leak."""
+    real = random.randrange
+    monkeypatch.setattr(random, "randrange",
+                        lambda a, b=None: 17705 if (a, b) == (10000, 30000) else 9998 if (a, b) == (1000, 9990) else real(a, b))
+    with pytest.raises(psycopg.errors.CheckViolation):
+        build_world_atomic(app_url)
+    with psycopg.connect(app_url) as c:
+        left = c.execute("SELECT count(*) FROM accounts WHERE id = ANY(%s)", (["QS-17705", "QS-47705", "QS-77705"],)).fetchone()
+    assert left == (0,)
