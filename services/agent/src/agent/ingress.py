@@ -10,14 +10,14 @@ Role: plain code before and after the model (doc 07 s2.4). Voice (CS-E-05.S3.T2)
 (optional CallKeys) and the step 12 transcript merge (optional merge_transcript) are hooks here; step 3 (voice
 session match and expiry) runs in the voice/ask route (agent.voice). Not here yet, by plan: rate limits
 (CS-E-07.S2.T1), admission semaphore (designed only), PIN scan (CS-E-03.S7.T9), repair and memory
-(CS-E-03.S7.T5), structured input (CS-E-03.S7.T8), tickets on the deadline and limit paths (CS-E-03.S4.T1).
+(CS-E-03.S7.T5), structured input (CS-E-03.S7.T8). Tickets on the deadline and limit paths live in the body
+(agent.turn_body, agent.escalation, CS-E-03.S4.T1); ingress keeps only a hard net at the full deadline.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -35,13 +35,13 @@ from pydantic import ValidationError
 
 from agent.deadline import TurnBudgetExhausted
 from agent.sse import TurnMeta, TurnOutcome, TurnStream, start_turn
-from agent.turn_control import TurnControl, bind_turn_control
+from agent.turn_control import TurnControl, bind_turn_control, loop_clock
 
 log = logging.getLogger("agent.ingress")
 
 CAP_LINE = ("This conversation is getting long. Please start a new conversation; your tickets and account "
             "history are kept.")
-# doc 07 fixture edge_turns e3 error body; the deadline ticket and its line arrive with CS-E-03.S4.T1.
+# doc 07 fixture edge_turns e3 error body (hard net only; the deadline ticket and line are in agent.escalation).
 DEADLINE_MESSAGE = "I couldn't finish that in time."
 TURN_DEADLINE_S = {"chat": limits.CHAT_TURN_DEADLINE_S, "voice": limits.VOICE_TURN_DEADLINE_S}
 # A swept turn (its process died mid-turn) replays as a failed, retryable deadline (doc 07 s2.4 step 4, s8.1).
@@ -397,19 +397,22 @@ class Ingress:
         await self.store.count_turn(inp.session_id)
         stream = TurnStream(TurnMeta(inp.session_id, row.turn_id, inp.mode, self.served_by, inp.input_kind),
                             sink=self.trajectory.add if self.trajectory is not None else None)  # doc 07 s12 turn_events
-        loop_budget = max(budget - self.reserve_s, 0.0)  # the reserve is kept for the escalation ticket
-        deadline_mono = time.monotonic() + budget  # TurnControl.deadline: clamps take the reserve off this
+        # The hard net is the whole deadline: the body itself (TurnRunner) stops its agent loop 3 s early and spends the
+        # reserve on the escalation ticket (CS-E-03.S4.T1); cutting the body at deadline - 3 s here would cancel that
+        # ticket. self.reserve_s is kept for callers; the body owns the reserve.
+        hard_net = budget
+        deadline_mono = loop_clock() + budget  # TurnControl.deadline: clamps take the reserve off this
 
         async def body(s: TurnStream) -> TurnOutcome:
             """What: the agent loop under asyncio.timeout, with the turn's one TurnControl bound (deadline = the 45 s
             or 20 s turn deadline, so every clamp subtracts the 3 s reserve from it; the request's demo fault).
             Use when: the turn task. Inputs: stream.
-            Output: outcome (deadline outcome on timeout or on a call skipped by the clamp). Side effects: model
+            Output: outcome (deadline outcome, no ticket, on the hard net or on a call skipped by the clamp). Side effects: model
             and tools; binds TURN_CONTROL in this task. Role: step 14; doc 07 s8.2 deadline path."""
             control = TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
                                   deadline=deadline_mono, demo_fault=inp.demo_fault, events=s)
             bind_turn_control(control)  # the turn task's own context; the only .set() (spike 15)
-            cm = asyncio.timeout(loop_budget)
+            cm = asyncio.timeout(hard_net)
             try:
                 async with cm:
                     return await self.run_agent(s, await self._merge(inp, row), row)
