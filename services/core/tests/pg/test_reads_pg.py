@@ -40,7 +40,7 @@ def tid() -> str:
 
 def build_world(c: psycopg.Connection) -> SimpleNamespace:
     """What: insert accounts A and B, users, charges, history, tickets, pending actions and session claims.
-    Use when: the `world` fixture runs. Inputs: an autocommit connection. Output: namespace of ids.
+    Use when: the `world` fixture runs. Inputs: a connection (the caller owns the transaction). Output: namespace of ids.
     Side effects: many INSERTs. Role: one data set that exercises role filters, the 90-day cut and pending states."""
     n = random.randrange(10000, 40000)
     w = SimpleNamespace(a=f"QS-{n}", b=f"QS-{n + 40000}", p=f"{random.randrange(10**4):04d}")
@@ -124,6 +124,15 @@ def build_world(c: psycopg.Connection) -> SimpleNamespace:
     return w
 
 
+def build_world_atomic(url: str) -> SimpleNamespace:
+    """What: build the world in ONE transaction that commits only if every INSERT succeeds. Use when: the world
+    fixture runs (a failed build must leave no committed rows, or teardown never runs and later tests collide with the
+    leftovers). Inputs: a database url. Output: namespace of ids. Side effects: committed INSERTs on success, none on
+    failure (rolled back). Role: fixture setup that cannot leak."""
+    with psycopg.connect(url) as c:
+        return build_world(c)
+
+
 @pytest.fixture
 def world(app_url, owner_url, migrated):
     """What: a TestClient on the real pool, the committed data set and a get helper; removes every row at teardown.
@@ -131,8 +140,7 @@ def world(app_url, owner_url, migrated):
     Side effects: committed rows, removed at teardown. Role: end-to-end harness."""
     settings = Settings(token_agent=TOKENS["agent_tools"], token_commit=TOKENS["agent_commit"], token_ops=TOKENS["ops"],
                         db_url=app_url, demo_faults=False, policy_path=str(POLICY_PATH))
-    with psycopg.connect(app_url, autocommit=True) as c:
-        w = build_world(c)
+    w = build_world_atomic(app_url)
     with TestClient(create_app(settings, clock=FixedClock(START))) as client:
         def get(session, path):
             """What: GET a read route as the agent for a session. Inputs: session uuid, path with query. Output: response."""
@@ -284,3 +292,17 @@ def test_tickets_by_role_status_and_ending(world):
     anon = world.get(world.s_anon, "/v1/me/tickets").json()["tickets"]
     assert [t["ticket_id"] for t in anon] == [world.t_anon] and anon[0]["verified"] is False and anon[0]["priority"] == "P4"
     assert world.get(uuid.uuid4(), "/v1/me/tickets").json() == {"tickets": []}
+
+
+def test_a_failed_world_build_leaves_no_committed_rows(app_url, migrated, monkeypatch):
+    """What: force the charge-prefix collision (c412 and cb412 share ending and prefix) midway through the build and
+    assert nothing stays committed. Use when: guarding the fixture against leaking rows. Inputs: app_url, migrated,
+    monkeypatch. Output: none. Side effects: attempts INSERTs, all rolled back. Role: regression for the leak."""
+    real = random.randrange
+    monkeypatch.setattr(random, "randrange",
+                        lambda a, b=None: 20000 if (a, b) == (10000, 40000) else 5 if (a, b) == (10**4, None) else real(a, b))
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        build_world_atomic(app_url)
+    with psycopg.connect(app_url) as c:
+        left = c.execute("SELECT count(*) FROM accounts WHERE id = ANY(%s)", (["QS-20000", "QS-60000"],)).fetchone()
+    assert left == (0,)
