@@ -29,6 +29,8 @@ class ModelRegistry:
     """
 
     def __init__(self, config: ModelsConfig) -> None:
+        """What: keep the config. Use when: once per process. Inputs: ModelsConfig. Output: none.
+        Side effects: none. Role: constructor."""
         self.config = config
         self._warned_models: set[str] = set()
 
@@ -44,7 +46,8 @@ class ModelRegistry:
         Inputs: one of agent, agent_fallback, grounding_verifier, scope_classifier, judge.
         Output: a LangChain chat model.
         Side effects: none (no request is sent).
-        Role: factory; effort maps to `effort` (anthropic) or `reasoning_effort` (openai).
+        Role: factory; effort maps to `effort` (anthropic) or `reasoning_effort` (openai); thinking maps to
+        `thinking={"type": ...}` (anthropic; the gate roles set disabled).
         """
         s = self.spec(role)
         if role not in CHAT_ROLES:
@@ -55,6 +58,8 @@ class ModelRegistry:
             kw["max_tokens"] = s.max_tokens
         if s.effort is not None:
             kw["effort" if s.provider == "anthropic" else "reasoning_effort"] = s.effort
+        if s.thinking is not None:  # anthropic only (the config validator refuses it elsewhere)
+            kw["thinking"] = {"type": s.thinking}
         return init_chat_model(s.model, **kw)
 
     def cost(self, role: str, usage: Usage) -> float:

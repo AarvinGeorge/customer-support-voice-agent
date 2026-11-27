@@ -1,7 +1,7 @@
 """What: provider-neutral token usage and price math.
 Use when: turning a model response's usage into one shape and a USD estimate.
 Inputs: LangChain usage_metadata or raw provider usage dicts.
-Output: contracts Usage values (token_usage, add_usage, normalize_usage) and cost_usd_est floats.
+Output: contracts Usage values (token_usage, add_usage, normalize_usage), cost_usd_est floats and reply_truncated.
 Side effects: none.
 Role: single normalizer for both providers' cached-token fields.
 """
@@ -52,6 +52,8 @@ def add_usage(a: Usage, b: Usage) -> Usage:
 
 
 def _i(v: Any) -> int:
+    """What: a usage count as int (0 when absent or not a number). Use when: normalize_usage. Inputs: value.
+    Output: int. Side effects: none. Role: helper."""
     return int(v) if isinstance(v, (int, float)) else 0
 
 
@@ -98,3 +100,17 @@ def cost_usd_est(usage: Usage, price: Price) -> float:
     total = fresh * price.input_per_mtok + read * read_rate + write * write_rate \
         + usage.output_tokens * price.output_per_mtok
     return max(total, 0.0) / 1_000_000
+
+
+TRUNCATED_STOPS = frozenset({"max_tokens", "length"})  # Anthropic stop_reason, OpenAI finish_reason
+
+
+def reply_truncated(reply: Any) -> bool:
+    """What: true when the provider stopped a reply at its token cap: Anthropic `stop_reason` max_tokens (ChatAnthropic
+    also sets the shared `finish_reason`), OpenAI `finish_reason` length, or LangChain's `normalized_finish_reason`
+    length. Use when: the gates and DeadlineAndFaultMiddleware, right after a model call.
+    Inputs: the reply (an AIMessage or anything with response_metadata). Output: bool. Side effects: none.
+    Role: a cut reply holds no complete answer (with thinking on, a cap can be spent before any text,
+    platform.claude.com/docs/en/build-with-claude/thinking), so it is never read as one (review PR #68 I-1, M-1)."""
+    meta = getattr(reply, "response_metadata", None) or {}
+    return any(meta.get(k) in TRUNCATED_STOPS for k in ("stop_reason", "finish_reason", "normalized_finish_reason"))

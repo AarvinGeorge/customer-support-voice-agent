@@ -331,6 +331,16 @@ def classify_final(stream: TurnStream, messages: list[Any], model_ids: set[str],
     return replace(TurnOutcome.fixed(text, end_reason="answered"), usage=usage, model_used=model_used)
 
 
+def _cut_detail(cuts: int, failed: bool) -> str | None:
+    """What: the model step's drawer detail when replies were cut at max_tokens (review PR #68 I-1).
+    Use when: step.completed of a model step. Inputs: cut replies in this step, whether the step failed.
+    Output: a line of 80 characters or fewer, or None. Side effects: none. Role: helper."""
+    if not cuts:
+        return None
+    what = "1 reply" if cuts == 1 else f"{cuts} replies"
+    return f"{what} cut at the token cap; {'no model finished' if failed else 'discarded and retried'}"
+
+
 async def stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[str, Any], config: dict[str, Any], *,
                             slow_after_s: float = limits.SLOW_STATUS_AFTER_S,
                             control: TurnControl | None = None,
@@ -398,7 +408,7 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
                     stream.emit("step.started", step_id=step_id, kind="model", name="agent", label="Thinking",
                                 args_redacted={})
                     attempt.clear()
-                    attempt.update(step_id=step_id, t=stream.ms(), chunk=False)
+                    attempt.update(step_id=step_id, t=stream.ms(), chunk=False, cut0=len(control.truncated_calls))
                     attempt["timer"] = asyncio.create_task(slow_timer(step_id))
                 else:
                     stop_timer()
@@ -416,9 +426,11 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
                     cost = cost_of(model_name, call) if cost_of is not None and msgs else 0.0
                     usage = add_usage(usage, call.model_copy(update={"model_calls": 1, "models_used": [model_name],
                                                                      "cost_usd_est": cost}))
+                    cuts = len(control.truncated_calls) - attempt.get("cut0", 0)
                     stream.emit("step.completed", step_id=attempt.get("step_id") or stream.next_step_id(),
                                 status="error" if chunk.get("error") else "ok", ms=stream.ms() - attempt.get("t", 0),
-                                title="Thought it through", summary={}, attempt=1, model=model_name,
+                                title="Thought it through", detail=_cut_detail(cuts, bool(chunk.get("error"))),
+                                summary={"truncated": cuts} if cuts else {}, attempt=1, model=model_name,
                                 input_tokens=call.input_tokens, output_tokens=call.output_tokens,
                                 cache_read_tokens=call.cache_read_tokens)
             elif mode == "tasks" and chunk.get("name") == "tools" and "result" in chunk:
@@ -433,6 +445,11 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
         cost = cost_of(gate_model, call) if cost_of is not None and meta else 0.0
         usage = add_usage(usage, call.model_copy(update={"model_calls": 1, "models_used": [gate_model],
                                                          "cost_usd_est": cost}))
+    # Replies cut at max_tokens were discarded but billed: keep their tokens and cost (already in model_attempts).
+    for cut_model, meta in control.truncated_calls:
+        call = normalize_usage(meta) if meta else token_usage()
+        cost = cost_of(cut_model, call) if cost_of is not None and meta else 0.0
+        usage = add_usage(usage, call.model_copy(update={"models_used": [cut_model], "cost_usd_est": cost}))
     usage = usage.model_copy(update={"fallback_used": usage.fallback_used or control.fallback_used})
     messages = list(values.get("messages") or [])
     outcome = classify_final(stream, messages, model_ids, usage, model_used, control)

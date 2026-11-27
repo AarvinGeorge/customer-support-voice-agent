@@ -123,6 +123,9 @@ class TurnControl:
     gate_calls: list[tuple[str, Any]] = field(default_factory=list)
     ticket: dict[str, Any] | None = None
     model_node_failed: bool = False  # the agent model node raised (primary and fallback failed or skipped), s6.7
+    # Agent model replies cut at max_tokens and discarded (review PR #68 I-1): (model name, usage metadata), so the
+    # drawer shows the reason and the turn usage keeps their tokens (each is already one of model_attempts).
+    truncated_calls: list[tuple[str, Any]] = field(default_factory=list)
     clock: Callable[[], float] = loop_clock
 
     def remaining_s(self) -> float:
