@@ -238,7 +238,9 @@ class RefundPrepareRequest(StrictModel):
 class PrepareResult(StrictModel):
     """What: core's decision on a prepare. Use when: any prepare response.
     Inputs: decision, reasons, refs, pending fields, read-back, details, ticket, policy version.
-    Output: model. Side effects: none. Role: doc 07 s3.3 PrepareResult; prepare never changes anything."""
+    Output: model. Side effects: none. Role: doc 07 s3.3 PrepareResult; prepare never changes anything. `card` is an
+    additive optional field (doc 07 s1.1): the r4 PendingPublic confirmation card of the new pending row, so the agent
+    has the card on the read-back turn; None when declined."""
 
     decision: Literal["allowed", "needs_approval", "declined"]
     reason_codes: list[str]
@@ -254,6 +256,7 @@ class PrepareResult(StrictModel):
     ticket: TicketRef | None = None
     policy_version: str
     changed: Literal[False]
+    card: PendingPublic | None = None
 
 
 class Readback(StrictModel):
