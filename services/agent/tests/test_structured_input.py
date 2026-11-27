@@ -8,6 +8,7 @@ Role: Done when of CS-E-03.S7.T8 for the flows; outcome rows are in test_confirm
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -73,8 +74,10 @@ class World:
     whether the stub session starts verified, initial thread state. Output: helpers. Side effects: none.
     Role: wiring."""
 
-    def __init__(self, replies: list[AIMessage] | None = None, *, verified: bool = True) -> None:
-        """What: build it. Use when: tests. Inputs: see class. Output: none. Side effects: none. Role: constructor."""
+    def __init__(self, replies: list[AIMessage] | None = None, *, verified: bool = True,
+                 commit_transport: httpx.MockTransport | None = None) -> None:
+        """What: build it. Use when: tests. Inputs: see class, plus an optional scripted transport for the commit
+        client only. Output: none. Side effects: none. Role: constructor."""
         Fake.seen = []
         self.stub = create_app()
         if verified:
@@ -86,10 +89,12 @@ class World:
         self.agent = build_agent(Fake(messages=iter(replies or []), disable_streaming=True),
                                  fallback_model=Fake(messages=iter([])), checkpointer=InMemorySaver(),
                                  tools=build_tools(core, knowledge))
-        confirmer = Confirmer(CoreCommitClient("http://core:8000", COMMIT_TOKEN, http=http), agent_ticket_opener(core))
+        commit_http = httpx.AsyncClient(transport=commit_transport) if commit_transport is not None else http
+        confirmer = Confirmer(CoreCommitClient("http://core:8000", COMMIT_TOKEN, http=commit_http), agent_ticket_opener(core))
         self.flags = Flags()
-        handler = StructuredInput(core, confirmer, flags=self.flags)
-        self.ingress = Ingress(MemoryTurnStore(SessionRow(session_id=SID, visitor_id=VISITOR)), MemoryTurnLock(),
+        self.store = MemoryTurnStore(SessionRow(session_id=SID, visitor_id=VISITOR))
+        self.handler = handler = StructuredInput(core, confirmer, flags=self.flags, last_turn=self.store.last_turn)
+        self.ingress = Ingress(self.store, MemoryTurnLock(),
                                served_by="agent_a", run_agent=TurnRunner(self.agent, core, structured=handler,
                                                                           flags=self.flags))
 
@@ -98,12 +103,12 @@ class World:
         Role: helper."""
         await self.agent.aupdate_state(run_config(SID), values)
 
-    async def send(self, **body: Any) -> tuple[Any, list[Any]]:
-        """What: one chat turn with a TurnRequest body. Use when: tests. Inputs: text, confirm or verification.
-        Output: (outcome, events). Side effects: as a turn. Role: helper."""
+    async def send(self, mode: str = "chat", **body: Any) -> tuple[Any, list[Any]]:
+        """What: one turn with a TurnRequest body. Use when: tests. Inputs: mode (chat, or voice for the I3 refusal),
+        text, confirm or verification. Output: (outcome, events). Side effects: as a turn. Role: helper."""
         req = TurnRequest.model_validate({"client_turn_id": str(uuid.uuid4()), **body})
         res = await self.ingress.handle(IngressInput(session_id=SID, visitor_id=VISITOR,
-                                                     client_turn_id=str(req.client_turn_id), mode="chat",
+                                                     client_turn_id=str(req.client_turn_id), mode=mode,
                                                      input_kind=input_kind_of(req), text=req.text, body=req))
         assert isinstance(res, IngressStream) and res.task is not None
         _ = [f async for f in res.stream.frames()]
@@ -229,6 +234,87 @@ async def test_strict_yes_inside_another_request_goes_to_the_model_and_never_com
     w, _, _ = await readback_world([AIMessage("I can only refund one charge at a time.")])
     outcome, _ = await w.send(text="yes but make it $50")
     assert outcome.end_reason == "answered" and w.core_calls("/commit") == []
+
+
+# --- fix round 1: I1 delivery, I2 lapsed verification (D-055), I3 voice ---------------------------------------
+
+async def test_yes_after_a_failed_turn_repeats_the_readback_and_never_commits() -> None:
+    w, _, _ = await readback_world()  # no more scripted replies: the next model turn fails
+    failed, _ = await w.send(text="actually can you make it $50 instead?")
+    assert failed.status == "failed" or failed.end_reason == "error"
+    again, events = await w.send(text="yes")
+    assert again.end_reason == "readback" and again.final.text == ex.READBACK.chat
+    assert w.core_calls("/commit") == [] and len(of(events, "confirmation.required")) == 1
+    done, _ = await w.send(text="yes")  # the re-shown read-back was delivered, so this yes is adjacent
+    assert done.end_reason == "committed" and len(w.core_calls("/commit")) == 1
+
+
+async def test_yes_after_an_undelivered_readback_turn_repeats_the_readback() -> None:
+    w, _, _ = await readback_world()
+    (tid,) = list(w.store.turns)
+    w.store.turns[tid] = replace(w.store.turns[tid], status="failed")  # the read-back turn's final row says failed
+    again, _ = await w.send(text="yes")
+    assert again.end_reason == "readback" and w.core_calls("/commit") == []
+    done, _ = await w.send(text="yes")
+    assert done.end_reason == "committed" and len(w.core_calls("/commit")) == 1
+
+
+async def test_without_a_delivery_source_a_typed_yes_never_commits() -> None:
+    w, _, _ = await readback_world()
+    w.handler.last_turn = None  # fail closed: delivery cannot be proven
+    again, _ = await w.send(text="yes")
+    assert again.end_reason == "readback" and w.core_calls("/commit") == []
+
+
+def not_verified_commit(request: httpx.Request) -> httpx.Response:
+    """What: core answers a commit with 401 SESSION_NOT_VERIFIED (D-055). Use when: commit transport.
+    Inputs: request. Output: 401 envelope. Side effects: none. Role: fake."""
+    return httpx.Response(401, json={"error": {"class": "auth", "code": "SESSION_NOT_VERIFIED",
+                                               "message": "Please verify first.", "retryable": False,
+                                               "changed": False, "fault_injected": False, "details": {}}})
+
+
+async def test_commit_401_session_not_verified_shows_the_card_keeps_the_pending_and_never_claims_success() -> None:
+    w = World([AIMessage(content="", tool_calls=[PREPARE_CALL])],
+              commit_transport=httpx.MockTransport(not_verified_commit))
+    await w.seed({"messages": [HumanMessage("hi"), AIMessage("Hello", id="a0")], **OWNER})
+    await w.send(text="Please refund the duplicate $96 charge from 21 November")
+    outcome, events = await w.send(confirm={"pending_action_id": ex.PENDING_ID, "decision": "confirm"})
+    (req,) = of(events, "verification.required")
+    assert req.reason == "action" and req.fields == ["account_id", "pin"]
+    (res,) = of(events, "action.result")
+    assert res.outcome == "failed" and res.changed is False
+    assert outcome.end_reason == "verification_requested" and "verify" in outcome.final.text.lower()
+    assert "went through" not in outcome.final.text and ex.COMMIT_RESULT.summary not in outcome.final.text
+    v = await w.values()
+    assert v["pending"] and v["pending"]["id"] == ex.PENDING_ID and v["verified"] is False
+    assert (SID, True, None) in w.flags.calls
+
+
+async def test_lapsed_verification_at_the_refresh_on_a_confirm_turn_shows_the_card_not_no_longer_active() -> None:
+    w, _, _ = await readback_world()
+    w.stub.state.verified.discard(SID)  # claims expired: me/context now answers 401 SESSION_NOT_VERIFIED
+    bodies: list[dict[str, Any]] = [{"confirm": {"pending_action_id": ex.PENDING_ID, "decision": "confirm"}},
+                                    {"text": "yes"}]
+    for body in bodies:
+        outcome, events = await w.send(**body)
+        assert len(of(events, "verification.required")) == 1 and outcome.end_reason == "verification_requested"
+        assert "no longer active" not in outcome.final.text and w.core_calls("/commit") == []
+        assert all(r.outcome != "expired" for r in of(events, "action.result"))
+        assert (await w.values())["pending"]["id"] == ex.PENDING_ID
+
+
+async def test_voice_text_yes_never_commits_and_repeats_the_readback_with_the_card() -> None:
+    w, _, _ = await readback_world()
+    outcome, events = await w.send(mode="voice", text="yes")
+    assert outcome.end_reason == "readback" and w.core_calls("/commit") == []
+    (conf,) = of(events, "confirmation.required")
+    assert conf.pending.pending_action_id == ex.PENDING_ID
+    assert ex.READBACK.voice in (outcome.final.say or "") and "press Confirm" in (outcome.final.say or "")
+    again, _ = await w.send(mode="voice", text="yes")  # still never commits by voice text
+    assert again.end_reason == "readback" and w.core_calls("/commit") == []
+    done, _ = await w.send(mode="voice", confirm={"pending_action_id": ex.PENDING_ID, "decision": "confirm"})
+    assert done.end_reason == "committed" and len(w.core_calls("/commit")) == 1
 
 
 # --- verification card ---------------------------------------------------------------------------------------

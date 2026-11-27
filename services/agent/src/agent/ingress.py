@@ -109,6 +109,7 @@ class TurnStore(Protocol):
     async def insert_turn(self, row: TurnRow) -> None: ...
     async def count_turn(self, session_id: str) -> None: ...
     async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None: ...
+    async def last_turn(self, session_id: str, before_turn_id: str) -> tuple[str, str] | None: ...
 
 
 class TurnLock(Protocol):
@@ -489,6 +490,18 @@ class PgTurnStore:
         async with self.pool.connection() as conn:
             await conn.execute("UPDATE agent.sessions SET user_turns = user_turns + 1, last_active_at = now() "
                                "WHERE session_id = %s", (session_id,))
+
+    async def last_turn(self, session_id: str, before_turn_id: str) -> tuple[str, str] | None:
+        """What: (turn_id, status) of the session's latest turn other than before_turn_id (the current one).
+        Use when: the s7.3 adjacency rule (StructuredInput last_turn): a yes commits only when this is the read-back
+        turn and it is completed. Inputs: session id, current turn id. Output: pair or None. Side effects: SELECT.
+        Role: read (the turn's final row status is the delivery record)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT turn_id::text, status FROM agent.turns WHERE session_id = %s AND turn_id <> %s "
+                "ORDER BY started_at DESC, turn_id DESC LIMIT 1", (session_id, before_turn_id))
+            r = await cur.fetchone()
+        return (r[0], r[1]) if r else None
 
     async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None:
         """What: the final row. Use when: step 16. Inputs: id, outcome, end time. Output: none.
