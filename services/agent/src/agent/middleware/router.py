@@ -22,8 +22,9 @@ from agent.turn_control import Route, TurnControl, current_control
 
 VERIFY_LINE = ("To look at your account I need to verify you. Please enter your account ID and support PIN in "
                "the secure card.")
-VERIFY_SAY = ("To look at your account I need to verify you. Please tell me your account ID and your four-digit "
-              "support PIN, or type them into the card on screen.")
+# Voice uses the card too (doc 07 s14 row 18 fallback; rule V spoken verification is designed only, doc 09 s1.2).
+VERIFY_SAY = ("To look at your account I need to verify you. Please enter your account ID and support PIN in "
+              "the secure card on your screen. I can't take them by voice.")
 DECLINE_OFF_TOPIC_LINE = ("I can only help with Quillstack: your account, billing, tickets and how the product "
                           "works. Is there something there I can help with?")
 # Escalation leads per reason (doc 07 s6.5 lines; tool_failure from the S5 fixture); the ticket clause follows.
