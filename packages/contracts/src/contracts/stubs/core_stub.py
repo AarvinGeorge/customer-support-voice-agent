@@ -12,7 +12,7 @@ status read says committed. A prepare opens the stub pending for the session: me
 (PendingPublic) until a commit or cancel, a commit or submit with the prepare's X-Turn-Id is 409
 CONFIRMATION_REQUIRED, and a second cancel is 409 PENDING_NOT_ACTIVE.
 Role: test double for core; it applies no business rules (one fixed persona, fixed decisions).
-Paths for step-up, billing email, grace extension, preferences and operators are designed only."""
+Paths for step-up, billing email, grace extension, preferences, profile and operators are designed only."""
 import json
 import re
 from dataclasses import dataclass, field
@@ -208,12 +208,6 @@ def create_app() -> FastAPI:
         pending = ex.PENDING_PUBLIC if _sid(request) in app.state.open else None
         return _not_verified(request) or _dump(ex.ME_CONTEXT.model_copy(
             update={"claims": ex.CLAIMS.model_copy(update={"session_id": _sid(request)}), "pending_action": pending}))
-
-    @app.get("/v1/me/profile", response_model=None)
-    def me_profile(request: Request) -> Any:
-        """What: Profile, or 401 SESSION_NOT_VERIFIED. Use when: get_account_summary. Inputs: request.
-        Output: Profile or error. Side effects: none. Role: s3.2."""
-        return _not_verified(request) or _dump(ex.PROFILE)
 
     @app.get("/v1/me/charges", response_model=None)
     def me_charges(request: Request, ending: str | None = Query(default=None, pattern=r"^[0-9]{4}$"),

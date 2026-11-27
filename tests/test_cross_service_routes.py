@@ -31,21 +31,70 @@ def norm(path: str) -> str:
     return re.sub(r"\{[^}]*\}", "{}", path)
 
 
+def _call_name(node: ast.AST) -> str | None:
+    """What: the helper name of a call to call_json or call_json_within, else None. Use when: scanning a module.
+    Inputs: any node. Output: name or None. Side effects: none. Role: one definition of "an HTTP call site"."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in HTTP_CALLS:
+        return node.func.id
+    return None
+
+
 def client_calls(source: Path) -> set[tuple[str, str]]:
-    """What: every (METHOD, path) a client file passes to call_json or call_json_within.
+    """What: every (METHOD, path) a client file passes to call_json or call_json_within. The method must be a string
+    literal and the url an f-string starting with self._base, inline or held in a variable assigned once in the file;
+    any call site that cannot be resolved that way raises AssertionError ("cannot resolve") instead of being skipped.
     Use when: building the caller side. Inputs: client source path. Output: set of pairs.
     Side effects: reads the file. Role: the agent's side of the contract."""
+    tree = ast.parse(source.read_text())
+    names: dict[str, list[ast.expr]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    names.setdefault(t.id, []).append(node.value)
     out: set[tuple[str, str]] = set()
-    for node in ast.walk(ast.parse(source.read_text())):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in HTTP_CALLS):
+    for node in ast.walk(tree):
+        helper = _call_name(node)
+        if helper is None:
             continue
-        args = [a for a in node.args if not (isinstance(a, ast.Attribute) and a.attr == "_http")]
-        strs = [a for a in args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
-        urls = [a for a in args if isinstance(a, ast.JoinedStr)]
-        if strs and urls:
-            parts = [v.value if isinstance(v, ast.Constant) else "{}" for v in urls[0].values][1:]  # first part is self._base
-            out.add((strs[0].value.upper(), norm("".join(parts))))
+        assert isinstance(node, ast.Call)
+        first = 1 if helper == "call_json" else 2  # (http, method, url, ...) or (timeout, http, method, url, ...)
+        where = f"{source.name}:{node.lineno}"
+        if len(node.args) < first + 2:
+            raise AssertionError(f"cannot resolve the call at {where}: method and url must be positional")
+        method, url = node.args[first], node.args[first + 1]
+        if isinstance(url, ast.Name) and len(names.get(url.id, [])) == 1:
+            url = names[url.id][0]
+        if not (isinstance(method, ast.Constant) and isinstance(method.value, str)):
+            raise AssertionError(f"cannot resolve the method of the call at {where}: use a string literal")
+        first_part = url.values[0] if isinstance(url, ast.JoinedStr) and url.values else None
+        if not (isinstance(first_part, ast.FormattedValue) and isinstance(first_part.value, ast.Attribute)
+                and first_part.value.attr == "_base"):
+            raise AssertionError(f"cannot resolve the url of the call at {where}: use an f-string starting with {{self._base}}")
+        parts = [v.value if isinstance(v, ast.Constant) else "{}" for v in url.values][1:]  # type: ignore[union-attr]
+        out.add((method.value.upper(), norm("".join(parts))))
     return out
+
+
+def discover_clients(root: Path) -> list[Path]:
+    """What: every module under root that calls call_json or call_json_within (the module defining them is skipped).
+    Use when: checking that no client file is missing from CLIENTS. Inputs: a source root. Output: sorted paths.
+    Side effects: reads files. Role: replaces a hand-written file list."""
+    found = []
+    for f in sorted(root.rglob("*.py")):
+        tree = ast.parse(f.read_text())
+        defines = any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in HTTP_CALLS for n in ast.walk(tree))
+        if not defines and any(_call_name(n) for n in ast.walk(tree)):
+            found.append(f)
+    return found
+
+
+def uncovered(root: Path, covered: list[Path]) -> list[Path]:
+    """What: modules that call the shared http helper but are not in the covered list. Use when: the coverage test.
+    Inputs: source root, covered paths. Output: the missing paths. Side effects: reads files.
+    Role: a new client that calls core or knowledge must be given a target service and caller before CI passes."""
+    have = {p.resolve() for p in covered}
+    return [p for p in discover_clients(root) if p.resolve() not in have]
 
 
 def _assigned(tree: ast.Module, name: str) -> ast.expr:
@@ -66,12 +115,21 @@ def _scopes(call: ast.expr) -> set[str]:
     return set(ast.literal_eval(call.args[0]))
 
 
-def core_table() -> tuple[dict[tuple[str, str], str], dict[str, set[str]]]:
+def core_table(core_dir: Path = CORE) -> tuple[dict[tuple[str, str], str], dict[str, set[str]]]:
     """What: core's route table ((METHOD, path) to scope) and its caller scope sets.
     Use when: building the server side. Inputs: none. Output: (routes, scopes by caller). Side effects: reads files.
-    Role: core's side of the contract (SLICE_ROUTES in routes.py, CALLER_SCOPES in auth.py)."""
-    routes = {(m, norm(p)): s for m, p, s, _ in ast.literal_eval(_assigned(ast.parse((CORE / "routes.py").read_text()), "SLICE_ROUTES"))}
-    callers = _assigned(ast.parse((CORE / "auth.py").read_text()), "CALLER_SCOPES")
+    Role: core's side of the contract (SLICE_ROUTES in routes.py, CALLER_SCOPES in auth.py). A listed route whose name
+    has no handler in register_routes' `built` map answers 501 and is NOT counted as served."""
+    tree = ast.parse((core_dir / "routes.py").read_text())
+    built: set[str] = set()
+    for n in ast.walk(tree):
+        value = n.value if isinstance(n, (ast.Assign, ast.AnnAssign)) else None
+        targets = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, ast.AnnAssign) else []
+        if isinstance(value, ast.Dict) and any(isinstance(t, ast.Name) and t.id == "built" for t in targets):
+            built |= {ast.literal_eval(k) for k in value.keys if k is not None}
+    assert built, "register_routes has no `built` handler map"
+    routes = {(m, norm(p)): s for m, p, s, name in ast.literal_eval(_assigned(tree, "SLICE_ROUTES")) if name in built}
+    callers = _assigned(ast.parse((core_dir / "auth.py").read_text()), "CALLER_SCOPES")
     assert isinstance(callers, ast.Dict)
     return routes, {ast.literal_eval(k): _scopes(v) for k, v in zip(callers.keys, callers.values)}
 
@@ -113,7 +171,7 @@ def test_every_path_an_agent_client_calls_is_served_with_a_scope_the_token_holds
     Use when: CI. Inputs: none. Output: pass/fail listing every drifted call. Side effects: none.
     Role: stops an agent tool calling a route that is not built (the get_account_summary 404)."""
     tables = {"core": core_table(), "knowledge": knowledge_table()}
-    problems: list[str] = []
+    problems: list[str] = [f"{p.relative_to(ROOT)} calls the http helper but is not in CLIENTS" for p in uncovered(AGENT, [c[0] for c in CLIENTS])]
     for source, service, caller in CLIENTS:
         routes, scopes = tables[service]
         for call in sorted(client_calls(source)):
