@@ -1,17 +1,54 @@
-"""What: tests for scripts/deploy/deploy.sh (arguments, preflight, missing secrets, step order, render-env) and a drift guard.
+"""What: tests for scripts/deploy/deploy.sh (arguments, preflight, missing secrets, step order, render-env, deploy by digest, rollback
+to the previous release's digests), scripts/deploy/release_manifest.py, the image and release workflows, and drift guards.
 Use when: CI runs `pytest scripts`, or after editing scripts/deploy.
 Inputs: the script run with a clean environment and --print (prints docker and git commands, runs none). Output: pass or fail.
 Side effects: writes only inside pytest tmp dirs. Never calls docker, git, the network or a provider.
-Role: proves the deploy script fails loudly on bad input (a check must be shown able to fail) and runs steps in the doc 09 order."""
+Role: proves the deploy script fails loudly on bad input (a check must be shown able to fail), runs steps in the doc 09 order,
+and never builds: it runs only the digests CI pushed after the gates (D-072)."""
+import hashlib
+import json
 import os
 import re
 import stat
 import subprocess
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "deploy" / "deploy.sh"
 SENTINEL = "SENTINEL-VALUE-DO-NOT-ECHO"
+MANIFEST = ROOT / "scripts" / "deploy" / "release_manifest.py"
+REPO = "ghcr.io/aarvingeorge/customer-support-voice-agent"
+REV = "a" * 40  # the commit every test release was "built" from; the stub git reports it as HEAD
+IMAGES = ("agent", "core", "knowledge", "web")
+
+
+def digest(tag: str, image: str) -> str:
+    """What: a deterministic fake sha256 digest per release and image. Use when: arranging releases. Inputs: tag, image.
+    Output: "sha256:<64 hex>". Side effects: none. Role: different releases get different digests, so a rollback is visible."""
+    return "sha256:" + hashlib.sha256(f"{tag}-{image}".encode()).hexdigest()
+
+
+def release_doc(tag: str, revision: str = REV, repo: str = REPO) -> dict[str, Any]:
+    """What: a release manifest as the release workflow writes it. Use when: arranging a deploy. Inputs: tag, revision, repo.
+    Output: dict. Side effects: none. Role: test double of release-<tag>.json."""
+    imgs = {i: {"digest": digest(tag, i), "ref": f"{repo}/{i}@{digest(tag, i)}", "tag": f"{repo}/{i}:{revision}"} for i in IMAGES}
+    return {"schema": 1, "kind": "release", "tag": tag, "revision": revision, "repo": repo, "run_url": "", "released_at": "x", "images": imgs}
+
+
+def ref(tag: str, image: str) -> str:
+    """What: the digest-pinned reference of one image of one test release. Use when: asserting pulls and read-backs.
+    Inputs: tag, image. Output: str. Side effects: none. Role: helper."""
+    return f"{REPO}/{image}@{digest(tag, image)}"
+
+
+def seed_releases(tmp: Path, tags: tuple[str, ...] = ("v0", "v1", "v2", "v3", "local")) -> None:
+    """What: write release manifests into the state dir, as a previous deploy or the workflow download leaves them.
+    Use when: every deploy test. Inputs: tmp, tags. Output: none. Side effects: writes tmp/state/releases. Role: arrange."""
+    d = tmp / "state" / "releases"
+    d.mkdir(parents=True, exist_ok=True)
+    for t in tags:
+        (d / f"release-{t}.json").write_text(json.dumps(release_doc(t)))
 
 
 def required_names() -> list[str]:
@@ -38,6 +75,7 @@ def run(args: list[str], env: dict[str, str], tmp: Path, env_file: bool = True) 
     if env_file:
         f.write_text("".join(f"{k}={v}\n" for k, v in env.items()))
         f.chmod(0o600)
+    seed_releases(tmp)
     clean = {"PATH": os.environ["PATH"], "HOME": str(tmp)}
     return subprocess.run(["bash", str(SCRIPT), "--env-file", str(f), "--state-dir", str(tmp / "state"), "--print", *args], env=clean,
                           capture_output=True, text=True, cwd=ROOT, timeout=60)
@@ -122,10 +160,10 @@ def test_demo_reseed_flag_left_on_fails(tmp_path: Path) -> None:
 
 def test_up_step_order(tmp_path: Path) -> None:
     """What: the printed plan runs the steps in the doc 09 order. Use when: pytest. Inputs: tmp. Output: assert.
-    Side effects: none. Role: build, migrate core knowledge agent, seed, ingest, core and knowledge, agent_a then agent_b, edge, smoke."""
+    Side effects: none. Role: manifest, pull by digest, migrate core knowledge agent, seed, ingest, core and knowledge, agent_a then agent_b, edge, smoke."""
     p = run(["up", "--tag", "v1"], good_env(), tmp_path)
     assert p.returncode == 0, p.stderr
-    steps = ["rollback point", "git checkout", "--profile jobs build", "backup before migrate", "migrate_core", "migrate_knowledge", "migrate_agent", "seed_core",
+    steps = ["release manifest", "rollback point", "git checkout", "docker pull " + ref("v1", "agent"), "backup before migrate", "migrate_core", "migrate_knowledge", "migrate_agent", "seed_core",
              "ingest_knowledge", "in-flight check", "--force-recreate core", "--force-recreate agent_a", "--force-recreate agent_b", "--force-recreate caddy", "SMOKE"]
     pos = []
     for s in steps:
@@ -133,7 +171,7 @@ def test_up_step_order(tmp_path: Path) -> None:
         assert m, f"step missing: {s}\n{p.stdout}"
         pos.append(m[0])
     assert pos == sorted(pos), p.stdout
-    assert "-f compose.yaml" in p.stdout and "compose.local.yaml" not in p.stdout
+    assert "-f compose.yaml -f scripts/deploy/compose.release.yaml" in p.stdout and "compose.local.yaml" not in p.stdout
 
 
 def test_local_mode_skips_git_and_uses_overlay(tmp_path: Path) -> None:
@@ -187,14 +225,14 @@ def test_required_list_matches_compose() -> None:
 
 
 def test_rollback_with_recorded_tag_prints_checkout_then_restart(tmp_path: Path) -> None:
-    """What: rollback with a recorded tag checks it out, builds, restarts a then b, smokes. Use when: pytest.
+    """What: rollback with a recorded tag checks it out, pulls that release's digests, restarts a then b, smokes. Use when: pytest.
     Inputs: tmp. Output: assert. Side effects: writes tmp/state. Role: the rollback order."""
     (tmp_path / "state").mkdir()
     (tmp_path / "state" / "rollback_to").write_text("v0\n")
     p = run(["rollback"], good_env(), tmp_path)
     assert p.returncode == 0, p.stderr
     out = p.stdout
-    order = [out.index(x) for x in ("checkout --detach refs/tags/v0", "--profile jobs build", "--force-recreate agent_a",
+    order = [out.index(x) for x in ("checkout --detach refs/tags/v0", "docker pull " + ref("v0", "agent"), "--force-recreate agent_a",
                                     "--force-recreate agent_b", "SMOKE")]
     assert order == sorted(order)
 
@@ -245,15 +283,21 @@ def test_render_env_rejects_unsafe_values(tmp_path: Path) -> None:
 STUB_DOCKER = r"""#!/bin/bash
 a="$*"
 echo "docker $a" >> "$STUB_LOG"
+case "$a" in *compose*) echo "AGENT_IMAGE=${AGENT_IMAGE:-} CORE_IMAGE=${CORE_IMAGE:-} KNOWLEDGE_IMAGE=${KNOWLEDGE_IMAGE:-} WEB_IMAGE=${WEB_IMAGE:-} :: $a" >> "$STUB_LOG.env" ;; esac
 case "$a" in
   *pg_dump*) if [ -n "${STUB_SHORT:-}" ]; then echo tiny; else echo "-- fake dump"; for i in $(seq 1 60); do echo "-- padding line $i to make the file longer than one thousand bytes"; done; echo "-- PostgreSQL database dump complete"; fi ;;
   *query_to_xml*) for i in $(seq 1 "${STUB_SCHEMAS:-0}"); do echo "core.t$i 1"; done ;;
   *"-T core python"*) echo "200 {\"status\":\"ready\",\"contract_version\":\"$CV\",\"policy_version\":\"$PV\",\"demo_faults\":true,\"seed_date\":\"2026-11-27\"}" ;;
   *"-T knowledge python"*) echo "200 {\"status\":\"ready\",\"database\":\"ok\",\"chunks\":74,\"embedding_model\":\"$EM\",\"calibration_status\":\"provisional\"}" ;;
   *"ps -q "*) echo "cid-${a##* }" ;;
-  *"image inspect"*) echo "sha-${a##*img-}" ;;
-  *"inspect -f {{.Image}}"*) echo "sha-${a##*cid-}" ;;
-  *"inspect -f {{.Config.Image}}"*) echo "img-${a##*cid-}" ;;
+  *"image inspect -f {{.Id}} "*) echo "id-${a##* }" ;;
+  *"image inspect "*) [ -n "${STUB_PRESENT:-}" ] || exit 1 ;;
+  *"inspect -f {{.Config.Image}} cid-"*|*"inspect -f {{.Image}} cid-"*)
+    svc="${a##*cid-}"
+    case "$svc" in agent_a|agent_b) r="$AGENT_IMAGE" ;; core) r="$CORE_IMAGE" ;; knowledge) r="$KNOWLEDGE_IMAGE" ;; web) r="$WEB_IMAGE" ;; esac
+    [ "${STUB_WRONG_IMAGE:-}" != "$svc" ] || r="${r%@*}@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    case "$a" in *Config.Image*) echo "$r" ;; *) if [ "${STUB_STALE:-}" = "$svc" ]; then echo id-old; else echo "id-$r"; fi ;; esac ;;
+  "pull "*) [ -z "${STUB_FAIL_PULL:-}" ] || exit 1 ;;
   *--single-transaction*) cat > /dev/null; [ -z "${STUB_RESTORE_FAIL:-}" ] || exit 1 ;;
   *"up -d --no-deps"*) [ -z "${STUB_FAIL_UP:-}" ] || exit 1 ;;
   *"count(*) from information_schema.tables"*) echo "${STUB_SCHEMAS:-0}" ;;
@@ -264,8 +308,12 @@ exit 0
 """
 STUB_GIT = r"""#!/bin/bash
 echo "git $*" >> "$STUB_LOG"
-case "$*" in *"status --porcelain"*) ;; *describe*) echo v-stub ;; *rev-parse*"--short"*) echo abc1234 ;; esac
+case "$*" in *"status --porcelain"*) ;; *describe*) echo v-stub ;; *rev-parse*"--short"*) echo abc1234 ;; *"rev-parse HEAD"*) echo "${STUB_HEAD:-$REV}" ;; esac
 exit 0
+"""
+STUB_GH = r"""#!/bin/bash
+echo "gh $*" >> "$STUB_LOG"
+exit 1
 """
 STUB_CURL = r"""#!/bin/bash
 echo "curl $*" >> "$STUB_LOG"
@@ -279,12 +327,10 @@ exit 0
 
 def stub_env(tmp: Path, **extra: str) -> dict[str, str]:
     """What: build a PATH with stub docker, git and curl and the expected-version values. Use when: state tests.
-    Inputs: tmp, extra env. Output: env dict. Side effects: writes executables under tmp/bin. Role: no real docker, git or network."""
-    import hashlib
-
+    Inputs: tmp, extra env. Output: env dict. Side effects: writes executables under tmp/bin. Role: no real docker, git, gh or network."""
     bin_dir = tmp / "bin"
     bin_dir.mkdir(exist_ok=True)
-    for name, body in (("docker", STUB_DOCKER), ("git", STUB_GIT), ("curl", STUB_CURL)):
+    for name, body in (("docker", STUB_DOCKER), ("git", STUB_GIT), ("curl", STUB_CURL), ("gh", STUB_GH)):
         f = bin_dir / name
         f.write_text(body)
         f.chmod(0o755)
@@ -294,7 +340,7 @@ def stub_env(tmp: Path, **extra: str) -> dict[str, str]:
     em = re.search(r"embeddings:.*?model: *(\S+)", models, re.S).group(1)  # type: ignore[union-attr]
     return {"PATH": f"{bin_dir}:{os.environ['PATH']}", "HOME": str(tmp), "STUB_LOG": str(tmp / "stub.log"),
             "CV": (ROOT / "packages/contracts/VERSION").read_text().strip(), "EM": em,
-            "PV": f"{label}+{hashlib.sha256(pol).hexdigest()[:12]}", "SMOKE_CHAT": "off", **extra}
+            "PV": f"{label}+{hashlib.sha256(pol).hexdigest()[:12]}", "SMOKE_CHAT": "off", "REV": REV, **extra}
 
 
 def real(args: list[str], tmp: Path, **extra: str) -> subprocess.CompletedProcess:
@@ -303,6 +349,7 @@ def real(args: list[str], tmp: Path, **extra: str) -> subprocess.CompletedProces
     f = tmp / ".env"
     f.write_text("".join(f"{k}={v}\n" for k, v in good_env().items()))
     f.chmod(0o600)
+    seed_releases(tmp)
     return subprocess.run(["bash", str(SCRIPT), "--env-file", str(f), "--state-dir", str(tmp / "state"), *args],
                           env=stub_env(tmp, **extra), capture_output=True, text=True, cwd=ROOT, timeout=120)
 
@@ -342,6 +389,8 @@ def test_failed_first_deploy_has_no_rollback_tag(tmp_path: Path) -> None:
 def test_smoke_rejects_wrong_policy_version(tmp_path: Path) -> None:
     """What: a core body with another policy_version fails the smoke. Use when: pytest. Inputs: tmp. Output: assert.
     Side effects: none. Role: I5 (versions are compared with the checkout, not just present)."""
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "good").write_text("v1\n")  # smoke reads back the running release (v1)
     p = real(["smoke"], tmp_path, PV="not-the-policy")
     assert p.returncode != 0 and "policy_version" in p.stderr
 
@@ -349,6 +398,8 @@ def test_smoke_rejects_wrong_policy_version(tmp_path: Path) -> None:
 def test_smoke_rejects_degraded_edge(tmp_path: Path) -> None:
     """What: a good smoke passes and a wrong contract version at the edge or core fails. Use when: pytest. Inputs: tmp.
     Output: assert. Side effects: none. Role: I5 (every field is compared)."""
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "good").write_text("v1\n")  # smoke reads back the running release (v1)
     ok = real(["smoke"], tmp_path)
     assert ok.returncode == 0, ok.stderr
     assert real(["smoke"], tmp_path, CV="wrong").returncode != 0
@@ -415,15 +466,328 @@ def test_restore_refuses_a_backup_from_another_release(tmp_path: Path) -> None:
     assert ok.returncode == 0 and "single-transaction" in ok.stdout and "manifest" in ok.stdout
 
 
-def test_every_job_image_is_built_before_it_runs(tmp_path: Path) -> None:
-    """What: the build command carries the seed and jobs profiles and precedes the jobs. Use when: pytest. Inputs: tmp.
-    Output: assert. Side effects: tmp state. Role: I1 (stale seed and ingest images) and I2 (caddy is recreated)."""
+def test_every_job_image_is_pulled_by_digest_before_it_runs(tmp_path: Path) -> None:
+    """What: the four release images are pulled by digest before the migrate, seed and ingest jobs, which run with them.
+    Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: D-072 (the jobs run the tested images) and I2."""
     assert real(["up", "--tag", "v1"], tmp_path).returncode == 0
     log = (tmp_path / "stub.log").read_text().splitlines()
-    b = next(i for i, ln in enumerate(log) if "--profile seed --profile jobs build" in ln)
-    assert b < next(i for i, ln in enumerate(log) if "run --rm --no-deps seed_core" in ln)
-    assert b < next(i for i, ln in enumerate(log) if "run --rm --no-deps ingest_knowledge" in ln)
+    pulls = [i for i, ln in enumerate(log) if " pull " in ln]
+    assert [log[i].split()[-1] for i in pulls] == [ref("v1", i) for i in IMAGES]
+    assert max(pulls) < next(i for i, ln in enumerate(log) if "run --rm --no-deps migrate_core" in ln)
+    assert max(pulls) < next(i for i, ln in enumerate(log) if "run --rm --no-deps seed_core" in ln)
+    want = f"AGENT_IMAGE={ref('v1', 'agent')} CORE_IMAGE={ref('v1', 'core')} KNOWLEDGE_IMAGE={ref('v1', 'knowledge')} WEB_IMAGE={ref('v1', 'web')}"
+    env_log = [ln for ln in (tmp_path / "stub.log.env").read_text().splitlines() if ln.startswith("AGENT_IMAGE=")]  # skip probe bodies
+    assert env_log and all(ln.startswith(want + " :: ") for ln in env_log)
+    assert all("-f compose.yaml -f scripts/deploy/compose.release.yaml" in ln for ln in log if " compose " in ln)
     assert any("--force-recreate caddy" in ln for ln in log)
+
+
+BUILD = re.compile(r"\b(build|buildx|bake)\b")
+
+
+def test_deploy_path_never_builds(tmp_path: Path) -> None:
+    """What: up, a failed up, rollback (with and without --restore-db), reseed and smoke invoke no docker build of any kind.
+    Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: D-072 proof (production runs the artifact the
+    gates tested): every docker call the script made is logged by the stub, and none of them builds."""
+    assert real(["up", "--tag", "v1"], tmp_path, STUB_SCHEMAS="3").returncode == 0
+    assert real(["up", "--tag", "v2"], tmp_path, STUB_SCHEMAS="3", STUB_FAIL_EDGE="1").returncode != 0
+    assert real(["rollback", "--restore-db"], tmp_path, STUB_SCHEMAS="3").returncode == 0
+    assert real(["reseed"], tmp_path).returncode == 0
+    assert real(["smoke"], tmp_path).returncode == 0
+    docker = [ln for ln in (tmp_path / "stub.log").read_text().splitlines() if ln.startswith("docker ")]
+    assert len(docker) > 50 and any(" pull " in ln for ln in docker)  # the log is shown able to see the calls
+    assert [ln for ln in docker if BUILD.search(ln)] == []
+    # The planted control: the same filter flags a build line (a check must be shown able to fail).
+    assert BUILD.search("docker compose -f compose.yaml --profile seed --profile jobs build")
+
+
+def test_deploy_script_has_no_build_command() -> None:
+    """What: deploy.sh contains no docker build, compose build, buildx or bake command. Use when: pytest. Inputs: none.
+    Output: assert. Side effects: reads a file. Role: static half of the no-build proof (covers branches the dry runs miss)."""
+    code = [ln for ln in SCRIPT.read_text().splitlines() if not ln.lstrip().startswith("#")]
+    assert [ln for ln in code if BUILD.search(ln)] == []
+
+
+def _yaml_any_tag() -> Any:
+    """What: a YAML loader that reads Compose's !reset and !override tags as plain values. Use when: parsing compose files.
+    Inputs: none. Output: a loader class. Side effects: none. Role: PyYAML refuses unknown tags."""
+    import yaml
+
+    class Loader(yaml.SafeLoader):
+        """What: SafeLoader plus Compose tags. Use when: _yaml_any_tag. Inputs: YAML. Output: Python values.
+        Side effects: none. Role: helper."""
+
+    def tagged(loader: Any, node: Any) -> Any:
+        """What: build the node's plain value, keeping a marker for !reset. Use when: YAML parse. Inputs: loader, node.
+        Output: value or "!reset". Side effects: none. Role: helper."""
+        if node.tag == "!reset":
+            return "!reset"
+        if isinstance(node, yaml.SequenceNode):
+            return loader.construct_sequence(node)
+        if isinstance(node, yaml.MappingNode):
+            return loader.construct_mapping(node)
+        return loader.construct_scalar(node)
+
+    Loader.add_constructor("!reset", tagged)
+    Loader.add_constructor("!override", tagged)
+    return Loader
+
+
+def test_release_override_pins_every_built_service_to_a_release_image() -> None:
+    """What: every compose.yaml service with a build section has, in compose.release.yaml, `build: !reset` and the image
+    variable of the image built from the same Dockerfile and SERVICE argument. Use when: pytest. Inputs: none. Output: assert.
+    Side effects: reads files. Role: drift guard: a new built service cannot be deployed by building, nor with the wrong image."""
+    import yaml
+
+    base = yaml.load((ROOT / "compose.yaml").read_text(), Loader=_yaml_any_tag())["services"]
+    text = (ROOT / "scripts/deploy/compose.release.yaml").read_text()
+    # Compose drops a !reset reached through a YAML alias (found on the first local run), so the file may use none.
+    assert not re.search(r"(^|[\s:,{\[])[&*][A-Za-z]", "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#")))
+    rel = yaml.load(text, Loader=_yaml_any_tag())["services"]
+    built = {name: svc["build"] for name, svc in base.items() if "build" in svc}
+    assert set(rel) == set(built)
+    # the image each Compose service gets is the one CI builds from the same build section (release_manifest.IMAGES)
+    source = {"AGENT_IMAGE": "agent_a", "CORE_IMAGE": "core", "KNOWLEDGE_IMAGE": "knowledge", "WEB_IMAGE": "web"}
+    for name, svc in rel.items():
+        assert svc["build"] == "!reset", name
+        m = re.fullmatch(r"\$\{([A-Z_]+):\?[^}]+\}", svc["image"])
+        assert m and m.group(1) in source, (name, svc["image"])
+        assert built[name] == built[source[m.group(1)]], f"{name} is not built like {source[m.group(1)]}"
+
+
+def test_manifest_revision_must_match_the_checkout(tmp_path: Path) -> None:
+    """What: a manifest built from another commit than the checked-out tag stops the deploy before any pull or change.
+    Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: config files (data/, Caddyfile) and images come from one commit."""
+    p = real(["up", "--tag", "v1"], tmp_path, STUB_HEAD="b" * 40)
+    assert p.returncode != 0 and "were built from" in p.stderr
+    log = (tmp_path / "stub.log").read_text()
+    assert " pull " not in log and "migrate_core" not in log
+
+
+def test_invalid_manifest_is_refused_before_any_change(tmp_path: Path) -> None:
+    """What: a manifest for another tag, an image named by a mutable tag, or a foreign registry is refused, and the state
+    dir is untouched. Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: deploy only pinned, own images."""
+    for bad, needle in ((lambda d: d.update(tag="v9"), "not 'v1'"),
+                        (lambda d: d["images"]["core"].update(ref=f"{REPO}/core:{REV}"), "tag is mutable"),
+                        (lambda d: d.update(repo="docker.io/evil"), "repo")):
+        doc = release_doc("v1")
+        bad(doc)
+        mf = tmp_path / "m.json"
+        mf.write_text(json.dumps(doc))
+        p = real(["up", "--tag", "v1", "--manifest", str(mf)], tmp_path)
+        assert p.returncode != 0 and needle in p.stderr, p.stderr
+        assert not (tmp_path / "state" / "pending").exists() and not (tmp_path / "state" / "good").exists()
+
+
+def test_missing_manifest_names_the_ways_to_get_it(tmp_path: Path) -> None:
+    """What: no manifest file and a failing `gh release download` stops the deploy naming the file. Use when: pytest.
+    Inputs: tmp. Output: assert. Side effects: tmp state. Role: never fall back to a build."""
+    p = real(["up", "--tag", "v7"], tmp_path)
+    assert p.returncode != 0 and "release-v7.json" in p.stderr
+    log = (tmp_path / "stub.log").read_text()
+    assert "gh release download v7" in log and " pull " not in log
+
+
+def test_running_digests_are_read_back_and_recorded(tmp_path: Path) -> None:
+    """What: after a green up the state dir records each app service's image reference and id, read from the containers,
+    equal to the manifest. Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state.
+    Role: "the running digest equals the tested digest, read from both" (live-system standard, test once, promote the artifact)."""
+    assert real(["up", "--tag", "v1"], tmp_path).returncode == 0
+    rows = state(tmp_path, "running").splitlines()
+    assert rows[0] == f"release v1 revision {REV}"
+    want = {"core": "core", "knowledge": "knowledge", "agent_a": "agent", "agent_b": "agent", "web": "web"}
+    assert {r.split()[0]: r.split()[1] for r in rows[1:]} == {s: ref("v1", i) for s, i in want.items()}
+    assert state(tmp_path, "current") == "v1"
+
+
+def test_wrong_running_digest_fails_the_smoke(tmp_path: Path) -> None:
+    """What: a container running another digest, or an older image id under the right name, fails the read-back and the
+    tag is not marked good. Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: the read-back can fail."""
+    p = real(["up", "--tag", "v1"], tmp_path, STUB_WRONG_IMAGE="core")
+    assert p.returncode != 0 and "core runs" in p.stderr and state(tmp_path, "good") == ""
+    p = real(["up", "--tag", "v1"], tmp_path, STUB_STALE="agent_b")
+    assert p.returncode != 0 and "agent_b" in p.stderr and state(tmp_path, "good") == ""
+
+
+def test_present_image_is_not_pulled_again(tmp_path: Path) -> None:
+    """What: an image already on the host (same digest) is not pulled again. Use when: pytest. Inputs: tmp. Output: assert.
+    Side effects: tmp state. Role: a rollback to digests already on the VM needs no registry login."""
+    assert real(["up", "--tag", "v1"], tmp_path, STUB_PRESENT="1").returncode == 0
+    assert " pull " not in (tmp_path / "stub.log").read_text()
+
+
+def test_failed_pull_stops_before_any_change(tmp_path: Path) -> None:
+    """What: a pull failure (no registry login, unknown digest) stops before postgres, backup or migrations. Use when: pytest.
+    Inputs: tmp. Output: assert. Side effects: tmp state. Role: fail loudly, never build instead."""
+    p = real(["up", "--tag", "v1"], tmp_path, STUB_FAIL_PULL="1")
+    log = (tmp_path / "stub.log").read_text()
+    assert p.returncode != 0 and "docker login ghcr.io" in p.stderr
+    assert "migrate_core" not in log and "up -d" not in log and not BUILD.search(log)
+
+
+def test_rollback_redeploys_the_previous_release_digests(tmp_path: Path) -> None:
+    """What: up v1, up v2, up v3 failing; rollback pulls and runs v2's digests (the last good release) and records them.
+    Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: rollback means the previous release's tested images."""
+    assert real(["up", "--tag", "v1"], tmp_path).returncode == 0
+    assert real(["up", "--tag", "v2"], tmp_path).returncode == 0
+    assert real(["up", "--tag", "v3"], tmp_path, STUB_FAIL_EDGE="1").returncode != 0
+    assert state(tmp_path, "current") == "v3"
+    open(tmp_path / "stub.log", "w").close()
+    open(tmp_path / "stub.log.env", "w").close()
+    rb = real(["rollback"], tmp_path)
+    assert rb.returncode == 0, rb.stderr
+    log = (tmp_path / "stub.log").read_text().splitlines()
+    assert [ln.split()[-1] for ln in log if " pull " in ln] == [ref("v2", i) for i in IMAGES]
+    restarts = [ln for ln in (tmp_path / "stub.log.env").read_text().splitlines() if "--force-recreate" in ln]
+    assert restarts and all(ln.startswith(f"AGENT_IMAGE={ref('v2', 'agent')} CORE_IMAGE={ref('v2', 'core')}") for ln in restarts)
+    assert "checkout --detach refs/tags/v2" in "\n".join(log)
+    assert state(tmp_path, "good") == "v2" and state(tmp_path, "current") == "v2"
+    assert ref("v2", "agent") in state(tmp_path, "running") and ref("v3", "agent") not in state(tmp_path, "running")
+
+
+def test_rollback_restore_db_runs_with_the_failed_release_images_then_switches(tmp_path: Path) -> None:
+    """What: with --restore-db the database restore's compose calls use the release that is running (v3), and the restart
+    after it uses v2. Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state.
+    Role: a failed restore restarts what was running (its message says so), never a half-switched mix."""
+    assert real(["up", "--tag", "v2"], tmp_path, STUB_SCHEMAS="3").returncode == 0
+    assert real(["up", "--tag", "v3"], tmp_path, STUB_SCHEMAS="3", STUB_FAIL_EDGE="1").returncode != 0
+    open(tmp_path / "stub.log.env", "w").close()
+    assert real(["rollback", "--restore-db"], tmp_path, STUB_SCHEMAS="3").returncode == 0
+    lines = (tmp_path / "stub.log.env").read_text().splitlines()
+    stop = next(i for i, ln in enumerate(lines) if " stop agent_a" in ln)
+    assert lines[stop].startswith(f"AGENT_IMAGE={ref('v3', 'agent')}")
+    first_restart = next(i for i, ln in enumerate(lines) if "--force-recreate" in ln)
+    assert first_restart > stop and lines[first_restart].startswith(f"AGENT_IMAGE={ref('v2', 'agent')}")
+
+
+def test_rollback_without_the_previous_manifest_fails(tmp_path: Path) -> None:
+    """What: a rollback target with no manifest (a pre-registry release) fails naming the file, and changes nothing.
+    Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: never rebuild an old tag to roll back."""
+    st = tmp_path / "state"
+    (st / "releases").mkdir(parents=True)
+    (st / "rollback_to").write_text("v5\n")
+    p = real(["rollback"], tmp_path)
+    assert p.returncode != 0 and "release-v5.json" in p.stderr
+    assert "force-recreate" not in (tmp_path / "stub.log").read_text()
+
+
+# ---- release_manifest.py (the helper CI, the release workflow and deploy.sh share) ----
+
+def mf(args: list[str]) -> subprocess.CompletedProcess:
+    """What: run release_manifest.py. Use when: helper tests. Inputs: args. Output: CompletedProcess. Side effects: per args.
+    Role: helper."""
+    return subprocess.run(["python3", str(MANIFEST), *args], capture_output=True, text=True, cwd=ROOT, timeout=30)
+
+
+def bake_meta(name: str) -> dict[str, Any]:
+    """What: bake metadata as `docker buildx bake --metadata-file` writes it for the four targets. Use when: helper tests.
+    Inputs: the pushed tag name. Output: dict. Side effects: none. Role: fixture (shape read from a real bake run, see the report)."""
+    targets = {"agent": "agent_a", "core": "core", "knowledge": "knowledge", "web": "web"}
+    return {t: {"containerimage.digest": digest("ci", i), "image.name": f"{REPO}/{i}:{name}",
+                "containerimage.descriptor": {"mediaType": "application/vnd.oci.image.index.v1+json"}} for i, t in targets.items()}
+
+
+def test_manifest_images_then_release_then_env(tmp_path: Path) -> None:
+    """What: bake metadata becomes an images manifest, then release-r-01.json, then the deploy's env lines. Use when: pytest.
+    Inputs: tmp. Output: assert. Side effects: writes tmp. Role: the whole hand-off CI to release to VM in one format."""
+    (tmp_path / "meta.json").write_text(json.dumps(bake_meta(REV)))
+    p = mf(["images", "--bake-metadata", str(tmp_path / "meta.json"), "--revision", REV, "--repo", REPO, "--name", REV,
+            "--run-url", "https://example.invalid/run/1", "--out", str(tmp_path / "images.json")])
+    assert p.returncode == 0, p.stderr
+    imgs = json.loads((tmp_path / "images.json").read_text())
+    assert imgs["kind"] == "images" and imgs["images"]["core"]["ref"] == f"{REPO}/core@{digest('ci', 'core')}"
+    p = mf(["release", "--images", str(tmp_path / "images.json"), "--tag", "r-01", "--revision", REV, "--out", str(tmp_path / "rel.json")])
+    assert p.returncode == 0, p.stderr
+    rel = json.loads((tmp_path / "rel.json").read_text())
+    assert rel["tag"] == "r-01" and rel["kind"] == "release" and rel["images"] == imgs["images"]
+    p = mf(["env", "--manifest", str(tmp_path / "rel.json"), "--tag", "r-01"])
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.splitlines() == [f"AGENT_IMAGE={REPO}/agent@{digest('ci', 'agent')}", f"CORE_IMAGE={REPO}/core@{digest('ci', 'core')}",
+                                     f"KNOWLEDGE_IMAGE={REPO}/knowledge@{digest('ci', 'knowledge')}", f"WEB_IMAGE={REPO}/web@{digest('ci', 'web')}",
+                                     f"RELEASE_REVISION={REV}"]
+
+
+def test_manifest_refuses_bad_input(tmp_path: Path) -> None:
+    """What: an unpushed target, a missing target, a bad release tag and a tag on another commit are refused. Use when: pytest.
+    Inputs: tmp. Output: assert. Side effects: writes tmp. Role: every check can fail."""
+    meta = bake_meta(REV)
+    del meta["web"]["containerimage.digest"]
+    (tmp_path / "m1.json").write_text(json.dumps(meta))
+    base = ["--revision", REV, "--repo", REPO, "--name", REV, "--out", str(tmp_path / "x.json")]
+    p = mf(["images", "--bake-metadata", str(tmp_path / "m1.json"), *base])
+    assert p.returncode == 1 and "web" in p.stderr and not (tmp_path / "x.json").exists()
+    meta = bake_meta(REV)
+    del meta["knowledge"]
+    (tmp_path / "m2.json").write_text(json.dumps(meta))
+    assert "no target knowledge" in mf(["images", "--bake-metadata", str(tmp_path / "m2.json"), *base]).stderr
+    (tmp_path / "m3.json").write_text(json.dumps(bake_meta(REV)))
+    assert mf(["images", "--bake-metadata", str(tmp_path / "m3.json"), *base]).returncode == 0
+    for tag, rev, needle in (("v1.0", REV, "r-01"), ("r-01", "b" * 40, "not from the tag's commit")):
+        p = mf(["release", "--images", str(tmp_path / "x.json"), "--tag", tag, "--revision", rev, "--out", str(tmp_path / "r.json")])
+        assert p.returncode == 1 and needle in p.stderr
+    p = mf(["env", "--manifest", str(tmp_path / "x.json"), "--tag", "r-01"])
+    assert p.returncode == 1 and "not a release manifest" in p.stderr
+
+
+# ---- the workflows (static checks; the runs themselves are recorded in the PR) ----
+
+def _wf(name: str) -> dict[str, Any]:
+    """What: load a workflow file. Use when: workflow tests. Inputs: file name. Output: dict. Side effects: reads a file. Role: helper."""
+    import yaml
+
+    return yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
+
+
+def _on(wf: dict[Any, Any]) -> Any:
+    """What: the triggers of a workflow (YAML 1.1 reads `on` as True). Use when: workflow tests. Inputs: workflow.
+    Output: triggers. Side effects: none. Role: helper."""
+    return wf.get("on", wf.get(True))
+
+
+def test_images_job_runs_after_every_gate_with_least_privilege() -> None:
+    """What: ci.yml's images job needs every other job, may write packages and read contents only, pushes only for a push to
+    main or a same-repo pull request, and tags main builds by commit sha. Use when: pytest. Inputs: none. Output: assert.
+    Side effects: reads a file. Role: build once, after the gates (D-072)."""
+    wf = _wf("ci.yml")
+    jobs = wf["jobs"]
+    img = jobs["images"]
+    assert set(img["needs"]) == set(jobs) - {"images"}
+    assert img["permissions"] == {"contents": "read", "packages": "write"}
+    assert wf["permissions"] == {"contents": "read"}
+    assert "refs/heads/main" in img["if"] and "head.repo.full_name == github.repository" in img["if"]
+    text = json.dumps(img)
+    assert "release_manifest.py images" in text and "upload-artifact" in text and "--push" in text
+    assert "org.opencontainers.image.source" in text and "org.opencontainers.image.revision" in text
+    assert "images-${{ github.sha }}" in text
+
+
+def test_release_workflow_promotes_only_main_digests() -> None:
+    """What: release.yml runs on an r-* tag or by hand with tag and sha, can write contents (the release) and read actions
+    and packages only, and takes the images manifest from the ci run of that sha on main. Use when: pytest. Inputs: none.
+    Output: assert. Side effects: reads a file. Role: the release names digests the gates' run pushed, never a new build."""
+    wf = _wf("release.yml")
+    on = _on(wf)
+    assert on["push"] == {"tags": ["r-*"]}
+    assert set(on["workflow_dispatch"]["inputs"]) == {"tag", "sha"}
+    assert wf["permissions"] == {"contents": "write", "actions": "read", "packages": "read"}
+    text = json.dumps(wf)
+    assert "--branch main" in text and "--event push" in text and "images-$SHA" in text
+    assert "release_manifest.py release" in text and "gh release create" in text and "imagetools inspect" in text
+    runs = "\n".join(st.get("run", "") for st in wf["jobs"]["release"]["steps"]).replace("buildx imagetools", "imagetools")
+    assert runs and not BUILD.search(runs)  # inspects digests, never builds
+
+
+def test_deploy_workflow_downloads_the_release_and_logs_in_read_only() -> None:
+    """What: deploy.yml takes the release asset, copies it to the VM state dir, logs the VM in to GHCR with a read-only
+    token for the run, and logs out after. Use when: pytest. Inputs: none. Output: assert. Side effects: reads a file.
+    Role: the VM pulls the tested digests; it never needs a build or a long-lived registry credential from the workflow."""
+    wf = _wf("deploy.yml")
+    assert wf["permissions"] == {"contents": "read", "packages": "read"}
+    text = json.dumps(wf)
+    assert "gh release download" in text and ".deploy/releases" in text and "docker login ghcr.io" in text
+    assert "docker logout ghcr.io" in text
+    steps = wf["jobs"]["deploy"]["steps"]
+    assert any(s.get("if") == "always()" and "logout" in s.get("run", "") for s in steps)
 
 
 def _restore_state(tmp: Path) -> None:

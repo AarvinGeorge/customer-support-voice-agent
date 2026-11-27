@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # What: deploy, roll back, reseed or smoke-test the Quillstack Compose stack on the VM (or a laptop with --local).
-# Use when: the owner or .github/workflows/deploy.yml ships a tag. Run it ON the VM from the repo checkout (see scripts/deploy/DEPLOY.md).
-# Inputs: a command (up, rollback, reseed, smoke, check, render-env) and options (--tag, --env-file, --local, --print,
-#   --state-dir, --out, --restore-db). Variables come from the env file (the shell wins on a clash, as in Compose); names are in
+# Use when: the owner or .github/workflows/deploy.yml ships a release tag (r-NN). Run it ON the VM from the repo checkout (see scripts/deploy/DEPLOY.md).
+# Inputs: a command (up, rollback, reseed, smoke, check, render-env) and options (--tag, --manifest, --env-file, --local, --print,
+#   --state-dir, --out, --restore-db). The release manifest (release-<tag>.json, written by .github/workflows/release.yml) names the
+#   image digests CI pushed after the gates. Variables come from the env file (the shell wins on a clash, as in Compose); names are in
 #   scripts/deploy/required-env.txt. Output: one line per step on stdout; errors on stderr; exit 0 only when every step passed.
-# Side effects: git checkout of the tag; docker builds, one-shot jobs and container restarts; a pg_dump backup under <state-dir>/backups;
-#   state files in <state-dir>: good (last tag with a green smoke), rollback_to (what `rollback` restores), pending (an `up` that
-#   has not finished), last_backup; `reseed` wipes the demo data. Never prints a secret value. --print runs nothing.
-# Role: CS-E-08.S4.T2 (doc 09 s5, doc 06 s10, doc 07 s15.2; D-029, D-047, D-049): one ordered, repeatable deploy.
+# Side effects: git checkout of the tag (config files: compose, Caddyfile, data/); docker pulls by digest (never a build), one-shot
+#   jobs and container restarts; a pg_dump backup under <state-dir>/backups; state files in <state-dir>: good (last tag with a green
+#   smoke), rollback_to (what `rollback` restores), pending (an `up` that has not finished), current (the release the containers
+#   were switched to), running (each app service's image reference and id, read from the containers), releases/release-<tag>.json
+#   (kept for rollback), backup; `reseed` wipes the demo data. Never prints a secret value. --print runs nothing.
+# Role: CS-E-08.S4.T2 (doc 09 s5, doc 06 s10, doc 07 s15.2; D-029, D-047, D-049, D-072): one ordered, repeatable deploy of the tested artifact.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -15,6 +18,7 @@ HERE="$ROOT/scripts/deploy"
 ENV_FILE=".env"
 STATE_DIR="$ROOT/.deploy"
 TAG=""
+MANIFEST=""
 LOCAL=0
 PRINT=0
 RESTORE_DB=0
@@ -26,23 +30,26 @@ usage() {
   cat <<'USAGE'
 usage: scripts/deploy/deploy.sh [options] <command>
 commands:
-  up --tag TAG    checkout TAG, build, migrate, seed (first time only), ingest, rolling restart, smoke
-  rollback        restore the last GOOD tag (green smoke): after a failed `up` that is the tag that was running before it;
-                  --restore-db also restores the pre-migrate backup taken by that `up`
+  up --tag TAG    release manifest, checkout TAG, pull the release digests, migrate, seed (first time only), ingest,
+                  rolling restart, smoke (running digests read back). Nothing is built on this host
+  rollback        redeploy the last GOOD release's digests (green smoke): after a failed `up` that is the release that was running
+                  before it; --restore-db also restores the pre-migrate backup taken by that `up`
   reseed          wipe and reseed the demo data (run before the Loom take), then smoke
   smoke           read /readyz from core, knowledge and the edge, then one chat turn
   check           validate the env file only
   backup          take and verify the pre-migrate backup now (normally part of `up`)
   restore         restore the recorded backup onto the rollback tag's state (normally `rollback --restore-db`)
   render-env      write an env file from the process environment (GitHub secrets); needs --out
-options: --env-file FILE (default .env)  --local (laptop dry-run: no git, local overlay)  --print (show commands, run none)
-         --state-dir DIR  --out FILE  --restore-db (rollback only)
+options: --manifest FILE (release-TAG.json; default: <state-dir>/releases, else `gh release download TAG`)
+         --env-file FILE (default .env)  --local (laptop dry-run: no git, local overlay; RELEASE_IMAGE_REPO may name a
+         rehearsal registry)  --print (show commands, run none)  --state-dir DIR  --out FILE  --restore-db (rollback only)
 USAGE
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --tag) [ $# -ge 2 ] || die "--tag needs a value" 2; TAG="$2"; shift 2 ;;
+    --manifest) [ $# -ge 2 ] || die "--manifest needs a value" 2; MANIFEST="$2"; shift 2 ;;
     --env-file) [ $# -ge 2 ] || die "--env-file needs a value" 2; ENV_FILE="$2"; shift 2 ;;
     --state-dir) [ $# -ge 2 ] || die "--state-dir needs a value" 2; STATE_DIR="$2"; shift 2 ;;
     --out) [ $# -ge 2 ] || die "--out needs a value" 2; OUT="$2"; shift 2 ;;
@@ -56,7 +63,12 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$CMD" ] || { usage >&2; die "usage: a command is required" 2; }
 case "$CMD" in up|rollback|reseed|smoke|check|render-env|backup|restore) ;; *) usage >&2; die "unknown command: $CMD" 2 ;; esac
-[ "$CMD" != up ] || [ "$LOCAL" = 1 ] || [ -n "$TAG" ] || die "up needs --tag TAG (the tag to ship)" 2
+[ "$CMD" != up ] || [ "$LOCAL" = 1 ] || [ -n "$TAG" ] || die "up needs --tag TAG (the release tag to ship, r-NN)" 2
+[ "$LOCAL" = 0 ] || [ -n "$TAG" ] || [ "$CMD" != up ] || TAG=local
+case "$TAG" in *[!A-Za-z0-9._-]*) die "--tag has characters outside A-Za-z0-9._-" 2 ;; esac
+# The registry the release images live in. The VM always uses GHCR; --local may name a rehearsal registry (localhost:5000/...).
+IMAGE_REPO="ghcr.io/aarvingeorge/customer-support-voice-agent"
+[ "$LOCAL" = 0 ] || IMAGE_REPO="${RELEASE_IMAGE_REPO:-$IMAGE_REPO}"
 
 step() { echo "== $*"; }
 # run: print the command; execute it unless --print.
@@ -104,7 +116,8 @@ preflight() {
   echo "preflight ok (env file $ENV_FILE; secrets present: $(names "$HERE/required-env.txt" | wc -l | tr -d ' '))"
 }
 
-COMPOSE_FILES=(-f compose.yaml)
+# compose.release.yaml swaps every build section for the release image pinned by digest (D-072): this stack cannot build.
+COMPOSE_FILES=(-f compose.yaml -f scripts/deploy/compose.release.yaml)
 [ "$LOCAL" = 0 ] || COMPOSE_FILES+=(-f scripts/deploy/compose.local.yaml)
 # DEPLOY_COMPOSE_FILES (space separated) replaces the list: only scripts/deploy/restore_pg_test.sh sets it, to a postgres-only stack.
 if [ -n "${DEPLOY_COMPOSE_FILES:-}" ]; then COMPOSE_FILES=(); for f in $DEPLOY_COMPOSE_FILES; do COMPOSE_FILES+=(-f "$f"); done; fi
@@ -136,19 +149,24 @@ except urllib.error.HTTPError as e:
     print(e.code, e.read().decode())"
 }
 
-# revision_readback: each app container runs the image that was just built, and the checkout is the tag.
+# revision_readback: each app container runs the release image: its configured reference equals the manifest's digest
+# reference, and its image id equals what that reference resolves to on this host. Records both in <state-dir>/running.
 revision_readback() {
-  local svc cid img built name
+  local svc cid img ref want rows=""
   [ "$LOCAL" = 1 ] || echo "revision: $(git -C "$ROOT" describe --tags --exact-match 2>/dev/null || echo untagged) $(git -C "$ROOT" rev-parse --short HEAD)"
-  for svc in core knowledge agent_a agent_b; do
-    cid="$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q "$svc")"
+  for svc in core knowledge agent_a agent_b web; do
+    case "$svc" in agent_*) want="$AGENT_IMAGE" ;; core) want="$CORE_IMAGE" ;; knowledge) want="$KNOWLEDGE_IMAGE" ;; *) want="$WEB_IMAGE" ;; esac
+    cid="$(dc ps -q "$svc")"
     [ -n "$cid" ] || { echo "deploy: $svc has no running container" >&2; return 1; }
+    ref="$(docker inspect -f '{{.Config.Image}}' "$cid")"
+    [ "$ref" = "$want" ] || { echo "deploy: $svc runs $ref, not the release image $want" >&2; return 1; }
     img="$(docker inspect -f '{{.Image}}' "$cid")"
-    name="$(docker inspect -f '{{.Config.Image}}' "$cid")"
-    built="$(docker image inspect -f '{{.Id}}' "$name")"
-    [ "$img" = "$built" ] || { echo "deploy: $svc runs an older image than the one built ($name)" >&2; return 1; }
+    [ "$img" = "$(docker image inspect -f '{{.Id}}' "$want")" ] || { echo "deploy: $svc runs an older image id than $want resolves to (not recreated?)" >&2; return 1; }
+    rows="$rows$svc $ref $img"$'\n'
   done
-  echo "revision: core knowledge agent_a agent_b run the freshly built images"
+  mkdir -p "$STATE_DIR"
+  printf 'release %s revision %s\n%s' "$RELEASE_TAG" "$RELEASE_REVISION" "$rows" > "$STATE_DIR/running"
+  echo "revision: core knowledge agent_a agent_b web run release $RELEASE_TAG's digests (recorded in $STATE_DIR/running)"
 }
 
 smoke() {
@@ -330,15 +348,81 @@ rolling_restart() {
   compose up -d --no-deps --wait --wait-timeout 180 --force-recreate caddy
 }
 
+# release_file TAG: where the manifest of TAG is kept (a rollback reads it again).
+release_file() { echo "$STATE_DIR/releases/release-$1.json"; }
+
+# fetch_release TAG: the manifest for TAG from --manifest, a copy an earlier deploy kept, or `gh release download`; then validated.
+# Sets REL_FILE. Never falls back to a build: no manifest, no deploy.
+fetch_release() {
+  local tag="$1"
+  REL_FILE="$(release_file "$tag")"
+  step "release manifest for $tag (the image digests CI pushed after the gates)"
+  if [ -n "$MANIFEST" ] && [ "$tag" = "$TAG" ]; then
+    use_release "$tag" "$MANIFEST"
+    if [ "$PRINT" = 1 ]; then REL_FILE="$MANIFEST"; return 0; fi
+    mkdir -p "$STATE_DIR/releases"
+    [ "$MANIFEST" -ef "$REL_FILE" ] || cp "$MANIFEST" "$REL_FILE"
+  elif [ ! -f "$REL_FILE" ]; then
+    [ "$PRINT" = 1 ] || mkdir -p "$STATE_DIR/releases"
+    run gh release download "$tag" --pattern "release-$tag.json" --dir "$STATE_DIR/releases" --clobber \
+      || die "no release manifest $REL_FILE and \`gh release download $tag\` failed: pass --manifest FILE (the release-$tag.json asset of GitHub Release $tag)"
+  fi
+  use_release "$tag" "$REL_FILE"
+}
+
+# use_release TAG FILE: validate the manifest (scripts/deploy/release_manifest.py) and export the four digest references and its
+# revision for Compose (compose.release.yaml reads them). A refusal changes nothing.
+use_release() {
+  local out k v
+  out="$(python3 "$HERE/release_manifest.py" env --manifest "$2" --tag "$1" --repo "$IMAGE_REPO")" \
+    || die "release manifest $2 refused (reason above); nothing was changed"
+  while IFS='=' read -r k v; do
+    case "$k" in AGENT_IMAGE|CORE_IMAGE|KNOWLEDGE_IMAGE|WEB_IMAGE|RELEASE_REVISION) export "$k=$v" ;; *) die "unexpected line from release_manifest.py: $k" ;; esac
+  done <<< "$out"
+  RELEASE_TAG="$1"
+  echo "release $1: revision $RELEASE_REVISION; agent ${AGENT_IMAGE##*@} core ${CORE_IMAGE##*@} knowledge ${KNOWLEDGE_IMAGE##*@} web ${WEB_IMAGE##*@}"
+}
+
+# use_running: load the release the containers run now (state file current, else good), for commands that act on the live stack.
+# Not needed for scripts/deploy/restore_pg_test.sh, which replaces the compose files with a postgres-only stack.
+use_running() {
+  [ -z "${DEPLOY_COMPOSE_FILES:-}" ] || return 0
+  local t; t="$(st_get current)"; t="${t:-$(st_get good)}"
+  [ -n "$t" ] || die "no release recorded in $STATE_DIR/current or $STATE_DIR/good: deploy one first (up --tag r-NN)"
+  [ -f "$(release_file "$t")" ] || die "the manifest of the running release $t is missing: $(release_file "$t")"
+  use_release "$t" "$(release_file "$t")"
+}
+
+# verify_revision: the checkout (compose files, Caddyfile, data/) is the commit the images were built from.
+verify_revision() {
+  if [ "$LOCAL" = 1 ] || [ "$PRINT" = 1 ]; then echo "+ (check: checkout HEAD equals the manifest revision $RELEASE_REVISION)"; return 0; fi
+  local head; head="$(git -C "$ROOT" rev-parse HEAD)"
+  [ "$head" = "$RELEASE_REVISION" ] || die "the release images were built from $RELEASE_REVISION but the checkout is $head: config and images must come from one commit"
+  echo "checkout $head equals the manifest revision"
+}
+
+# pull_images: fetch the four release images by digest. One already on the host is the same bytes (a digest names its content),
+# so it is not fetched again: a rollback to digests the host already has needs no registry login.
+pull_images() {
+  step "pull the release images by digest (nothing is built on this host)"
+  local r
+  for r in "$AGENT_IMAGE" "$CORE_IMAGE" "$KNOWLEDGE_IMAGE" "$WEB_IMAGE"; do
+    if [ "$PRINT" = 0 ] && docker image inspect "$r" >/dev/null 2>&1; then echo "present: $r"; continue; fi
+    run docker pull "$r" || die "docker pull $r failed: log this host in (docker login ghcr.io with a token that has read:packages, see DEPLOY.md) or check the release; nothing was switched"
+  done
+}
+
+set_current() { [ "$PRINT" = 1 ] || { mkdir -p "$STATE_DIR"; printf '%s\n' "$1" > "$STATE_DIR/current"; }; }
+
 bring_up() {
-  step "build images on this host (including the seed and ingest job images)"
-  compose --profile seed --profile jobs build
+  pull_images
   step "postgres and redis"
   compose up -d --no-deps --wait --wait-timeout 180 postgres redis
   backup "${TAG:-local}"
   migrate_and_seed
   inflight_gate
   rolling_restart
+  set_current "$RELEASE_TAG"
 }
 
 # State: good = last tag with a green smoke. rollback_to = what `rollback` restores. pending = an `up` that has not finished.
@@ -383,14 +467,16 @@ case "$CMD" in
     done
     chmod 600 "$tmp"; mv "$tmp" "$OUT"
     echo "wrote $OUT (mode 600, $(wc -l < "$OUT" | tr -d ' ') variables, single-quoted; values not shown)" ;;
-  backup) backup "${TAG:-manual}" ;;
-  restore) [ -f "$STATE_DIR/rollback_to" ] || die "no rollback tag recorded in $STATE_DIR/rollback_to"; restore_backup "$(st_get rollback_to)" ;;
+  backup) use_running; backup "${TAG:-manual}" ;;
+  restore) [ -f "$STATE_DIR/rollback_to" ] || die "no rollback tag recorded in $STATE_DIR/rollback_to"; use_running; restore_backup "$(st_get rollback_to)" ;;
   check) preflight ;;
-  smoke) preflight; if ! ( smoke ); then die "smoke FAILED"; fi ;;
+  smoke) preflight; use_running; if ! ( smoke ); then die "smoke FAILED"; fi ;;
   up)
     preflight
-    begin_up "${TAG:-local}"
-    checkout_tag "${TAG:-local}"
+    fetch_release "$TAG"
+    begin_up "$TAG"
+    checkout_tag "$TAG"
+    verify_revision
     bring_up
     if ! ( smoke ); then
       echo "deploy: smoke FAILED for ${TAG:-local}. Roll back: scripts/deploy/deploy.sh rollback (add --restore-db to also restore the pre-migrate backup)" >&2
@@ -401,12 +487,21 @@ case "$CMD" in
     preflight
     [ -f "$STATE_DIR/rollback_to" ] || die "no rollback tag recorded in $STATE_DIR/rollback_to (the first deploy has none): nothing to roll back to"
     prev="$(st_get rollback_to)"
-    echo "rolling back to the last good tag: $prev (pending: $(st_get pending || true))"
+    echo "rolling back to the last good release: $prev (pending: $(st_get pending || true))"
+    fetch_release "$prev"; prev_file="$REL_FILE"
     checkout_tag "$prev"
-    step "rollback build"
-    compose --profile seed --profile jobs build
-    [ "$RESTORE_DB" = 0 ] || restore_backup "$prev"
+    verify_revision
+    pull_images
+    if [ "$RESTORE_DB" = 1 ]; then
+      # The restore stops and (on failure) restarts what is running now, so its compose calls use the running release's images.
+      running="$(st_get current)"; running="${running:-$prev}"
+      [ -f "$(release_file "$running")" ] || die "the manifest of the running release $running is missing: $(release_file "$running")"
+      use_release "$running" "$(release_file "$running")"
+      restore_backup "$prev"
+      use_release "$prev" "$prev_file"
+    fi
     rolling_restart
+    set_current "$prev"
     if ! ( smoke ); then die "smoke FAILED after rollback to $prev"; fi
     if [ "$PRINT" = 0 ]; then
       failed="$(st_get pending)"; [ -z "$failed" ] || printf '%s\n' "$failed" > "$STATE_DIR/rolled_back_from"
@@ -414,8 +509,9 @@ case "$CMD" in
     fi ;;
   reseed)
     preflight
-    step "reseed: wipe and reseed core demo data (audit history is kept)"
-    compose --profile seed build seed_core
+    use_running
+    pull_images
+    step "reseed: wipe and reseed core demo data (audit history is kept), with the running release's core image"
     compose run --rm --no-deps -e DEMO_RESEED=true seed_core python -m core.seeds --reseed
     if ! ( smoke ); then die "smoke FAILED after reseed"; fi ;;
 esac
