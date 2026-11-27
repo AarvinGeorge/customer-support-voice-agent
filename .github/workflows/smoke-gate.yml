@@ -1,0 +1,36 @@
+# What: the live smoke gate check. A pull request that changes agent behaviour (the paths in
+#   scripts/check_smoke_summary.py GATED: gates, middleware, prompts, tool descriptions, model adapters, data/models.yaml,
+#   agent wiring) fails this check until its body carries a passing scripts/live_smoke.sh summary run on a PR commit.
+# Use when: GitHub runs it on every pull_request event, including body edits (so pasting the summary turns it green).
+# Inputs: the PR body (passed through env, never interpolated into the script) and the base and head commits.
+# Output: one green or red check, "smoke summary". Needs no secrets and makes no model call (the smoke runs locally).
+# Side effects: none. Role: enforces the PR template's smoke item (root-cause audit class A, priority 1 b).
+name: smoke-gate
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-summary:
+    name: smoke summary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Agent-behaviour PRs carry a passing live smoke summary
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/check_smoke_summary.py --base "$BASE_SHA" --head "$HEAD_SHA"
