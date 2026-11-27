@@ -476,7 +476,19 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                         if ev[-1].final.text == TYPED_PIN_LINE:
                             refused.append(text)
                     # 6. Every bypass as posted voice chatter, then merged; the spoken ones also as voice/ask.
+                    # The session holds an issued ticket (rereview-pr76-r1 N3), so the relay exemption is live.
                     sid, vs_id = await new_session(pool, sids)
+                    ref = ex.TICKET_REF.model_dump(mode="json")
+                    async with pool.connection() as conn:
+                        await conn.execute(
+                            "INSERT INTO agent.turns (turn_id, session_id, client_turn_id, mode, input_kind, status, "
+                            "deadline_at, started_at, final) VALUES (%s, %s, %s, 'voice', 'voice', 'completed', "
+                            "now() + interval '45 seconds', now() - interval '1 minute', %s)",
+                            (str(uuid.uuid4()), sid, str(uuid.uuid4()),
+                             json.dumps({"text": f"I've opened {ref['display']} for our team.", "say": "s",
+                                         "ticket": ref})))
+                    facts = await relay_facts(sid)
+                    assert facts.ids == {ref["short_id"]}, facts  # positive control: a non-empty issued id set
                     # D-071 / review-pr76 M3: every bypass also as an assistant item (the realtime model echoing it,
                     # or a browser that labels customer speech "assistant"); provenance is decided server-side.
                     items = [{"realtime_item_id": f"item_{role[0]}{n}", "role": role, "text": text,

@@ -116,6 +116,21 @@ async def test_a_customer_pin_equal_to_an_issued_suffix_is_masked_whatever_role_
     assert all("8352" not in t and "[PIN]" in t for t in stored.values()), stored
 
 
+async def test_n1_route_a_pin_word_in_our_line_still_masks_an_echo_when_not_awaiting() -> None:
+    # rereview-pr76-r1 N1, reproduced through POST /transcript: ids present, session not awaiting.
+    reset = "You can reset your PIN in Settings, under Security."
+    w = await awaiting_world_with_ticket()
+    w.turns.sessions[SID] = SessionRow(session_id=SID, visitor_id=VISITOR, awaiting_verification=False)
+    now = datetime.now(UTC)
+    turn = TurnRow(turn_id=str(uuid.uuid4()), session_id=SID, client_turn_id=str(uuid.uuid4()), mode="voice",
+                   input_kind="voice", status="running", deadline_at=now, started_at=now)
+    await w.turns.insert_turn(turn)
+    await w.turns.finish_turn(turn.turn_id, TurnOutcome.fixed(reset, end_reason="answered"), now)
+    for label in ("assistant", "user"):
+        stored = await post_items(w, (f"item_{label}", label, f"{reset} Got it, 4821."))
+        assert not leaks(stored[f"item_{label}"], "4821") and reset in stored[f"item_{label}"]
+
+
 async def test_without_relay_facts_posted_speech_fails_closed() -> None:
     stored = await post_items(await awaiting_world_with_ticket(with_facts=False), ("item_a1", "assistant", CODE_LINE))
     assert "8352" not in stored["item_a1"]
@@ -150,8 +165,15 @@ async def test_relay_facts_come_from_typed_core_fields_only() -> None:
             return Tup()
 
     w = await awaiting_world_with_ticket(with_facts=False)
+    now = datetime.now(UTC)  # an answer whose prose holds a number core never issued (review mutation A4)
+    turn = TurnRow(turn_id=str(uuid.uuid4()), session_id=SID, client_turn_id=str(uuid.uuid4()), mode="voice",
+                   input_kind="voice", status="running", deadline_at=now, started_at=now)
+    await w.turns.insert_turn(turn)
+    await w.turns.finish_turn(turn.turn_id, TurnOutcome.fixed("I can't look up invoice 7302 until you verify.",
+                                                              end_reason="answered"), now)
     facts = await load_relay_facts(w.turns, Saver(), SID)
-    assert facts.ids == {"8352", "1111", "0412"} and CODE_LINE in facts.lines
+    assert "I can't look up invoice 7302 until you verify." in facts.lines  # the prose is read as a line
+    assert facts.ids == {"8352", "1111", "0412"} and CODE_LINE in facts.lines  # but never as an id
 
 
 def test_model_written_tool_args_keep_a_ticket_ending_while_awaiting() -> None:
