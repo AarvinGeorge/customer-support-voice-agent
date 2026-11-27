@@ -42,8 +42,6 @@ REGISTRY: tuple[KeySpec, ...] = (
             "https://api.anthropic.com/v1/models?limit=1"),
     KeySpec("OPENAI_API_KEY", "Voice (Realtime), embeddings, fallback model, eval judge", ("sk-",), "now",
             "https://api.openai.com/v1/models"),
-    KeySpec("PINECONE_API_KEY", "Semantic search over policy docs (Pinecone, integrated embedding)", (), "now",
-            "https://api.pinecone.io/indexes"),
     KeySpec("DATABASE_URL", "Postgres + pgvector (Neon)", ("postgres://", "postgresql://"), "deploy"),
     KeySpec("UPSTASH_REDIS_REST_URL", "Rate limits (Upstash Redis)", ("https://",), "deploy"),
     KeySpec("UPSTASH_REDIS_REST_TOKEN", "Rate limits (Upstash Redis)", (), "deploy"),
@@ -130,8 +128,6 @@ def verify(spec: KeySpec, value: str) -> str:
         headers |= {"x-api-key": value, "anthropic-version": "2023-06-01"}
     elif spec.name == "LANGSMITH_API_KEY":
         headers |= {"x-api-key": value}
-    elif spec.name == "PINECONE_API_KEY":
-        headers |= {"Api-Key": value}
     else:
         headers |= {"Authorization": f"Bearer {value}"}
     req = urllib.request.Request(spec.verify_url, headers=headers, method="GET")

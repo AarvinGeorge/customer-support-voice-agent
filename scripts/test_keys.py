@@ -68,11 +68,6 @@ class FormatTests(unittest.TestCase):
         self.assertIsNotNone(keys.format_problem("OPENAI_API_KEY", "sk- abc"))
         self.assertIsNotNone(keys.format_problem("OPENAI_API_KEY", "sk-abc"))
 
-    def test_pinecone_key_is_needed_now_with_online_check(self):
-        spec = keys.SPECS["PINECONE_API_KEY"]
-        self.assertEqual(spec.needed, "now")
-        self.assertIsNotNone(spec.verify_url)
-
     def test_mask_never_shows_more_than_last_four(self):
         self.assertEqual(keys.mask("lsv2_sk_abcdefghijkl"), "set (ends ...ijkl)")
         self.assertEqual(keys.mask(""), "MISSING")
