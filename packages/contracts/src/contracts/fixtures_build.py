@@ -7,7 +7,8 @@ Side effects: none.
 Role: one S1 chat conversation (4 turns: ask, verify plus prepare, confirm, follow-up answer), one
 voice turn, and edge turns (fallback with a skipped grounding gate, tool failure escalation,
 deadline path with an error event and the deadline ticket) so lane C's reducer
-can assert on every doc 07 s6.2 event type."""
+can assert on every doc 07 s6.2 event type, and the S4 unsure turns (off-topic decline, weak then
+clarify, weak again then escalate not_in_docs) for the step trail gate rows."""
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -284,6 +285,69 @@ def _edge() -> list[dict]:
     return out
 
 
+def _s4_search(t: _Turn, query: str, verdict: str, decision: str, top: float) -> None:
+    """What: a search_kb step plus a retrieval gate with the given verdict and decision.
+    Use when: rendering the S4 turns. Inputs: turn, query, verdict, decision, top cosine.
+    Output: none. Side effects: appends events. Role: helper."""
+    sid = t.step("tool", "search_kb", "Searching help articles", "Searched help articles", 380,
+                 args={"query": query}, detail="no close match" if verdict == "none" else "1 partial match")
+    t.add("gate", step_id=sid, gate="retrieval", verdict=verdict, decision=decision, top_cosine=top,
+          tau_low=0.30, tau_high=0.45, calibration_status="provisional", code_match=False,
+          chunk_ids=[] if verdict == "none" else ["security-faq#1"])
+
+
+def _s4_unsure() -> list[dict]:
+    """What: S4, three unsure turns in one session (doc 07 s6.5): off-topic (none, decline, no
+    ticket), a question the docs do not cover (weak 0.38, clarify), then its follow-up (weak 0.41
+    against tau_high 0.45 with weak_streak 1, escalate not_in_docs with a ticket).
+    Use when: rendering s4_unsure.jsonl. Inputs: none. Output: event dicts. Side effects: none.
+    Role: fixture body for the step trail gate rows (CS-E-04.S5.T1)."""
+    sid = "019a7c2e-7000-7000-8000-00000000f001"
+    out: list[dict] = []
+
+    t = _Turn(sid, "019a7c2e-7010-7000-8000-0000000000f1", "chat", 300)
+    t.add("turn.started", served_by="agent_a", input_kind="text", contract_version=VERSION)
+    t.model_step(1200, 2000, 25)
+    _s4_search(t, "weather tomorrow", "none", "decline", 0.12)
+    line = ("I can only help with Quillstack questions: billing, refunds, your account and how-to "
+            "questions. Is there something there I can help with?")
+    t.add("turn.completed", final=_final(line, line), usage=_usage(1700, 1, 1, 2000, 25, ttft=1650),
+          end_reason="declined_off_topic", replayed=False)
+    out += t.events
+
+    t = _Turn(sid, "019a7c2e-7020-7000-8000-0000000000f2", "chat", 330)
+    t.add("turn.started", served_by="agent_b", input_kind="text", contract_version=VERSION)
+    t.model_step(1300, 2300, 25)
+    _s4_search(t, "HIPAA compliance", "weak", "clarify", 0.38)
+    line = ("I want to be sure I give you the right answer. Could you tell me a little more about what "
+            "you need?")
+    t.add("turn.completed", final=_final(line, line, confidence={
+        "retrieval_verdict": "weak", "top_cosine": 0.38, "tau_low": 0.30, "tau_high": 0.45,
+        "grounding": "not_run"}), usage=_usage(1800, 1, 1, 2300, 25, ttft=1750), end_reason="clarify",
+        replayed=False)
+    out += t.events
+
+    t = _Turn(sid, "019a7c2e-7030-7000-8000-0000000000f3", "chat", 360)
+    t.add("turn.started", served_by="agent_a", input_kind="text", contract_version=VERSION)
+    t.model_step(1250, 2600, 25)
+    _s4_search(t, "HIPAA business associate agreement", "weak", "escalate", 0.41)
+    ticket = ex.TICKET_REF.model_copy(update={
+        "ticket_id": "TCK-26118214", "short_id": "8214", "display": "ticket ending 8214",
+        "queue": "account", "target_label": "HIPAA question"}).model_dump(mode="json")
+    t.step("escalation", "create_ticket", "Opening a ticket", "Opened a ticket", 110,
+           detail="ticket ending 8214")
+    t.add("escalated", reason="not_in_docs", ticket=ticket, origin="code", offer_ticket_button=False)
+    line = "Our help articles don't cover that. I've opened a ticket for our team, ticket ending 8214."
+    say = ("Our help articles don't cover that. I've opened a ticket for our team, ticket ending eight "
+           "two one four.")
+    t.add("turn.completed", final=_final(line, say, escalated=True, ticket=ticket, confidence={
+        "retrieval_verdict": "weak", "top_cosine": 0.41, "tau_low": 0.30, "tau_high": 0.45,
+        "grounding": "not_run"}), usage=_usage(1900, 1, 2, 2600, 25, ttft=1850), end_reason="escalated",
+        replayed=False)
+    out += t.events
+    return out
+
+
 def _jsonl(events: list[dict]) -> str:
     """What: events as JSONL text. Use when: rendering. Inputs: event dicts. Output: text.
     Side effects: none. Role: helper."""
@@ -294,4 +358,4 @@ def render_all() -> dict[str, str]:
     """What: every fixture file's content. Use when: writing or checking fixtures.
     Inputs: none. Output: {file name: JSONL text}. Side effects: none. Role: the builder."""
     return {"s1_chat.jsonl": _jsonl(_s1_chat()), "voice_turn.jsonl": _jsonl(_voice()),
-            "edge_turns.jsonl": _jsonl(_edge())}
+            "edge_turns.jsonl": _jsonl(_edge()), "s4_unsure.jsonl": _jsonl(_s4_unsure())}
