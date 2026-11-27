@@ -1,15 +1,15 @@
 /**
- * What: `/console` route shell: header bar and the empty conversation column.
- * Use when: a visitor opens the console; the conversation, step trail, input bar and
- *   drawer arrive in CS-E-04.S5 and later tasks.
- * Inputs: none.
+ * What: `/console` route: the chat console (top bar, conversation log with step trails, input bar).
+ * Use when: a visitor opens the console from the landing page (`/console?session=<id>`).
+ * Inputs: none (the client entry reads the query).
  * Output: the console frame.
- * Side effects: none.
- * Role: route shell for the chat and voice console.
+ * Side effects: none on the server.
+ * Role: route shell; the work is in components/console (CS-E-04.S5.T1).
  */
 import type { Metadata } from "next";
+import { Suspense } from "react";
 
-import { ThemeToggle } from "@/components/theme-toggle";
+import { ConsoleRoute } from "@/components/console/console-route";
 
 /**
  * What: metadata for /console.
@@ -27,18 +27,12 @@ export const metadata: Metadata = { title: "Console · Quillstack Support" };
  * Inputs: none.
  * Output: JSX.
  * Side effects: none.
- * Role: route shell.
+ * Role: route shell; Suspense is required around useSearchParams for static rendering.
  */
 export default function ConsolePage() {
   return (
-    <div className="flex min-h-dvh flex-col">
-      <header className="flex h-14 items-center justify-between border-b border-rule px-4">
-        <span className="text-heading text-ink">Quillstack Support</span>
-        <ThemeToggle />
-      </header>
-      <main className="mx-auto flex w-full max-w-[44rem] flex-1 flex-col justify-center px-6 py-12">
-        <p className="text-body text-muted">The conversation appears here once a session starts.</p>
-      </main>
-    </div>
+    <Suspense>
+      <ConsoleRoute />
+    </Suspense>
   );
 }
