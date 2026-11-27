@@ -362,6 +362,7 @@ fetch_release() {
     if [ "$PRINT" = 1 ]; then REL_FILE="$MANIFEST"; return 0; fi
     mkdir -p "$STATE_DIR/releases"
     [ "$MANIFEST" -ef "$REL_FILE" ] || cp "$MANIFEST" "$REL_FILE"
+    return 0   # validated above; the copy is byte for byte the same file
   elif [ ! -f "$REL_FILE" ]; then
     [ "$PRINT" = 1 ] || mkdir -p "$STATE_DIR/releases"
     run gh release download "$tag" --pattern "release-$tag.json" --dir "$STATE_DIR/releases" --clobber \

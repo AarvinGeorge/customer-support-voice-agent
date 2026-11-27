@@ -1,16 +1,18 @@
 # Deploy runbook: Quillstack on one VM (CS-E-08.S4.T2)
 
-Source: doc 09 s5, doc 06 s10, doc 07 s15.2; D-029 (same Compose stack locally and on the VM), D-047 (EDGE_SUBNET), D-049 (SITE_ADDRESS).
+Source: doc 09 s5, doc 06 s10, doc 07 s15.2; D-029 (same Compose stack locally and on the VM), D-047 (EDGE_SUBNET), D-049 (SITE_ADDRESS),
+D-072 (images are built once in CI after the gates, pushed to GHCR, and deployed by digest; the VM never builds).
 Everything below is prepared and was proven on a laptop with `--local` (see the PR). What is left for the owner: a VM, a domain, an SSH key.
 
 ## 0. What the owner supplies
 
 | Item | Detail |
 |---|---|
-| VM | Ubuntu 22.04 or 24.04, 2 vCPU and 4 GB RAM minimum (builds three Python images plus Next.js; add 2 GB swap if the build is killed), 25 GB disk |
+| VM | Ubuntu 22.04 or 24.04, 2 vCPU and 4 GB RAM (runs the stack; nothing is built on it), 25 GB disk |
 | Domain | an A record pointing at the VM's public IP; ports 80 and 443 open (Caddy gets the certificate by itself) |
 | SSH | a deploy user in the `docker` group, key-based login; the private key goes in the GitHub secret `VM_SSH_KEY` (workflow path) |
-| Host stack | `docker` with the compose plugin, `git`, `curl`, `python3` (all standard; the script uses them) |
+| Host stack | `docker` with the compose plugin (2.24 or later, for `!reset`), `git`, `curl`, `python3` 3.10 or later (all standard; the script uses them); `gh` only if you deploy by hand without `--manifest` |
+| Registry read access | the images are private packages under `ghcr.io/aarvingeorge/customer-support-voice-agent/`. The workflow logs the VM in for the run with its own read-only token and logs out after. For a deploy or rollback by hand, log in once: `docker login ghcr.io -u <github user>` with a classic token that has only `read:packages`. Images already on the VM (a rollback) need no login |
 | Spend caps | provider spend caps and rate limits set BEFORE the URL is shared (CLAUDE.md s6) |
 
 ## 1. One-time VM setup
@@ -60,19 +62,33 @@ The workflow keeps the previous VM file as `.env.previous` before it writes the 
 The list of required names is `scripts/deploy/required-env.txt`; a test fails if it drifts from `compose.yaml`. A missing one fails the workflow (and `render-env`) naming it, never showing a value.
 The workflow only runs by hand (Actions tab, "deploy", enter a tag) and uses the `production` environment, so you can add a required reviewer there.
 
-## 3. Release and deploy
+## 3. Build once, release, deploy (D-072)
 
-1. Merge to `main` with CI green; tag it: `git tag v0.1.0 && git push origin v0.1.0`.
-2. On the VM (or through the workflow): `scripts/deploy/deploy.sh up --tag v0.1.0`.
+The artifact production runs is the one CI built after the gates. Nothing rebuilds it.
+
+| Stage | Where | What happens |
+|---|---|---|
+| build once | `.github/workflows/ci.yml`, job `images`, on every push to `main` | runs only after every gate job is green (`needs`); `docker buildx bake -f compose.yaml` builds `agent`, `core`, `knowledge` and `web` from the same build sections local Compose uses, labels them (`org.opencontainers.image.source`, `.revision`, `.title`), pushes `ghcr.io/aarvingeorge/customer-support-voice-agent/<image>:<sha>` with the run's `GITHUB_TOKEN` (`packages: write`, `contents: read`), reads each digest back from GHCR, and uploads the artifact `images-<sha>` (`images-<sha>.json`: revision, repo, per image digest and `<repo>/<image>@sha256:...`). The migrate, seed and ingest jobs use their service's image (same Dockerfile and `SERVICE` argument) |
+| dry run on a PR | the same job on a same-repo pull request | the same build and push under the tag `pr-<n>`, which no release can name |
+| release | `.github/workflows/release.yml` | push a tag `r-NN` (or `r-NN.N` for a fix release) on a commit of `main`, or run it from the Actions tab with `tag` and `sha`. It refuses a commit not on `main` or without a green `ci` run on `main`, takes that run's `images-<sha>` artifact (no build), writes `release-<tag>.json`, validates it as the deploy will, reads every digest back from GHCR and attaches the file to GitHub Release `<tag>` |
+| deploy | `scripts/deploy/deploy.sh up --tag r-NN` on the VM, or `.github/workflows/deploy.yml` (Actions tab, enter the tag) | below |
+
+Commands:
+1. Merge to `main` and wait for `ci` (including `images`) to go green.
+2. `git tag r-01 <sha> && git push origin r-01` (or run the `release` workflow with `tag` and `sha`).
+3. On the VM: `scripts/deploy/deploy.sh up --tag r-01` (it runs `gh release download r-01` for the manifest when it has none; or pass `--manifest release-r-01.json`), or run the `deploy` workflow with the tag.
+
+The web image bakes two public build arguments (`NEXT_PUBLIC_LANGSMITH_PROJECT`, `NEXT_PUBLIC_LANGSMITH_PROJECT_URL`) from the repository variables `LANGSMITH_PROJECT` and `LANGSMITH_PROJECT_URL` at CI build time; changing them needs a new build (a new commit on `main`), not a VM setting.
 
 `up` runs these steps in order and stops at the first failure (each is printed):
 
 | Step | What it does |
 |---|---|
 | preflight | env file present, mode 600, all 25 secrets set, `SITE_ADDRESS` set (Caddy refuses to start otherwise) and not plain http, `SITE_ORIGIN` equals `https://SITE_ADDRESS`, `FORWARDED_ALLOW_IPS` equals `EDGE_SUBNET`, `DEMO_RESEED` off |
+| release manifest | `release-<tag>.json` from `--manifest`, the copy kept in `.deploy/releases/`, or `gh release download`; validated by `scripts/deploy/release_manifest.py env`: it is a release for this tag, lists exactly the four images, each pinned as `ghcr.io/aarvingeorge/customer-support-voice-agent/<image>@sha256:<64 hex>` (a mutable tag or another registry is refused). A missing or refused manifest stops here, before anything changes; there is no build fallback |
 | rollback point | writes the current GOOD tag (`.deploy/good`) to `.deploy/rollback_to` and marks the new tag `pending`, before anything changes |
-| checkout | `git fetch --tags`, refuses a dirty checkout or an unknown tag, `git checkout --detach tag` |
-| build | `docker compose --profile seed --profile jobs build` on the VM: every image including the seed and ingest job images (no registry), so the jobs run this tag's code |
+| checkout | `git fetch --tags`, refuses a dirty checkout or an unknown tag, `git checkout --detach tag`; then the checkout HEAD must equal the manifest's revision, so the config files (`compose.yaml`, `Caddyfile`, `data/`, `infra/postgres/init`) and the images come from one commit |
+| pull | `docker pull <repo>/<image>@sha256:...` for the four images (an image already on the host under that digest is the same bytes and is not fetched again). Every Compose call merges `scripts/deploy/compose.release.yaml`, which replaces each build section with `build: !reset null` and the digest reference, so no Compose command on the VM can build |
 | infra | postgres and redis up and healthy |
 | backup | when the service tables already exist: `pg_dump` of the `core`, `knowledge` and `agent` schemas to `.deploy/backups/pre-TAG-time.sql`, read back: size over 1000 bytes, the "dump complete" marker, a restore into a scratch database `quillstack_restore_check` with the same table count as live, and a manifest of row counts (`.sql.manifest`, taken from that scratch restore) beside it. The record `.deploy/backup` binds the file to the good tag it was taken on top of (BASE) and the release it precedes; a retry of a failed release keeps the first backup (the good state) instead of taking a second one of the half-changed database; a new release clears an older record. A failed read-back stops the deploy before any migration |
 | migrate | `migrate_core`, `migrate_knowledge`, `migrate_agent` as the owner roles; applied files are skipped |
@@ -83,12 +99,12 @@ The workflow only runs by hand (Actions tab, "deploy", enter a tag) and uses the
 | smoke | see section 4 |
 | mark good | only now is the tag written to `.deploy/good`; the old good tag stays as `rollback_to`; `pending` is cleared |
 
-Compose form on the VM is `-f compose.yaml` only (no override: no source mounts, no reload). Caddy publishes 80 and 443.
+Compose form on the VM is `-f compose.yaml -f scripts/deploy/compose.release.yaml` (no `compose.override.yaml`: no source mounts, no reload). Caddy publishes 80 and 443.
 
 ## 4. Smoke (also `scripts/deploy/deploy.sh smoke`)
 
 Read-backs use throwaway containers of the release image, never an exec into a live one. Expected values are computed from the checked-out tag, not from a remembered figure: contract from `packages/contracts/VERSION`, policy as `version_label+sha256[:12]` of `data/policy.yaml`, embedding model from `data/models.yaml`, `demo_faults` from the env file.
-- revision: the four app containers (core, knowledge, agent_a, agent_b) run the image ids just built; the tag and commit are printed.
+- revision: each app container (core, knowledge, agent_a, agent_b, web) has the manifest's digest reference as its image and the image id that reference resolves to on the host (so a container left on an older image fails); the tag and commit are printed, and the readings are written to `.deploy/running` (`release <tag> revision <sha>`, then `<service> <reference> <image id>` per line). `.deploy/current` names the release the containers were switched to.
 - core `/readyz` (status 200): `status` ready, `contract_version` and `policy_version` equal to the expected values, `demo_faults` equal, `seed_date` present.
 - knowledge `/readyz` (status 200): `status` ready, `embedding_model` equal, `chunks` at least 1, `calibration_status` present.
 - edge `https://DOMAIN/api/readyz`: `status` ready, `contract_version` equal, `redis`, `postgres`, `core`, `knowledge` all `ok`, `demo_faults` equal. A failure prints the missing field and the body.
@@ -109,17 +125,22 @@ Trigger (any one): the smoke at the end of `up` is red (the script prints the ro
 scripts/deploy/deploy.sh rollback               # code only
 scripts/deploy/deploy.sh rollback --restore-db  # code and the pre-migrate database backup of that deploy
 ```
-It restores the last GOOD tag: the rollback point was saved before the failed `up` changed anything, and a tag becomes good only after a green smoke. It checks out that tag, rebuilds, rolling-restarts and smokes.
+It redeploys the last GOOD release: the rollback point was saved before the failed `up` changed anything, and a tag becomes good only after a green smoke. It reads that release's manifest (kept in `.deploy/releases/` by its deploy), checks out its tag, pulls its digests (normally still on the VM, so no login is needed), rolling-restarts and smokes with the same read-backs as `up`: the running digests must equal the previous release's. It never rebuilds an old tag; a release with no manifest (one deployed before D-072) cannot be a rollback target, and the script says so.
 
-`--restore-db` also puts the database back, from the backup recorded for that tag. It refuses a backup whose BASE is not the rollback tag. It then stops the four app services and, in ONE transaction, drops the three service schemas with CASCADE (so tables or columns a failed release added vanish) and replays the dump. If anything fails the transaction rolls back, the database is exactly as before, the app services are started again with `up -d --no-deps --wait` (the form the rolling restart uses; `compose start` does not work here) and the script stops. If that restart also fails the script says the site is down and prints the command to run; it never hides the failure. After a successful replay every table's row count is compared with the manifest. The database is never left partial or empty. Use it when the failed release ran a migration old code cannot read; otherwise a code-only rollback keeps the audit rows and sessions written since the backup. `scripts/deploy/restore_pg_test.sh` proves the add-a-table, corrupt-backup and wrong-release cases on a real Postgres (also in CI).
+`--restore-db` also puts the database back, from the backup recorded for that tag. It refuses a backup whose BASE is not the rollback tag. It then stops the four app services (the restore's Compose calls use the images of the release that is running, `.deploy/current`, so a failed restore restarts exactly what was running) and, in ONE transaction, drops the three service schemas with CASCADE (so tables or columns a failed release added vanish) and replays the dump. If anything fails the transaction rolls back, the database is exactly as before, the app services are started again with `up -d --no-deps --wait` (the form the rolling restart uses; `compose start` does not work here) and the script stops. If that restart also fails the script says the site is down and prints the command to run; it never hides the failure. After a successful replay every table's row count is compared with the manifest. The database is never left partial or empty. Use it when the failed release ran a migration old code cannot read; otherwise a code-only rollback keeps the audit rows and sessions written since the backup. `scripts/deploy/restore_pg_test.sh` proves the add-a-table, corrupt-backup and wrong-release cases on a real Postgres (also in CI).
 Limits, stated: migrations are forward-only and assumed additive, so old code normally runs on the newer schema; a restore loses everything written after the backup was taken (extensions, roles and database-level grants are not part of the dump and are left untouched). The first deploy has no rollback target (the script says so). Rollback does not restore `.env`: copy `.env.previous` back by hand when a settings change caused the failure.
 
 ## 7. Day-two checks
 
-- `docker compose -f compose.yaml ps` (all healthy; always pass `-f compose.yaml` on the VM so the local override is not merged), `docker compose -f compose.yaml logs --tail 50 agent_a`.
+- `scripts/deploy/deploy.sh smoke` (read-backs against the running release), `cat .deploy/running` (the digests the containers run).
+- `docker compose -f compose.yaml ps` (all healthy; always pass `-f compose.yaml` on the VM so the local override is not merged), `docker compose -f compose.yaml logs --tail 50 agent_a`. Commands that create containers need the release images: use the script, not a bare `docker compose up`.
 - Caddy certificate trouble: DNS must already point at the VM; `docker compose -f compose.yaml logs caddy`.
 - A stack that will not start with an empty `SITE_ADDRESS` is intended (D-049).
 
 ## 8. Proven locally (not on a VM)
+
+D-072 path (build once, deploy by digest): images built with the CI bake command, pushed to a throwaway local registry, then `--local up` of two releases and a `rollback` to the first release's digests on real Docker, with the images removed from the host first so every one was pulled; plus an image inspection showing no `.env` file or planted secret in any image (control: the old ignore rules let two nested `.env` files in). The GHCR push itself is proven by the `images` job on the pull request (tag `pr-<n>`). See `build-log/reports/ghcr-promote.md`.
+
+Earlier (build on the VM, superseded by D-072):
 
 `scripts/deploy/deploy.sh --local up` ran end to end (fix round 1 adds the backup, in-flight gate, version read-backs, a forced failure and a rollback, see the report) against Compose (`COMPOSE_PROJECT_NAME=cs-deploy`, `EDGE_SUBNET=172.31.88.0/24`, `SITE_ADDRESS=:80`, host port 8088, same `compose.yaml` images and commands as the VM; the overlay only changes the published port). Not proven: real TLS, a real domain, the SSH and workflow path, a first-time VM build. See `build-log/reports/laneA3-deploy-report.md`.
