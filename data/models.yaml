@@ -59,8 +59,13 @@ roles:
     # Offline only (golden runner, evals). OpenAI family per doc 07 s13.2.
     provider: openai
     model: gpt-5.5
+    # A judge benefits from some reasoning, so effort low (explicit: the API default is medium). Reasoning tokens
+    # count against the cap, and OpenAI recommends reserving at least 25,000 for reasoning and outputs
+    # (developers.openai.com/api/docs/guides/reasoning, "Allocating space for reasoning"); only used tokens are billed.
+    # Loader rule: _check_verdict_role in agent/models/config.py (audit 2026-11-27 open item 5).
+    effort: low
     attempt_timeout_s: 60
-    max_tokens: 1024
+    max_tokens: 25000
     price: {input_per_mtok: 5.00, output_per_mtok: 30.00, cache_read_per_mtok: 0.50, as_of: 2026-11-27}
   embeddings:
     # A change of model or dimensions requires re-ingest and recalibration (doc 07 s13.2).

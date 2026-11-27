@@ -141,3 +141,42 @@ def test_a_failed_reseed_command_is_a_reseed_error(tmp_path: Path) -> None:
         return SimpleNamespace(returncode=1, stdout="", stderr="DEMO_RESEED refused")
     with pytest.raises(reseed.ReseedError, match="DEMO_RESEED refused"):
         reseed.guarded_reseed(GOOD_ENV, URL, "core-db", tmp_path, run=run, last_ts=lambda db: None)
+
+
+# --- PR #73 review I4: the owner's cs-demo stack and port 3000, and smoke stacks without this run's marker ---------
+
+@pytest.mark.parametrize("project", ["cs-demo", "cs-demo-2", "cs-a-demo"])
+def test_reseed_guard_refuses_any_demo_project_on_every_path(tmp_path: Path, project: str) -> None:
+    """What: a project naming demo is refused before any docker call, whatever the port. Use when: CI.
+    Inputs: tmp root, project. Output: none. Side effects: none. Role: cs-demo is the owner's live stack."""
+    run = _port_run("127.0.0.1:3095")
+    with pytest.raises(reseed.ReseedRefused, match="demo"):
+        reseed.reseed_command({**GOOD_ENV, "COMPOSE_PROJECT_NAME": project}, URL, tmp_path, run)
+    assert run.seen == []
+
+
+def test_reseed_guard_refuses_port_3000_even_when_the_project_publishes_it(tmp_path: Path) -> None:
+    """What: EVALS_AGENT_URL on port 3000 is refused before any docker call, even if the port read would match.
+    Use when: CI. Inputs: tmp root. Output: none. Side effects: none. Role: 3000 is cs-demo's edge port."""
+    run = _port_run("127.0.0.1:3000")
+    with pytest.raises(reseed.ReseedRefused, match="3000"):
+        reseed.reseed_command(GOOD_ENV, "http://localhost:3000", tmp_path, run)
+    assert run.seen == []
+
+
+def test_a_smoke_project_needs_the_marker_of_this_run(tmp_path: Path) -> None:
+    """What: a cs-smoke-* project is refused unless live_smoke.sh's run marker for that project exists and matches
+    SMOKE_RUN_NONCE; with both it passes. Use when: CI. Inputs: tmp root. Output: none. Side effects: tmp files.
+    Role: the smoke may only reseed the stack its own script created in this run."""
+    env = {**GOOD_ENV, "COMPOSE_PROJECT_NAME": "cs-smoke-183617-ab12"}
+    run = _port_run("127.0.0.1:3095")
+    with pytest.raises(reseed.ReseedRefused, match="marker"):
+        reseed.reseed_command(env, URL, tmp_path, run)
+    marker = reseed.smoke_marker(tmp_path, env["COMPOSE_PROJECT_NAME"])
+    marker.parent.mkdir(parents=True)
+    marker.write_text("nonce-1\n")
+    with pytest.raises(reseed.ReseedRefused, match="marker"):
+        reseed.reseed_command({**env, "SMOKE_RUN_NONCE": "nonce-other"}, URL, tmp_path, run)
+    assert run.seen == []
+    assert reseed.reseed_command({**env, "SMOKE_RUN_NONCE": "nonce-1"}, URL, tmp_path, run)[:4] == \
+        ["docker", "compose", "-p", "cs-smoke-183617-ab12"]

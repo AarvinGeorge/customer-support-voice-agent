@@ -1,5 +1,6 @@
 """What: the D-059 real-model eval of Gate 2 claim extraction: the reviewers' adversarial lists run through the real
-grounding_verifier (small model from data/models.yaml, production timeout: 5 s in chat, D-061) and the code rules.
+grounding_verifier (small model from data/models.yaml, production timeout: 5 s in chat, D-061) and the code rules
+(D-069: an empty claim list passes only with a stated no_claims_reason).
 Use when: `uv run pytest -m real -s -o addopts="" tests/test_real_gate2_eval.py` (or `-k` one test) only; deselected
 in CI by the default addopts.
 Inputs: ANTHROPIC_API_KEY from the worktree .env (value never printed); tests/gate2_adversarial.py.
