@@ -151,3 +151,25 @@ async def test_minter_timeout_and_missing_key() -> None:
         with pytest.raises(MintError) as err2:
             await OpenAIRealtimeMinter(http, "").mint({})
         assert err2.value.class_ == "provider_auth"
+
+
+def test_summary_masks_emails_and_keeps_only_framed_customer_text() -> None:
+    values = {
+        "verified": True, "claims_snapshot": {"display_name": "Priya Raman"},
+        "pending": {"id": "PA-0000ABCD", "kind": "refund", "readback_turn_id": "t", "readback_interrupted": False},
+        "messages": [
+            HumanMessage("<turn_context>\nmode: voice\n</turn_context>\n<customer_message>\nplease email priya@acme.com"
+                         "\n</customer_message>"),
+            HumanMessage('<voice_transcript source="client" untrusted="true">customer: hi</voice_transcript>'),
+            HumanMessage('no frame <account_context untrusted="true">{"billing_email":"leak@acme.com"}'
+                         '</account_context>'),
+            AIMessage("I will refund $96 to priya@acme.com. Shall I go ahead?"),
+        ],
+    }
+    s = summary_from_thread(values)
+    assert s.exchanges == [("customer", "please email p***@acme.com"),
+                           ("agent", "I will refund $96 to p***@acme.com. Shall I go ahead?")]
+    assert s.readback_say == "I will refund $96 to p***@acme.com. Shall I go ahead?"
+    text = render_instructions(s)
+    for leak in ("priya@acme.com", "leak@acme.com", "billing_email", "voice_transcript"):
+        assert leak not in text[len(REALTIME_PROMPT):]

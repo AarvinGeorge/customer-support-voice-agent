@@ -21,7 +21,8 @@ from typing import Any, Awaitable, Callable, Protocol
 from contracts import limits
 from contracts.agent_api import TranscriptItemIn, TranscriptPost, VoiceAskRequest, VoiceToken
 from contracts.base import StrictModel
-from contracts.redact import RedactContext, scan_text
+from contracts import redact as redaction
+from contracts.redact import RedactContext
 from contracts.trust import wrap_voice_transcript
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -31,6 +32,7 @@ from agent.access import owned_session
 from agent.assembly import run_config
 from agent.ingress import Ingress, IngressInput, SessionRow, TurnRow, to_response
 from agent.models.config import RoleSpec
+from agent.prompt import _escape_frame  # pyright: ignore[reportPrivateUsage]  (the frame-tag escaper, M5)
 from agent.realtime import MintedSecret, MintError, SessionSummary, build_session_config, render_instructions, \
     summary_from_thread
 from agent.web import error_response
@@ -39,6 +41,7 @@ log = logging.getLogger("agent.voice")
 
 VOICE_CALL_KEY_TTL_S = 120  # doc 07 s2.4 step 7 and s12
 THREAD_READ_TIMEOUT_S = limits.POSTGRES_CHECKPOINTER_TIMEOUT_S
+MERGE_MAX_CHARS = 6000  # cap on the merged block; the newest items are kept (review PR #2 M9)
 
 
 @dataclass(frozen=True)
@@ -101,22 +104,28 @@ class VoiceDeps:
     store: VoiceStore
     minter: Minter
     voice_spec: RoleSpec | None
-    summary: Callable[[str], Awaitable[SessionSummary]]
+    summary: Callable[[str, RedactContext], Awaitable[SessionSummary]]
     ingress: Ingress | None = None
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
 
 
 def format_merged(items: list[MergedItem]) -> str | None:
-    """What: one user-role text `<voice_transcript source="client" untrusted="true">` block, oldest first.
+    """What: one user-role text `<voice_transcript source="client" untrusted="true">` block, oldest first, with the
+    wrapper and frame tags escaped and at most MERGE_MAX_CHARS of item lines (the newest items are kept).
     Use when: step 12. Inputs: claimed items. Output: wrapped text, or None when there is nothing.
     Side effects: none. Role: doc 07 s2.6 row 5 (client-reported display text, escaped, never instructions)."""
     if not items:
         return None
-    lines = []
-    for it in items:
+    lines: list[str] = []
+    used = 0
+    for it in reversed(items):
         who = "customer" if it.role == "user" else "voice assistant"
-        lines.append(f"{who}{' (interrupted)' if it.interrupted else ''}: {it.text}")
-    return wrap_voice_transcript("\n" + "\n".join(lines) + "\n")
+        line = f"{who}{' (interrupted)' if it.interrupted else ''}: {_escape_frame(it.text)}"
+        if lines and used + len(line) + 1 > MERGE_MAX_CHARS:
+            break
+        lines.append(line[:MERGE_MAX_CHARS])
+        used += len(line) + 1
+    return wrap_voice_transcript("\n" + "\n".join(reversed(lines)) + "\n")
 
 
 class TranscriptMerger:
@@ -136,7 +145,8 @@ class TranscriptMerger:
         covered = None
         req = inp.body
         if isinstance(req, VoiceAskRequest) and req.user_item_id:
-            covered = CoveredItem(req.user_item_id, req.voice_session_id, req.user_transcript or req.question)
+            text = redaction.redact(req.user_transcript or req.question, inp.redact_context or RedactContext())
+            covered = CoveredItem(req.user_item_id, req.voice_session_id, text)  # redacted before storage (I1)
         return format_merged(await self.store.take_unmerged(inp.session_id, row.turn_id, covered))
 
 
@@ -229,9 +239,9 @@ class PgVoiceStore:
         return [MergedItem(r[0], r[1], r[2]) for r in rows]
 
 
-async def thread_summary(checkpointer: Any, session_id: str) -> SessionSummary:
+async def thread_summary(checkpointer: Any, session_id: str, context: RedactContext) -> SessionSummary:
     """What: read the session's checkpointed thread and build the Realtime session summary (2 s cap).
-    Use when: production VoiceDeps.summary. Inputs: LangGraph saver (or None), session id.
+    Use when: production VoiceDeps.summary. Inputs: LangGraph saver (or None), session id, RedactContext.
     Output: SessionSummary (empty on a new session, no checkpointer or a read failure). Side effects: one read.
     Role: fail open: a missing summary never blocks a voice call."""
     if checkpointer is None:
@@ -242,7 +252,7 @@ async def thread_summary(checkpointer: Any, session_id: str) -> SessionSummary:
     except Exception:  # noqa: BLE001
         log.warning("thread read for the voice summary failed session_id=%s", session_id, exc_info=True)
         return SessionSummary()
-    return summary_from_thread(tup.checkpoint.get("channel_values") if tup else None)
+    return summary_from_thread(tup.checkpoint.get("channel_values") if tup else None, context)
 
 
 class EmptyBody(StrictModel):
@@ -256,6 +266,14 @@ def _redact_context(session: SessionRow) -> RedactContext:
     Role: the s11.1 PIN scanner (CS-E-03.S7.T9) runs through contracts.redact.scan_text."""
     return RedactContext(awaiting_verification=session.awaiting_verification,
                          verified=session.verified_user_id is not None)
+
+
+def _relay_ready(deps: VoiceDeps | None) -> bool:
+    """What: whether voice/ask can run a turn: an Ingress with its call keys and transcript merge attached.
+    Use when: voice/token (never mint for a dead relay, review M1) and voice/ask (never run voice without the
+    step 7 dedupe, review M10). Inputs: deps. Output: bool. Side effects: none. Role: guard."""
+    ing = deps.ingress if deps is not None else None
+    return ing is not None and ing.call_keys is not None and ing.merge_transcript is not None
 
 
 def _unavailable(request: Request, class_: str = "provider_5xx") -> JSONResponse:
@@ -276,11 +294,13 @@ def install_voice(app: FastAPI) -> None:
         """What: mint a Realtime client secret for this session and record the voice session.
         Use when: the mic click. Inputs: session id, `{}`. Output: VoiceToken (max_session_s 600).
         Side effects: one OpenAI call, INSERT agent.voice_sessions. Role: doc 07 s2.2, s6.6."""
-        await owned_session(request.app.state.session_store, sid, request.state.visitor_id)
+        owned = await owned_session(request.app.state.session_store, sid, request.state.visitor_id)
+        sid = owned.session_id  # canonical spelling from the row, never the path alias (review M4)
         deps: VoiceDeps | None = getattr(request.app.state, "voice", None)
-        if deps is None or deps.voice_spec is None:
+        if deps is None or deps.voice_spec is None or not _relay_ready(deps):
             return _unavailable(request)
-        session = build_session_config(deps.voice_spec, render_instructions(await deps.summary(sid)))
+        summary = await deps.summary(sid, _redact_context(owned))
+        session = build_session_config(deps.voice_spec, render_instructions(summary))
         try:
             secret = await deps.minter.mint(session)
         except MintError as exc:
@@ -300,20 +320,21 @@ def install_voice(app: FastAPI) -> None:
         Use when: the browser relays an ask_support_agent function call.
         Inputs: session id, VoiceAskRequest. Output: text/event-stream; turn.completed.final.say is spoken.
         Side effects: a full agent turn. Role: doc 07 s2.2, s2.4 (20 s deadline from TURN_DEADLINE_S)."""
-        await owned_session(request.app.state.session_store, sid, request.state.visitor_id)
+        owned = await owned_session(request.app.state.session_store, sid, request.state.visitor_id)
+        sid = owned.session_id  # canonical (review M4)
         deps: VoiceDeps | None = getattr(request.app.state, "voice", None)
-        if deps is None or deps.ingress is None:
+        if deps is None or deps.ingress is None or not _relay_ready(deps):
             return _unavailable(request)
         vs = await deps.store.get_voice_session(body.voice_session_id)
         live = (vs is not None and vs.session_id == sid
                 and deps.now() - vs.minted_at < timedelta(seconds=limits.VOICE_SESSION_MAX_S))
-        if not live:  # step 3
+        if not live:  # step 3; no retry_after_s: retrying cannot succeed, a new call is needed (review M6)
             return error_response(request, 429, "rate_limited", "VOICE_SESSION_EXPIRED",
                                   "This voice call has ended. Start a new one to keep talking.")
         result = await deps.ingress.handle(IngressInput(
             session_id=sid, visitor_id=request.state.visitor_id, client_turn_id=str(body.client_turn_id),
             mode="voice", input_kind="voice", text=body.question, realtime_call_id=body.realtime_call_id,
-            body=body))
+            body=body, redact_context=_redact_context(owned)))
         return to_response(request, result)
 
     @app.post("/api/sessions/{sid}/transcript", status_code=204)
@@ -323,6 +344,7 @@ def install_voice(app: FastAPI) -> None:
         Output: 204. Side effects: INSERT agent.transcript_items (redacted, re-posts ignored).
         Role: doc 07 s2.2, s2.6 (untrusted display text)."""
         session = await owned_session(request.app.state.session_store, sid, request.state.visitor_id)
+        sid = session.session_id  # canonical (review M4)
         deps: VoiceDeps | None = getattr(request.app.state, "voice", None)
         if deps is None:
             return _unavailable(request)
@@ -330,6 +352,6 @@ def install_voice(app: FastAPI) -> None:
         if vs is None or vs.session_id != sid:
             return error_response(request, 404, "not_found", "NOT_FOUND", "Not found.")
         ctx = _redact_context(session)
-        clean = [it.model_copy(update={"text": scan_text(it.text, ctx)}) for it in body.items]
+        clean = [it.model_copy(update={"text": redaction.redact(it.text, ctx)}) for it in body.items]  # I1
         await deps.store.add_transcript_items(sid, vs.voice_session_id, clean)
         return Response(status_code=204)

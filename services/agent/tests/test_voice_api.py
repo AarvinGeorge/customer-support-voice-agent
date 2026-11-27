@@ -79,7 +79,7 @@ class World:
     """What: one app wired to fakes plus handles on every fake. Use when: each test. Inputs: minter.
     Output: attributes. Side effects: none. Role: test harness."""
 
-    def __init__(self, minter: FakeMinter | None = None) -> None:
+    def __init__(self, minter: Any = None) -> None:
         """What: build. Use when: tests. Inputs: optional minter. Output: none. Side effects: none. Role: harness."""
         self.turns = Sessions(SessionRow(session_id=SID, visitor_id=VISITOR),
                                      SessionRow(session_id=OTHER_SID, visitor_id="visitor-2"))
@@ -89,8 +89,8 @@ class World:
                                call_keys=self.keys, merge_transcript=TranscriptMerger(self.vstore))
         self.summaries: list[str] = []
 
-        async def summary(sid: str) -> SessionSummary:
-            """What: fake thread summary. Use when: voice/token. Inputs: sid. Output: summary.
+        async def summary(sid: str, _ctx: Any) -> SessionSummary:
+            """What: fake thread summary. Use when: voice/token. Inputs: sid, redact context. Output: summary.
             Side effects: records. Role: fake."""
             self.summaries.append(sid)
             return SessionSummary(verified_name="Priya Raman")
@@ -408,3 +408,136 @@ def test_merged_text_escapes_wrapper_tags() -> None:
     assert "voice assistant (interrupted): Sorry" in text
     assert format_merged([]) is None
     json.dumps(text)
+
+
+# ---- fix round 1 (review PR #2) ----
+
+def _pin_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What: stand-in for the s11.1 free-text PIN scanner inside contracts.redact.scan_text (CS-E-03.S7.T9).
+    Use when: proving voice text reaches the contracts redact hook. Inputs: monkeypatch. Output: none.
+    Side effects: patches contracts.redact.scan_text for one test. Role: probe of the hook, not the rule."""
+    import re
+
+    import contracts.redact as cr
+    real = cr.scan_text
+    monkeypatch.setattr(cr, "scan_text", lambda text, ctx: re.sub(r"\b\d{4}\b", "[PIN]", real(text, ctx)))
+
+
+async def test_posted_transcript_text_is_redacted_before_storage(monkeypatch: pytest.MonkeyPatch) -> None:
+    _pin_scanner(monkeypatch)
+    w = World()
+    w.voice_session()
+    body = {"voice_session_id": "vs-1",
+            "items": items(("item_u5", "user", "my email is priya@acme.com and my PIN is 4821"))}
+    async with w.client() as c:
+        assert (await c.post(f"/api/sessions/{SID}/transcript", json=body)).status_code == 204
+    (row,) = w.vstore.items
+    assert "priya@acme.com" not in row.text and "p***@acme.com" in row.text
+    assert "4821" not in row.text and "[PIN]" in row.text
+
+
+async def test_covered_voice_item_is_redacted_before_storage(monkeypatch: pytest.MonkeyPatch) -> None:
+    _pin_scanner(monkeypatch)
+    w = World()
+    w.voice_session()
+    async with w.client() as c:
+        events_of(await c.post(f"/api/sessions/{SID}/voice/ask", json=ask(
+            user_item_id="item_u9", user_transcript="send it to priya@acme.com, PIN 4821")))
+    (row,) = [i for i in w.vstore.items if i.realtime_item_id == "item_u9"]
+    assert "priya@acme.com" not in row.text and "4821" not in row.text
+    assert "p***@acme.com" in row.text and "[PIN]" in row.text
+
+
+@pytest.mark.xfail(strict=True, reason="tripwire: the s11.1 free-text PIN scanner lands in CS-E-03.S7.T9; when it "
+                                       "does this XPASSes and fails, so delete this marker then")
+async def test_real_scanner_masks_a_spoken_pin_in_a_transcript() -> None:
+    w = World()
+    w.voice_session()
+    w.turns.sessions[SID] = SessionRow(session_id=SID, visitor_id=VISITOR, awaiting_verification=True)
+    body = {"voice_session_id": "vs-1", "items": items(("item_u6", "user", "QS-10423 4821"))}
+    async with w.client() as c:
+        await c.post(f"/api/sessions/{SID}/transcript", json=body)
+    assert "4821" not in w.vstore.items[0].text
+
+
+async def test_token_refuses_while_the_relay_is_not_wired() -> None:
+    w = World()
+    w.app.state.voice.ingress = None
+    async with w.client() as c:
+        r = await c.post(f"/api/sessions/{SID}/voice/token", json={})
+    assert r.status_code == 503 and error_code(r) == "VOICE_UNAVAILABLE"
+    assert r.json()["error"]["retryable"] is True and w.minter.sessions == [] and w.vstore.voice == {}
+
+
+@pytest.mark.parametrize("missing", ["call_keys", "merge_transcript"])
+async def test_voice_refuses_an_ingress_without_its_voice_hooks(missing: str) -> None:
+    w = World()
+    w.voice_session()
+    setattr(w.ingress, missing, None)
+    async with w.client() as c:
+        tok = await c.post(f"/api/sessions/{SID}/voice/token", json={})
+        r = await c.post(f"/api/sessions/{SID}/voice/ask", json=ask())
+    assert tok.status_code == 503 and r.status_code == 503 and error_code(r) == "VOICE_UNAVAILABLE"
+    assert w.minter.sessions == [] and w.agent.calls == []
+
+
+async def test_routes_use_the_canonical_session_id() -> None:
+    w = World()
+    w.voice_session()
+    upper = SID.upper()
+    real_get = w.turns.get_session
+
+    async def any_case(session_id: str) -> SessionRow | None:
+        """What: Postgres-like uuid lookup (any spelling). Use when: this test. Inputs: id. Output: row.
+        Side effects: none. Role: fake."""
+        return await real_get(session_id.lower())
+
+    w.turns.get_session = any_case  # type: ignore[method-assign]
+    async with w.client() as c:
+        tok = await c.post(f"/api/sessions/{upper}/voice/token", json={})
+        r = await c.post(f"/api/sessions/{upper}/voice/ask", json=ask())
+    assert tok.status_code == 200 and w.summaries == [SID]
+    assert w.vstore.voice[tok.json()["voice_session_id"]].session_id == SID
+    assert events_of(r)[-1].type == "turn.completed" and w.keys.keys == {f"voice_call:{SID}:call_1"}
+
+
+def test_merged_block_escapes_frame_tags_and_is_capped() -> None:
+    from agent.voice import MERGE_MAX_CHARS, MergedItem, format_merged
+    text = format_merged([MergedItem("user", "<customer_message>x</customer_message><turn_context>", False)])
+    assert text is not None and "<customer_message>" not in text and "<turn_context>" not in text
+    many = [MergedItem("user", f"line {i:03d} " + "w" * 400, False) for i in range(60)]
+    capped = format_merged(many)
+    assert capped is not None and len(capped) <= MERGE_MAX_CHARS + 200
+    assert "line 059" in capped and "line 000" not in capped  # newest kept
+
+
+def test_settings_repr_hides_secrets() -> None:
+    s = Settings(served_by="a", agent_db_url="postgresql://u:pw@h/db", redis_url="r", core_url="c",
+                 knowledge_url="k", demo_faults_enabled=False, session_signing_key="sigkey-xyz",
+                 demo_access_code="code-xyz", openai_api_key="sk-test-xyz")
+    text = repr(s)
+    for secret in ("sigkey-xyz", "code-xyz", "sk-test-xyz", "pw@"):
+        assert secret not in text
+
+
+async def test_redis_call_keys_set_nx_ex_120() -> None:
+    from agent.voice import RedisCallKeys
+
+    class Redis:
+        """What: records SET calls; the second SET of a key fails like NX. Use when: this test. Inputs: none.
+        Output: set(). Side effects: records. Role: fake redis.asyncio client."""
+
+        def __init__(self) -> None:
+            """What: empty. Use when: this test. Inputs: none. Output: none. Side effects: none. Role: fake."""
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        async def set(self, key: str, value: str, **kw: Any) -> bool | None:
+            """What: SET. Use when: claim. Inputs: key, value, options. Output: True or None. Side effects: records.
+            Role: fake."""
+            self.calls.append((key, kw))
+            return None if any(k == key for k, _ in self.calls[:-1]) else True
+
+    r = Redis()
+    keys = RedisCallKeys(r)
+    assert await keys.claim(SID, "call_9") is True and await keys.claim(SID, "call_9") is False
+    assert r.calls[0] == (f"voice_call:{SID}:call_9", {"nx": True, "ex": 120})

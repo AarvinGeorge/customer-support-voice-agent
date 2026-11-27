@@ -111,10 +111,10 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
         if not cfg.openai_api_key:
             log.error("OPENAI_API_KEY is not set: voice/token will answer 503")
 
-        async def summary(sid: str) -> Any:
-            """What: summary from the app's checkpointer. Use when: voice/token. Inputs: sid. Output: summary.
-            Side effects: one read. Role: closure."""
-            return await thread_summary(app.state.checkpointer, sid)
+        async def summary(sid: str, context: Any) -> Any:
+            """What: summary from the app's checkpointer. Use when: voice/token. Inputs: sid, RedactContext.
+            Output: summary. Side effects: one read. Role: closure."""
+            return await thread_summary(app.state.checkpointer, sid, context)
 
         return VoiceDeps(store=PgVoiceStore(pool), minter=OpenAIRealtimeMinter(http, cfg.openai_api_key),
                          voice_spec=spec, summary=summary)
