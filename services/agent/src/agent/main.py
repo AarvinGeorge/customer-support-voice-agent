@@ -1,22 +1,94 @@
-"""What: minimal stub FastAPI app for the agent service exposing health endpoints only.
-Use when: Compose needs a healthy agent container before the real service exists.
-Inputs: none. Output: ASGI app `app`. Side effects: none.
-Role: placeholder from CS-E-01.S3.T1; replaced by the real service, keep the health paths."""
-from fastapi import FastAPI
+"""What: the agent FastAPI app (skeleton from CS-E-03.S7.T1): headers, envelope, /api/healthz, /api/readyz.
+Use when: uvicorn runs `agent.main:app` (Compose agent_a, agent_b); tests call create_app with fake probes.
+Inputs: Settings (env); optional probes dict (tests).
+Output: create_app(settings, probes) and the module-level ASGI `app`.
+Side effects: the lifespan opens a psycopg pool (agent_app), a Redis client and an httpx client and
+closes them on shutdown; nothing connects at import time.
+Role: composition root of the HTTP service. Turn, session and voice routes arrive in later S7 tasks.
+"""
+from __future__ import annotations
 
-app = FastAPI(title="quillstack-agent (stub)")
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
+
+import httpx
+from contracts import limits
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from agent.readiness import Probe, build_probes, readiness
+from agent.settings import Settings
+from agent.web import install_http
 
 
-@app.get("/api/healthz")
-def healthz() -> dict[str, str]:
-    """What: liveness probe. Use when: a caller checks the process is up.
-    Inputs: none. Output: {"status": "alive"}. Side effects: none. Role: Compose healthcheck target."""
-    return {"status": "alive"}
+def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None = None) -> FastAPI:
+    """What: build the app.
+    Use when: process start (no args) or tests (settings and fake probes).
+    Inputs: Settings (default from env); probes keyed redis, postgres, core, knowledge (default: real
+    probes built in the lifespan).
+    Output: FastAPI app. Side effects: none until the lifespan runs.
+    Role: app factory."""
+    cfg = settings or Settings.from_env()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """What: open and close dependency clients when probes were not injected.
+        Use when: uvicorn startup and shutdown. Inputs: app. Output: none.
+        Side effects: pool, Redis and HTTP clients. Role: resource lifetime."""
+        if probes is not None:
+            app.state.probes = probes
+            yield
+            return
+        import redis.asyncio as aioredis
+        from psycopg_pool import AsyncConnectionPool
+
+        pool = AsyncConnectionPool(cfg.agent_db_url, min_size=1, max_size=4, open=False,
+                                   timeout=limits.POSTGRES_CHECKPOINTER_TIMEOUT_S,
+                                   kwargs={"connect_timeout": int(limits.POSTGRES_CHECKPOINTER_TIMEOUT_S)})
+        await pool.open(wait=False)  # never block startup on the database; readyz reports it
+        rds = aioredis.from_url(cfg.redis_url, socket_timeout=limits.REDIS_TIMEOUT_S,
+                                socket_connect_timeout=limits.REDIS_TIMEOUT_S)
+        http = httpx.AsyncClient(timeout=limits.CORE_READ_TIMEOUT_S)
+        app.state.pg_pool, app.state.redis, app.state.http = pool, rds, http
+        app.state.probes = build_probes(pg_pool=pool, redis_client=rds, http=http, core_url=cfg.core_url,
+                                        knowledge_url=cfg.knowledge_url)
+        try:
+            yield
+        finally:
+            await http.aclose()
+            await rds.aclose()
+            await pool.close()
+
+    app = FastAPI(title="quillstack-agent", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.settings = cfg
+    if probes is not None:
+        app.state.probes = probes
+    install_http(app, cfg.served_by)
+
+    @app.get("/api/healthz")
+    async def healthz() -> dict[str, str]:
+        """What: liveness. Use when: a caller checks the process is up. Inputs: none.
+        Output: {"status": "alive"}. Side effects: none. Role: doc 07 s2.2."""
+        return {"status": "alive"}
+
+    @app.get("/api/readyz")
+    async def readyz(request: Request) -> Any:
+        """What: readiness with contract version, dependency states and the fault flag.
+        Use when: Compose healthcheck, Caddy, the drawer. Inputs: request.
+        Output: AgentReady JSON, 200 (ready or degraded) or 503 (not_ready). Side effects: probes.
+        Role: doc 07 s2.2 last row."""
+        code, body = await readiness(request.app.state.probes, cfg.demo_faults_enabled)
+        return JSONResponse(body.model_dump(mode="json"), status_code=code)
+
+    return app
 
 
-@app.get("/api/readyz")
-def readyz() -> dict[str, str]:
-    """What: readiness probe (stub: always ready, no dependency checks yet).
-    Use when: Compose healthcheck and Caddy health checks. Inputs: none.
-    Output: {"status": "stub"}. Side effects: none. Role: becomes the real readyz of doc 07 later."""
-    return {"status": "stub"}
+def __getattr__(name: str) -> Any:
+    """What: lazy module attribute `app` so importing agent.main (tests) does not read the environment.
+    Use when: uvicorn resolves `agent.main:app`. Inputs: attribute name. Output: the app.
+    Side effects: builds the app once from env. Role: ASGI entry point."""
+    if name == "app":
+        global app
+        app = create_app()
+        return app
+    raise AttributeError(name)
