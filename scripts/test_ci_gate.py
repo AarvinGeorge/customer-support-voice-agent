@@ -9,8 +9,6 @@ import os
 import subprocess
 from pathlib import Path
 
-import pytest
-
 GATE = Path(__file__).resolve().parent / "ci_gate.sh"
 SLUG = "AarvinGeorge/customer-support-voice-agent"
 STUB = """#!/usr/bin/env bash
@@ -33,8 +31,7 @@ def _git(cwd: Path, *args: str, env: dict) -> str:
     return subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True, text=True).stdout.strip()
 
 
-@pytest.fixture
-def world(tmp_path: Path) -> dict:
+def _world(tmp_path: Path) -> dict:
     """What: build origin, a clone (main checkout) and a linked lane worktree with PRs 1 (clean pass), 2 (conflict),
     3 (failing check). Use when: every gate test. Inputs: tmp_path. Output: dict of paths and env.
     Side effects: files under tmp_path. Role: fixture."""
@@ -112,9 +109,10 @@ def _assert_clean(w: dict) -> None:
     assert not (w["main"] / ".git" / "ci-gate.lock").exists()
 
 
-def test_clean_pass_posts_success_with_main_sha(world: dict) -> None:
+def test_clean_pass_posts_success_with_main_sha(tmp_path: Path) -> None:
     """What: PR 1 merges cleanly and the stub passes. Use when: CI. Inputs: fixture. Output: assertions.
     Side effects: none outside tmp. Role: the green path."""
+    world = _world(tmp_path)
     r = _gate(world["lane"], world["env"], "1")
     assert r.returncode == 0, r.stdout + r.stderr
     head = _git(world["bare"], "rev-parse", "refs/pull/1/head", env=world["env"])
@@ -124,9 +122,10 @@ def test_clean_pass_posts_success_with_main_sha(world: dict) -> None:
     _assert_clean(world)
 
 
-def test_dirty_merge_posts_failure(world: dict) -> None:
+def test_dirty_merge_posts_failure(tmp_path: Path) -> None:
     """What: PR 2 conflicts with main. Use when: CI. Inputs: fixture. Output: exit 1, failure posted.
     Side effects: none outside tmp. Role: refusal path (dirty merge)."""
+    world = _world(tmp_path)
     r = _gate(world["lane"], world["env"], "2")
     assert r.returncode == 1, r.stdout + r.stderr
     [call] = _posts(world)
@@ -134,9 +133,10 @@ def test_dirty_merge_posts_failure(world: dict) -> None:
     _assert_clean(world)
 
 
-def test_failing_check_posts_failure(world: dict) -> None:
+def test_failing_check_posts_failure(tmp_path: Path) -> None:
     """What: PR 3 makes ci_local.sh exit 1. Use when: CI. Inputs: fixture. Output: exit 1, failure posted.
     Side effects: none outside tmp. Role: proves the gate can go red on a check."""
+    world = _world(tmp_path)
     r = _gate(world["lane"], world["env"], "3")
     assert r.returncode == 1, r.stdout + r.stderr
     [call] = _posts(world)
@@ -144,17 +144,19 @@ def test_failing_check_posts_failure(world: dict) -> None:
     _assert_clean(world)
 
 
-def test_main_checkout_is_refused(world: dict) -> None:
+def test_main_checkout_is_refused(tmp_path: Path) -> None:
     """What: running from the main checkout (not a linked worktree) refuses and posts nothing. Use when: CI.
     Inputs: fixture. Output: exit 2. Side effects: none. Role: wrong cwd (never development/)."""
+    world = _world(tmp_path)
     r = _gate(world["main"], world["env"], "1")
     assert r.returncode == 2 and "main checkout" in r.stderr
     assert _posts(world) == []
 
 
-def test_outside_git_is_refused(world: dict) -> None:
+def test_outside_git_is_refused(tmp_path: Path) -> None:
     """What: running outside any git checkout refuses. Use when: CI. Inputs: fixture. Output: exit 2.
     Side effects: none. Role: wrong cwd."""
+    world = _world(tmp_path)
     outside = world["tmp"] / "nowhere"
     outside.mkdir()
     r = _gate(outside, world["env"], "1")
@@ -162,16 +164,18 @@ def test_outside_git_is_refused(world: dict) -> None:
     assert _posts(world) == []
 
 
-def test_bad_pr_number_is_refused(world: dict) -> None:
+def test_bad_pr_number_is_refused(tmp_path: Path) -> None:
     """What: a non-numeric PR argument refuses. Use when: CI. Inputs: fixture. Output: exit 2.
     Side effects: none. Role: usage guard."""
+    world = _world(tmp_path)
     r = _gate(world["lane"], world["env"], "1;rm")
     assert r.returncode == 2 and _posts(world) == []
 
 
-def test_held_lock_is_refused(world: dict) -> None:
+def test_held_lock_is_refused(tmp_path: Path) -> None:
     """What: a second concurrent run (lock held) refuses and leaves the lock alone. Use when: CI. Inputs: fixture.
     Output: exit 2. Side effects: none. Role: one gate run at a time (shared pg test ports)."""
+    world = _world(tmp_path)
     lock = world["main"] / ".git" / "ci-gate.lock"
     lock.mkdir()
     r = _gate(world["lane"], world["env"], "1")

@@ -2,7 +2,8 @@
 # What: the local merge gate (D-068). Fetches PR <n>, merges its head onto the latest origin/main in a throwaway worktree
 #   under this checkout's ignored .tmp/, runs scripts/ci_local.sh there, and posts the commit status `local-ci` on the PR
 #   head sha: success only when every check passed, failure otherwise. The description names the main sha tested.
-# Use when: a PR is ready to merge and GitHub Actions cannot run (spending limit). `scripts/ci_gate.sh 74`.
+# Use when: BACKUP gate (D-068): GitHub Actions is the gate; run this when Actions cannot run (for example a spending
+#   limit) or to test a PR merged onto the latest main locally. `scripts/ci_gate.sh 74`.
 #   Run it from a lane worktree (a linked git worktree), never from the main checkout `development/`.
 # Inputs: the PR number. Env: CI_GATE_REPO (default AarvinGeorge/customer-support-voice-agent), CI_GATE_REMOTE (default
 #   origin), CI_GATE_NO_POST=1 (run without posting a status; for dry runs).

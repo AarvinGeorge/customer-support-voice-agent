@@ -1,5 +1,5 @@
 # What: the CI gate for every pull request and every push to main (CS-E-01.S5.T1; doc 06 s10; doc 07 s1.4, s15.1 row 5).
-# Use when: GitHub runs it automatically when Actions billing allows. While it does not (D-068), scripts/ci_gate.sh runs
+# Use when: GitHub runs it automatically (the merge gate). Backup (D-068): if Actions cannot run, scripts/ci_gate.sh runs
 #   the same checks locally on the PR merged onto main and posts the `local-ci` status.
 # Inputs: the repo. Needs no secrets (tests use fakes; nothing here calls a provider).
 # Output: one green or red check per job: python (ruff, pyright, pytest per project incl. infra), repo tests, web, gitleaks, contracts-sync, import-guard, descriptors, compose, pg tests.
