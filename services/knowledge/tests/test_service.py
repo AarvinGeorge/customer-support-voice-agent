@@ -79,9 +79,9 @@ def test_trace_ids_minted_and_echoed(client):
     r = client.get("/healthz")
     assert re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", r.headers["X-Trace-Id"])
     assert r.headers["X-Request-Id"]
-    r = client.get("/healthz", headers={"X-Trace-Id": "0192f1c8-1111-7222-8333-444455556666", "X-Request-Id": "rid-1"})
+    r = client.get("/healthz", headers={"X-Trace-Id": "0192f1c8-1111-7222-8333-444455556666", "X-Request-Id": "11111111-2222-4333-8444-555555555555"})
     assert r.headers["X-Trace-Id"] == "0192f1c8-1111-7222-8333-444455556666"
-    assert r.headers["X-Request-Id"] == "rid-1"
+    assert r.headers["X-Request-Id"] == "11111111-2222-4333-8444-555555555555"
 
 
 def test_unknown_path_and_bad_method_use_envelope(client):
@@ -98,6 +98,8 @@ def test_unhandled_error_uses_envelope(client):
     Inputs: a route that raises. Output: assertion. Side effects: adds a route. Role: no raw 500s."""
     @client.app.get("/boom")
     def boom():
+        """What: a route that always raises. Use when: testing the 500 envelope. Inputs: none. Output: none.
+        Side effects: raises. Role: test helper."""
         raise RuntimeError("secret detail")
     r = client.get("/boom")
     assert r.status_code == 500
@@ -126,3 +128,66 @@ def test_readyz_503_when_no_chunks(client):
     r = client.get("/readyz")
     assert r.status_code == 503 and _envelope(r).error.code == "RETRIEVAL_UNAVAILABLE"
     assert _envelope(r).error.details["chunks"] == 0
+
+
+def test_request_log_line_carries_trace_id(client, caplog):
+    """What: each request writes one INFO line with its trace id, and the logger is configured to emit it.
+    Use when: CI. Inputs: a request with a known trace id. Output: assertion on the log text. Side effects: none.
+    Role: review PR9 I1 (doc 07 s1.2 'written in every log line'); a mutation that deletes the log call must fail."""
+    import logging
+    caplog.set_level(logging.INFO, logger="knowledge")
+    client.get("/healthz", headers={"X-Trace-Id": "0192f1c8-1111-7222-8333-444455556666"})
+    assert any("trace_id=0192f1c8-1111-7222-8333-444455556666" in r.getMessage() for r in caplog.records)
+
+
+def test_knowledge_logger_is_configured_to_emit_info():
+    """What: after create_app the 'knowledge' logger has a handler and level INFO, so the line above reaches
+    stderr under uvicorn. Use when: CI. Inputs: none. Output: assertion. Side effects: none.
+    Role: review PR9 I1 root cause (nothing configured the logger, INFO was dropped)."""
+    import logging
+
+    from knowledge.main import create_app
+    create_app()
+    lg = logging.getLogger("knowledge")
+    assert lg.level == logging.INFO and lg.handlers
+
+
+def test_docs_and_openapi_are_not_served(client):
+    """What: /docs, /redoc and /openapi.json are 404 envelopes (the service is token gated). Use when: CI.
+    Inputs: three GETs. Output: assertion. Side effects: none. Role: review PR9 M2."""
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 404, path
+
+
+def test_untrusted_ids_are_replaced_not_echoed(client):
+    """What: a 300-character or non-uuid X-Trace-Id and a non-uuid X-Request-Id are replaced by minted ids
+    (uuid7 and uuid4). Use when: CI. Inputs: hostile headers. Output: assertion. Side effects: none.
+    Role: review PR9 M3 and M7 (request id is a uuid4)."""
+    import re
+    r = client.get("/healthz", headers={"X-Trace-Id": "x" * 300, "X-Request-Id": "not a uuid\nINJECT"})
+    assert re.fullmatch(r"[0-9a-f-]{36}", r.headers["X-Trace-Id"]) and r.headers["X-Trace-Id"][14] == "7"
+    assert re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", r.headers["X-Request-Id"])
+    ok = "11111111-2222-4333-8444-555555555555"
+    assert client.get("/healthz", headers={"X-Request-Id": ok}).headers["X-Request-Id"] == ok
+
+
+def test_503_sets_retry_after_header(client):
+    """What: a 503 with retry_after_s also sends the Retry-After header. Use when: CI. Inputs: failing readyz.
+    Output: assertion. Side effects: patches the fake. Role: review PR9 M7."""
+    client.app.state.db.status = lambda: None
+    r = client.get("/readyz")
+    assert r.status_code == 503 and r.headers["Retry-After"] == "2"
+
+
+def test_startup_fails_without_db_url(monkeypatch):
+    """What: an unset KNOWLEDGE_DB_URL stops startup naming the variable. Use when: CI. Inputs: unset env.
+    Output: assertion. Side effects: env. Role: review PR9 M7 (fail loudly, not a later 503)."""
+    import pytest
+    from fastapi.testclient import TestClient
+
+    from knowledge.main import create_app
+    monkeypatch.setenv("KNOWLEDGE_TOKEN_AGENT", "t" * 20)
+    monkeypatch.delenv("KNOWLEDGE_DB_URL", raising=False)
+    with pytest.raises(RuntimeError, match="KNOWLEDGE_DB_URL"):
+        with TestClient(create_app()):
+            pass
