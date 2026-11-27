@@ -145,7 +145,8 @@ function browserDeps(): Required<VoiceClientDeps> {
  * Output: VoiceClient.
  * Side effects: none until connect.
  * Role: see module. Every connect gets an epoch; End or a failure bumps it, so a step that
- *   resolves after teardown (a late SDP answer) does nothing.
+ *   resolves after teardown (a late SDP answer, a stale mic grant) does nothing but release what it
+ *   got; a stale grant never touches the live call's stream (review PR #46 M1).
  */
 export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOptions): VoiceClient {
   const d: Required<VoiceClientDeps> = { ...browserDeps(), ...deps };
@@ -264,17 +265,18 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
     const run = ++epoch;
     const mic = d.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     update({ state: nextVoiceState(snap.state, "start"), error: null, caption: null });
+    let stream: MediaStream;
     try {
-      media = await mic;
+      stream = await mic;
     } catch (err) {
       if (run === epoch) fail(micWords(err));
       return;
     }
     if (run !== epoch) {
-      for (const t of media.getTracks()) t.stop();
-      media = null;
+      for (const t of stream.getTracks()) t.stop();
       return;
     }
+    media = stream;
     try {
       const token = await apiFetch<VoiceToken>(`/api/sessions/${encodeURIComponent(sessionId)}/voice/token`, { method: "POST", body: {} }, api);
       if (run !== epoch) return;
@@ -293,7 +295,7 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
       peer.onconnectionstatechange = () => {
         if (run === epoch && peer.connectionState === "failed") fail(WORDS.dropped);
       };
-      for (const track of media.getAudioTracks()) peer.addTrack(track, media);
+      for (const track of stream.getAudioTracks()) peer.addTrack(track, stream);
       const channel = peer.createDataChannel("oai-events");
       dc = channel;
       const r = createVoiceRelay({

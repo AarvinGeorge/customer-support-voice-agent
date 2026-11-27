@@ -147,6 +147,19 @@ function outputFor(sent: Array<Record<string, unknown>>, callId: string): Record
   return msg === undefined ? undefined : (JSON.parse((msg.item as { output: string }).output) as Record<string, unknown>);
 }
 
+/**
+ * What: the metadata our last response.create carried, as Realtime echoes it on response.created.
+ * Use when: playing the say response back to the relay.
+ * Inputs: sent messages.
+ * Output: the metadata object (or null).
+ * Side effects: none.
+ * Role: test helper (review PR #46 M2).
+ */
+function sayTag(sent: Array<Record<string, unknown>>): unknown {
+  const create = [...sent].reverse().find((m) => m.type === "response.create") as { response?: { metadata?: unknown } } | undefined;
+  return create?.response?.metadata ?? null;
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
 });
@@ -235,7 +248,7 @@ describe("voice relay", () => {
     await relay.settled();
     expect(RELAY_FAILURE_SAY).toBe("I couldn't finish that just now. Please check the chat for the result before trying again.");
     expect(outputFor(sent, "call_1")).toEqual({ say: RELAY_FAILURE_SAY, escalated: false });
-    expect(sent.at(-1)).toEqual({ type: "response.create" });
+    expect(sent.at(-1)).toMatchObject({ type: "response.create" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const turn = Object.values(store.getState().conversation.turns)[0];
     expect(turn?.phase).toBe("failed");
@@ -293,12 +306,12 @@ describe("voice relay", () => {
   });
 
   it("barge-in on the agent's say sets last_assistant_interrupted on the next relay", async () => {
-    const { relay, fetchMock } = harness();
+    const { relay, fetchMock, sent } = harness();
     for (const e of question("item_u1", "resp_1")) relay.handle(e);
     relay.handle({ type: "conversation.item.input_audio_transcription.completed", item_id: "item_u1", transcript: "x" });
     relay.handle(callDone("resp_1", "call_1"));
     await relay.settled();
-    relay.handle({ type: "response.created", response: { id: "resp_say", status: "in_progress", output: [] } });
+    relay.handle({ type: "response.created", response: { id: "resp_say", status: "in_progress", output: [], metadata: sayTag(sent) } });
     relay.handle({ type: "output_audio_buffer.started", response_id: "resp_say" });
     for (const e of question("item_u2", "resp_2")) relay.handle(e);
     relay.handle({ type: "conversation.item.input_audio_transcription.completed", item_id: "item_u2", transcript: "y" });
@@ -322,5 +335,72 @@ describe("voice relay", () => {
     relay.close();
     await relay.settled();
     expect(sent).toEqual([]);
+  });
+
+  it("an armed demo fault goes on the next voice/ask as X-Demo-Fault, once, and disarms (doc 07 s10, review PR #46 I1)", async () => {
+    const { relay, store, fetchMock } = harness();
+    store.getState().armFault("tool_error");
+    for (const e of question("item_u1", "resp_1")) relay.handle(e);
+    relay.handle({ type: "conversation.item.input_audio_transcription.completed", item_id: "item_u1", transcript: "x" });
+    relay.handle(callDone("resp_1", "call_1"));
+    await relay.settled();
+    for (const e of question("item_u2", "resp_2")) relay.handle(e);
+    relay.handle({ type: "conversation.item.input_audio_transcription.completed", item_id: "item_u2", transcript: "y" });
+    relay.handle(callDone("resp_2", "call_2"));
+    await relay.settled();
+    const headers = fetchMock.mock.calls.map(([, init]) => new Headers((init as RequestInit).headers).get("x-demo-fault"));
+    expect(headers).toEqual(["tool_error", null]);
+    expect(store.getState().armedFault).toBeNull();
+  });
+
+  it("the fixed line is sent 25 s after the call even when the transcript never arrives (review PR #46 M3)", async () => {
+    const fetchMock = stallingFetch();
+    const { relay, sent } = harness(fetchMock as unknown as ReturnType<typeof sseFetch>);
+    for (const e of question("item_u1", "resp_1")) relay.handle(e);
+    relay.handle(callDone("resp_1", "call_1"));
+    await vi.advanceTimersByTimeAsync(24_900);
+    expect(outputFor(sent, "call_1")).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(100);
+    await relay.settled();
+    expect(outputFor(sent, "call_1")).toEqual({ say: RELAY_FAILURE_SAY, escalated: false });
+  });
+
+  it("an empty final transcript is sent as null with transcript_final false (review PR #46 M4)", async () => {
+    const { relay, fetchMock, store } = harness();
+    for (const e of question("item_u1", "resp_1")) relay.handle(e);
+    relay.handle({ type: "conversation.item.input_audio_transcription.completed", item_id: "item_u1", transcript: "   " });
+    relay.handle(callDone("resp_1", "call_1"));
+    await relay.settled();
+    expect(posted(fetchMock)[0]?.body).toMatchObject({ user_item_id: "item_u1", user_transcript: null, transcript_final: false });
+    expect(store.getState().thread.filter((i) => i.kind === "user")).toHaveLength(0);
+  });
+
+  it("a call still inside the transcript wait when the call ends never posts (review PR #46 M5)", async () => {
+    const { relay, fetchMock, sent } = harness();
+    for (const e of question("item_u1", "resp_1")) relay.handle(e);
+    relay.handle(callDone("resp_1", "call_1"));
+    await vi.advanceTimersByTimeAsync(500);
+    relay.close();
+    await vi.advanceTimersByTimeAsync(1500);
+    await relay.settled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
+  it("a VAD response created between our response.create and the say is not taken for the say (review PR #46 M2)", async () => {
+    const { relay, fetchMock, sent } = harness();
+    for (const e of question("item_u1", "resp_1")) relay.handle(e);
+    relay.handle({ type: "conversation.item.input_audio_transcription.completed", item_id: "item_u1", transcript: "x" });
+    relay.handle(callDone("resp_1", "call_1"));
+    await relay.settled();
+    relay.handle({ type: "response.created", response: { id: "resp_vad", status: "in_progress", output: [], metadata: null } });
+    relay.handle({ type: "response.created", response: { id: "resp_say", status: "in_progress", output: [], metadata: sayTag(sent) } });
+    relay.handle({ type: "output_audio_buffer.started", response_id: "resp_say" });
+    for (const e of question("item_u2", "resp_2")) relay.handle(e);
+    relay.handle({ type: "conversation.item.input_audio_transcription.completed", item_id: "item_u2", transcript: "y" });
+    relay.handle(callDone("resp_2", "call_2"));
+    await relay.settled();
+    expect(sayTag(sent)).not.toBeNull();
+    expect(posted(fetchMock).map((p) => p.body.last_assistant_interrupted)).toEqual([false, true]);
   });
 });

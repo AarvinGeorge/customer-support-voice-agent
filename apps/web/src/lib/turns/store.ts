@@ -214,7 +214,7 @@ export function createTurnStore(): StoreApi<TurnStoreState> {
   ): Promise<StreamResult> => {
     const get = api.getState;
     const set = api.setState;
-    const fault = chat ? get().takeFault() : null;
+    const fault = get().takeFault();
     const mine = epoch;
     const ctrl = new AbortController();
     const outer = opts.signal;
