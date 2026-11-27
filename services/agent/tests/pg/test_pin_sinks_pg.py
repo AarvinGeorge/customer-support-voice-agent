@@ -1,7 +1,9 @@
 """What: the doc 07 s11.1 sink test (CS-E-03.S7.T9). "QS-10423 4821" and its spoken form go through the chat and voice
 paths of the real app (Ingress, create_agent graph, AsyncPostgresSaver, PgTurnStore, PgVoiceStore) on the Compose
 Postgres; then the checkpoint tables, agent.turns, agent.turn_events, agent.transcript_items, agent.sessions, the
-outbound core and knowledge requests, the application logs and the LangSmith payloads are searched for the raw PIN.
+outbound core and knowledge requests (ticket requests among them), the scope classifier and grounding verifier inputs,
+the application logs and the LangSmith payloads are searched for the raw PIN. A failing-gate phase (Gate 2 fails with a
+commitment, Gate 1 none with the classifier ON and OFF) runs the ticket and gate input paths (PR #57 follow-up, m4).
 Use when: scripts/pg_tests.sh (CI job "pg tests") with AGENT_PG_TEST_URL pointing at agent_app.
 Inputs: env AGENT_PG_TEST_URL. Output: pass or fail; a missing variable FAILS.
 Side effects: one session (plus turns, items, checkpoint rows), deleted afterwards; LangSmith requests are captured
@@ -24,6 +26,7 @@ import httpx
 import pytest
 import requests
 from contracts.events import KEEPALIVE, parse_event
+from contracts.stubs import examples as ex
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -184,16 +187,29 @@ class NoMinter:
 
 
 class Fixed(GenericFakeChatModel):
-    """What: a fake gate model that always gives the same reply. Use when: the scope classifier ("ON") and the
-    grounding verifier (zero claims passes, D-059) of this test. Inputs: reply. Output: AI message.
-    Side effects: none. Role: lets the echo answer through both gates so the sinks hold message text."""
+    """What: a fake gate model that records its inputs and replies per the shared mode: the scope classifier "ON"
+    (or "OFF" when mode["scope"] is "OFF"); the grounding verifier zero claims (passes, D-059), or with
+    mode["verifier"] == "fail" one unsupported claim quoting its input plus a commitment (escalate with a ticket).
+    Use when: the two gates of this test. Inputs: role, shared mode dict. Output: AI message.
+    Side effects: records every call in `seen`. Role: gate inputs become a searched sink, and the failing paths run."""
 
-    reply: str = ""
+    role: str = ""
+    mode: dict[str, str] = {}
+    seen: list[Any] = []
 
     def _generate(self, messages, stop=None, run_manager=None, **kw):  # type: ignore[override]
-        """What: the fixed reply. Use when: model call. Inputs: messages. Output: ChatResult. Side effects: none.
-        Role: fake."""
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.reply))])
+        """What: the reply for the current mode. Use when: model call. Inputs: messages. Output: ChatResult.
+        Side effects: records. Role: fake."""
+        self.seen.append(list(messages))
+        if self.role == "scope_classifier":
+            reply = self.mode.get("scope", "ON")
+        elif self.mode.get("verifier") == "fail":
+            quoted = " ".join(str(m.content) for m in messages)[-300:]
+            reply = json.dumps({"claims": [{"text": quoted, "supported": False, "source_id": "none"}],
+                                "commitment": True})
+        else:
+            reply = '{"claims": [], "commitment": false}'
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=reply))])
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kw):  # type: ignore[override]
         """What: async twin. Use when: model call. Inputs: messages. Output: ChatResult. Side effects: none.
@@ -205,18 +221,17 @@ class Registry:
     """What: build(role) returns the echo model. Use when: build_agent_runtime. Inputs: none. Output: build.
     Side effects: none. Role: fake ModelRegistry."""
 
-    def __init__(self) -> None:
-        """What: one echo model. Use when: setup. Inputs: none. Output: none. Side effects: none. Role: fake."""
+    def __init__(self, mode: dict[str, str]) -> None:
+        """What: one echo model and the two recording gate fakes. Use when: setup. Inputs: shared mode dict.
+        Output: none. Side effects: none. Role: fake."""
         self.model = Echo(messages=iter([]), disable_streaming=True, seen=[])
+        self.gates = {r: Fixed(messages=iter([]), role=r, mode=mode, seen=[])
+                      for r in ("scope_classifier", "grounding_verifier")}
 
     def build(self, role: str) -> Any:
-        """What: the echo for the agent roles, fixed replies for the two gates. Use when: assembly. Inputs: role.
-        Output: model. Side effects: none. Role: fake."""
-        if role == "scope_classifier":
-            return Fixed(messages=iter([]), reply="ON")
-        if role == "grounding_verifier":
-            return Fixed(messages=iter([]), reply='{"claims": [], "commitment": false}')
-        return self.model
+        """What: the echo for the agent roles, the recording fakes for the two gates. Use when: assembly.
+        Inputs: role. Output: model. Side effects: none. Role: fake."""
+        return self.gates.get(role, self.model)
 
     def cost_for_model(self, model: str, usage: Any) -> float:
         """What: zero cost. Use when: TurnRunner usage. Inputs: model, usage. Output: 0.0. Side effects: none.
@@ -253,13 +268,14 @@ def text_of(value: Any) -> str:
     return str(value)
 
 
-def search_body() -> dict[str, Any]:
-    """What: a contract SearchResponse with no relevant chunk (Gate 1 has nothing to say; the echo answers anyway).
-    Use when: the fake knowledge service. Inputs: none. Output: dict. Side effects: none. Role: fixture."""
+def search_body(verdict: str = "pass") -> dict[str, Any]:
+    """What: a contract SearchResponse with no relevant chunk (verdict pass: the echo answers anyway; verdict none:
+    Gate 1 runs the scope classifier). Use when: the fake knowledge service. Inputs: verdict. Output: dict.
+    Side effects: none. Role: fixture."""
     return {"request_id": "r", "trace_id": "t", "corpus_version": "v1", "embedding_model": "m",
             "query": {"raw": "q", "normalized": "q", "codes": [], "unknown_codes": []}, "allowed_tiers": ["all"],
             "chunks": [],
-            "confidence": {"verdict": "pass", "reason": "above_threshold", "top_cosine": 0.7, "tau_low": 0.3,
+            "confidence": {"verdict": verdict, "reason": "above_threshold" if verdict == "pass" else "no_match", "top_cosine": 0.7, "tau_low": 0.3,
                            "tau_high": 0.45, "support_count": 1, "code_match": False,
                            "legs": {"vector": "ok", "keyword": "ok"}, "calibration_id": None,
                            "calibration_status": "provisional", "calibration_stale": False},
@@ -339,12 +355,19 @@ async def awaiting(pool: Any, sid: str) -> bool:
 async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixture) -> None:
     sids: list[str] = []
     outbound: list[bytes] = []
+    tickets: list[bytes] = []
+    gate_cfg: dict[str, str] = {}
 
     def services(request: httpx.Request) -> httpx.Response:
-        """What: fake core and knowledge. Use when: tool calls and memory refresh. Inputs: request.
-        Output: response. Side effects: records the body. Role: the outbound HTTP sink."""
+        """What: fake core and knowledge. Use when: tool calls, tickets and memory refresh. Inputs: request.
+        Output: response (a ticket for POST /v1/tickets, else a search). Side effects: records the body.
+        Role: the outbound HTTP sink."""
         outbound.append(str(request.url).encode() + b" " + request.content)
-        return httpx.Response(200, json=search_body())
+        if request.url.path == "/v1/tickets":
+            tickets.append(request.content)
+            ref = ex.TICKET_REF.model_dump(mode="json")
+            return httpx.Response(200, json={"ticket": ref, "merged": False, "created": True})
+        return httpx.Response(200, json=search_body(gate_cfg.get("search", "pass")))
 
     capture = Capture()
     tracer_client = build_langsmith_client(api_key="lsv2_test_not_real", api_url="http://langsmith.test",
@@ -356,7 +379,7 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                    core_url="http://core.test:8000", knowledge_url="http://knowledge.test:8000",
                    demo_faults_enabled=False, site_origin=ORIGIN, session_signing_key=KEY, demo_access_code="c",
                    core_token_agent="core-agent-tok", knowledge_token_agent="knowledge-agent-tok")
-    registry = Registry()
+    registry = Registry(gate_cfg)
     bodies: list[Any] = []
     refused: list[str] = []
     try:
@@ -475,6 +498,27 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                         await chat(sid, first)
                         assert await awaiting(pool, sid), f"no awaiting flag after {first!r}"
                         assert (await chat(sid, second))[-1].type == "turn.completed"
+                    # 8. Failing gates (re-review r2 m4): Gate 2 fails with a commitment (claims event, ticket with
+                    # the customer's last words); Gate 1 verdict none with the classifier ON (escalate, ticket) and
+                    # OFF (decline). Each with a voice PIN, a chat PIN while awaiting and a split chat PIN.
+                    for gate_mode in ({"verifier": "fail"}, {"search": "none", "scope": "ON"},
+                                      {"search": "none", "scope": "OFF"}):
+                        gate_cfg.clear()
+                        gate_cfg.update(gate_mode)
+                        sid, vs_id = await new_session(pool, sids)
+                        r = await post(sid, "/voice/ask", voice_body(vs_id, f"Customer says {RAW}",
+                                                                     f"{SPOKEN} {KEPT}", f"item_g{len(sids)}"))
+                        assert events_of(r)[-1].type == "turn.completed"
+                        sid, _ = await new_session(pool, sids)
+                        async with pool.connection() as conn:
+                            await conn.execute("UPDATE agent.sessions SET awaiting_verification = true "
+                                               "WHERE session_id = %s", (sid,))
+                        assert (await chat(sid, f"it is 4 8 2 1 I think, account {KEPT}"))[-1].type == "turn.completed"
+                        sid, _ = await new_session(pool, sids)
+                        await chat(sid, "my PIN is")
+                        assert (await chat(sid, f"4821 by the way, {KEPT} was charged twice"))[-1].type == \
+                            "turn.completed"
+                    gate_cfg.clear()
         tracer_client.flush()
         await trajectory.flush()
         assert trajectory.pending() == 0
@@ -493,6 +537,9 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
         sinks = {table: "\n".join(rows[table] for rows in per_session) for table in per_session[0]}
         sinks["outbound core and knowledge requests"] = text_of(b"\n".join(outbound))
         sinks["model inputs"] = repr(registry.model.seen)
+        sinks["scope classifier inputs"] = repr(registry.gates["scope_classifier"].seen)
+        sinks["grounding verifier inputs"] = repr(registry.gates["grounding_verifier"].seen)
+        sinks["ticket requests"] = text_of(b"\n".join(tickets))
         sinks["langsmith payloads"] = b"\n".join(capture.bodies).decode("utf-8", "replace")
         formatter = RedactingFormatter(LOG_FORMAT)
         sinks["application logs (formatted)"] = "\n".join(formatter.format(r) for r in caplog.records)
@@ -501,7 +548,8 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
         # Positive control: every sink that holds message text holds the kept account id, so the search below
         # looks at real content (the logs hold no message text by design, doc 07 s11 "never in logs").
         for name in ("checkpoint_blobs", "checkpoint_writes", "turns", "turn_events", "transcript_items",
-                     "outbound core and knowledge requests", "model inputs", "langsmith payloads"):
+                     "outbound core and knowledge requests", "model inputs", "langsmith payloads",
+                     "scope classifier inputs", "grounding verifier inputs", "ticket requests"):
             assert KEPT in sinks[name], f"{name} holds no message text, so its search would prove nothing"
         assert caplog.records, "no log records were captured"
 
