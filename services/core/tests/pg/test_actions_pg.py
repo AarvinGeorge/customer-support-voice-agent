@@ -52,7 +52,7 @@ def build_world(c: psycopg.Connection) -> SimpleNamespace:
                             (w.due_owner, w.due, "owner")):
         c.execute("INSERT INTO users (id, account_id, display_name, role, pin_hmac) VALUES (%s,%s,'Priya',%s,%s)",
                   (uid, acct, role, uuid.uuid4().bytes))
-    pfx = random.randrange(1000, 9999)
+    pfx = random.randrange(1000, 9990)  # two increments follow: keep the prefix at 4 digits (CH ids are 8 digits)
 
     def charge(acct: str, ending: str, days_ago: int, cents: int, invoice: str | None = None) -> str:
         """What: insert one paid charge. Use when: building the world. Inputs: account, last four of the id, age in
@@ -613,3 +613,16 @@ def test_refused_commits_and_prepares_are_audited(world):
     r = world.prepare(world.s_owner2, {"ending": "7771"})
     assert err(r) == "AMBIGUOUS_REFERENCE"
     assert [a["code"] for a in audit_rows(world, None, "action_prepare_refused", world.s_owner2)] == ["AMBIGUOUS_REFERENCE"]
+
+
+def test_world_ids_stay_valid_when_every_random_draw_is_at_the_top_of_its_range(app_url, migrated, monkeypatch):
+    """What: build the world with every random draw at its maximum and roll it back. Use when: guarding the id
+    patterns (CH-8 digits, U-4 digits, QS-5 digits) against overflow of the random prefixes (CI flake: pfx 9998 or
+    9999 plus the two increments gave CH-100000500). Inputs: app_url, migrated, monkeypatch. Output: none.
+    Side effects: INSERTs inside a transaction that is rolled back. Role: regression for the pg setup flake."""
+    monkeypatch.setattr(random, "randrange", lambda a, b=None: (b if b is not None else a) - 1)
+    with psycopg.connect(app_url) as c:
+        try:
+            build_world(c)
+        finally:
+            c.rollback()
