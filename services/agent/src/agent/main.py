@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from agent.access import install_access_gate, install_not_owned_handler
 from agent.api import install_api
 from agent.composition import wire_app
+from agent.limits.ratelimit import install_limits
 from agent.assembly import CheckpointerFactory, postgres_checkpointer_factory
 from agent.readiness import Probe, build_probes, readiness
 from agent.routes.turns import install_turns
@@ -129,6 +130,7 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
     install_access_gate(app)  # before install_http: ids and headers wrap the gate
     install_http(app, cfg.served_by)
     install_not_owned_handler(app)
+    install_limits(app)
     for name, value in ("SESSION_SIGNING_KEY", cfg.session_signing_key), ("DEMO_ACCESS_CODE", cfg.demo_access_code):
         if not value:
             log.error("%s is not set: nobody can sign in until it is", name)

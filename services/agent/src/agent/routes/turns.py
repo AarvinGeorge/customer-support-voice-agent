@@ -11,10 +11,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 
 from agent.access import owned_session
 from agent.ingress import Ingress, IngressError, IngressInput, input_kind_of, parse_turn_request, to_response
+from agent.limits.ratelimit import limit_turn
 from agent.web import error_response
 
 
@@ -30,7 +31,7 @@ def install_turns(app: FastAPI) -> None:
     """What: register the turn route. Use when: once in create_app. Inputs: app. Output: none.
     Side effects: mutates app. Role: route wiring."""
 
-    @app.post("/api/sessions/{sid}/turns")
+    @app.post("/api/sessions/{sid}/turns", dependencies=[Depends(limit_turn)])
     async def post_turn(sid: str, request: Request) -> Any:
         """What: run one chat turn and stream its events.
         Use when: the console sends text or a card press. Inputs: session id, TurnRequest JSON.

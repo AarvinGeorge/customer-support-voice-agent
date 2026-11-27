@@ -23,13 +23,14 @@ from contracts.agent_api import TranscriptItemIn, TranscriptPost, VoiceAskReques
 from contracts.base import StrictModel
 from contracts.redact import RedactContext, scan_text
 from contracts.trust import wrap_voice_transcript
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from langchain_core.utils.uuid import uuid7
 
 from agent.access import owned_session
 from agent.assembly import run_config
 from agent.ingress import Ingress, IngressInput, SessionRow, TurnRow, to_response
+from agent.limits.ratelimit import limit_session_post, limit_turn, limit_voice_token
 from agent.models.config import RoleSpec
 from agent.realtime import MintedSecret, MintError, SessionSummary, build_session_config, render_instructions, \
     summary_from_thread
@@ -271,7 +272,7 @@ def install_voice(app: FastAPI) -> None:
     Inputs: app (reads app.state.voice and app.state.session_store). Output: none. Side effects: mutates app.
     Role: route wiring (the access gate already ran: cookie and Origin)."""
 
-    @app.post("/api/sessions/{sid}/voice/token")
+    @app.post("/api/sessions/{sid}/voice/token", dependencies=[Depends(limit_voice_token)])
     async def post_voice_token(sid: str, _: EmptyBody, request: Request) -> Any:
         """What: mint a Realtime client secret for this session and record the voice session.
         Use when: the mic click. Inputs: session id, `{}`. Output: VoiceToken (max_session_s 600).
@@ -294,7 +295,7 @@ def install_voice(app: FastAPI) -> None:
                          max_session_s=limits.VOICE_SESSION_MAX_S)
         return JSONResponse(out.model_dump(mode="json"), headers={"Cache-Control": "no-store"})
 
-    @app.post("/api/sessions/{sid}/voice/ask")
+    @app.post("/api/sessions/{sid}/voice/ask", dependencies=[Depends(limit_turn)])
     async def post_voice_ask(sid: str, body: VoiceAskRequest, request: Request) -> Any:
         """What: run one voice turn: step 3 here, then the shared ingress with mode="voice" (steps 4 to 16).
         Use when: the browser relays an ask_support_agent function call.
@@ -316,7 +317,7 @@ def install_voice(app: FastAPI) -> None:
             body=body))
         return to_response(request, result)
 
-    @app.post("/api/sessions/{sid}/transcript", status_code=204)
+    @app.post("/api/sessions/{sid}/transcript", status_code=204, dependencies=[Depends(limit_session_post)])
     async def post_transcript(sid: str, body: TranscriptPost, request: Request) -> Response:
         """What: store client-reported voice chatter for the step 12 merge.
         Use when: the browser flushes final transcription items. Inputs: session id, TranscriptPost.
