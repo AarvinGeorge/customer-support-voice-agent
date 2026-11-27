@@ -7,6 +7,7 @@ import pytest
 
 from core.auth import ROUTE_SCOPES, caller_scopes
 
+SID = "0197b5a4-7c3e-7f00-8000-000000000001"  # a uuid7 session id
 # doc 07 s1.4: caller name -> scopes.
 SCOPES = {
     "agent_tools": {"session.act_as", "identity.verify", "claims.read", "me.read", "billing.read",
@@ -20,7 +21,7 @@ SCOPES = {
 # doc 07 s3 scope column, only the routes the thin slice builds (doc 09 s1.2 lists the rest as designed only).
 SLICE_ROUTES = [
     ("POST", "/v1/identity/verify", "identity.verify"),
-    ("GET", "/v1/sessions/S-1/claims", "claims.read"),
+    ("GET", f"/v1/sessions/{SID}/claims", "claims.read"),
     ("GET", "/v1/me/context", "context.read"),
     ("GET", "/v1/me/charges", "billing.read"),
     ("GET", "/v1/me/tickets", "tickets.read_own"),
@@ -49,7 +50,7 @@ def test_registered_routes_are_exactly_the_slice_table(client):
     registered = {(m, p): s for (m, p), s in ROUTE_SCOPES.items()}
     expected = {}
     for m, p, s in SLICE_ROUTES:
-        template = (p.replace("S-1", "{session_id}").replace("PA-0000000A", "{pending_id}"))
+        template = (p.replace(SID, "{session_id}").replace("PA-0000000A", "{pending_id}"))
         expected[(m, template)] = s
     assert registered == expected
     served = {(m, r.path) for r in client.app.routes if r.path.startswith("/v1") for m in r.methods - {"HEAD"}}

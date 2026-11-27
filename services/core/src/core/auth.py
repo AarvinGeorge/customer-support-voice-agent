@@ -6,7 +6,7 @@ Side effects: scoped_route records the route's scope in ROUTE_SCOPES (import tim
 Role: doc 07 s1.2 to s1.4. Least privilege is by token: the scope table is in code, the test
 tests/test_scope_matrix.py re-types it from the doc and fails on any difference. Order of checks on a
 protected route: token (401 AUTH_INVALID), scope (403 SCOPE_DENIED), headers (X-Session-Id needs
-session.act_as, X-Mode must be chat or voice), then the handler."""
+session.act_as and must be a uuid, a {session_id} path value must be a uuid, X-Mode must be chat or voice; all 422), then the handler."""
 from __future__ import annotations
 
 import hmac
@@ -57,6 +57,18 @@ def new_uuid7() -> str:
     return str(uuid.UUID(int=value))
 
 
+def parse_uuid(raw: str, loc: list[str]) -> str:
+    """What: parse a uuid or fail with 422. Use when: a session id arrives in a header or the path.
+    Inputs: raw text, the error location. Output: canonical lower-case uuid string.
+    Side effects: raises CoreError VALIDATION_ERROR (the bad value is not echoed). Role: every session_id column
+    is uuid, so a non-uuid must never reach SQL (it would be a 500) nor be dropped (it would look like no session)."""
+    try:
+        return str(uuid.UUID(raw))
+    except ValueError:
+        raise CoreError("VALIDATION_ERROR", details={"errors": [{"loc": loc, "type": "uuid_parsing",
+                                                                 "msg": "must be a uuid"}]}) from None
+
+
 def clean_id(value: str | None) -> str | None:
     """What: accept a correlation id only if it is short and made of safe characters.
     Use when: reading X-Request-Id and X-Trace-Id. Inputs: raw header. Output: the value or None.
@@ -80,6 +92,17 @@ class RequestContext:
     turn_id: str | None
     idempotency_key: str | None
     demo_fault: str | None
+
+    def require_session(self) -> str:
+        """What: the session id, or a 422 when the request carried no X-Session-Id.
+        Use when: a handler that acts for a session (identity, reads, actions). Inputs: none.
+        Output: the canonical lower-case uuid string. Side effects: raises CoreError VALIDATION_ERROR if absent.
+        Role: the dependency accepts a missing header (health-like and ticket routes may not need one); session
+        handlers must not proceed without it (review PR19 I2)."""
+        if self.session_id is None:
+            raise CoreError("VALIDATION_ERROR", details={"errors": [{"loc": ["header", "x-session-id"],
+                                                                     "type": "missing", "msg": "required"}]})
+        return self.session_id
 
 
 def _authenticate(request: Request) -> str:
@@ -116,9 +139,13 @@ def scoped(scope: str) -> Callable[[Request], RequestContext]:
         if scope not in scopes:
             raise CoreError("SCOPE_DENIED", details={"required_scope": scope})
         h = request.headers
-        session_id = clean_id(h.get("x-session-id"))
-        if h.get("x-session-id") and "session.act_as" not in scopes:
+        raw_session = h.get("x-session-id")
+        if raw_session is not None and "session.act_as" not in scopes:
             raise CoreError("SCOPE_DENIED", details={"required_scope": "session.act_as"})
+        session_id = parse_uuid(raw_session, ["header", "x-session-id"]) if raw_session is not None else None
+        path_session = request.path_params.get("session_id")
+        if path_session is not None:
+            parse_uuid(path_session, ["path", "session_id"])
         mode = h.get("x-mode")
         if mode is not None and mode not in ("chat", "voice"):
             raise CoreError("VALIDATION_ERROR", details={"errors": [{"loc": ["header", "x-mode"],

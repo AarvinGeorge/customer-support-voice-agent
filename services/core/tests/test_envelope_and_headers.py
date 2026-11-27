@@ -3,6 +3,8 @@ Use when: changing core/auth.py, core/errors.py or the header dependency. Inputs
 Output: pytest results. Side effects: none. Role: CS-E-03.S13.T1 (doc 07 s1.2 to s1.4)."""
 import uuid
 
+import pytest
+
 from contracts.errors import CORE_ERROR_CODES, ErrorEnvelope
 
 ROUTE = "/v1/me/context"
@@ -92,3 +94,75 @@ def test_validation_error_is_envelope_and_never_echoes_input(client):
     assert r.status_code == 422 and r.json()["error"]["code"] == "VALIDATION_ERROR"
     assert "4821" not in r.text
     assert r.json()["error"]["details"]["errors"][0]["loc"] == ["body", "pin"]
+
+
+SESSION = "0197b5a4-7c3e-7f00-8000-0000000000aa"
+
+
+def test_valid_uuid_session_header_reaches_the_handler(client):
+    """What: a uuid X-Session-Id is accepted and exposed (lower case) on the context; no header leaves it None.
+    Use when: always. Inputs: client. Output: assertions. Side effects: adds a probe route.
+    Role: review PR19 I2, the accepted side of the rule."""
+    from fastapi import Request
+
+    from fastapi import Depends
+
+    from core.auth import get_ctx, scoped
+
+    def probe(request: Request) -> dict:
+        """What: echo the parsed session id. Use when: this test. Inputs: request. Output: dict.
+        Side effects: none. Role: probe."""
+        return {"session_id": get_ctx(request).session_id}
+
+    client.app.add_api_route("/__sess", probe, methods=["GET"], dependencies=[Depends(scoped("context.read"))])  # not in ROUTE_SCOPES
+    assert client.get("/__sess", headers={**AGENT, "X-Session-Id": SESSION.upper()}).json() == {"session_id": SESSION}
+    assert client.get("/__sess", headers=AGENT).json() == {"session_id": None}
+
+
+@pytest.mark.parametrize("bad", ["S-1", "a b;c", "not-a-uuid", "0197b5a4-7c3e-7f00-8000-00000000zzzz", "' OR 1=1 --", "x" * 200])
+def test_non_uuid_session_header_is_422_never_500_never_dropped(client, bad):
+    """What: any X-Session-Id that is not a uuid gives 422 VALIDATION_ERROR naming the header, on a route with the
+    right scope. Use when: always. Inputs: client, a bad value. Output: assertions. Side effects: none.
+    Role: review PR19 I2 (was: 500 INTERNAL retryable, or the header silently dropped)."""
+    r = client.get(ROUTE, headers={**AGENT, "X-Session-Id": bad})
+    assert r.status_code == 422, r.text
+    err = r.json()["error"]
+    assert (err["code"], err["class"], err["retryable"]) == ("VALIDATION_ERROR", "validation", False)
+    assert err["details"]["errors"][0]["loc"] == ["header", "x-session-id"]
+    assert bad not in r.text  # input is not echoed
+
+
+def test_non_uuid_session_path_parameter_is_422(client):
+    """What: GET /v1/sessions/{session_id}/claims with a non-uuid id is 422 (not 501, not 500); a uuid passes the
+    gate. Use when: always. Inputs: client. Output: assertions. Side effects: none. Role: review PR19 I2, path side."""
+    r = client.get("/v1/sessions/S-1/claims", headers=AGENT)
+    assert r.status_code == 422 and r.json()["error"]["details"]["errors"][0]["loc"] == ["path", "session_id"]
+    assert client.get(f"/v1/sessions/{SESSION}/claims", headers=AGENT).status_code == 501
+
+
+def test_scope_is_still_checked_before_the_session_header(client):
+    """What: a caller without the scope gets 403 even when the session header is bad. Use when: always.
+    Inputs: client. Output: assertion. Side effects: none. Role: the documented order token, scope, headers."""
+    r = client.get(ROUTE, headers={"Authorization": "Bearer tok-ops", "X-Session-Id": "S-1"})
+    assert r.status_code == 403
+
+
+def test_require_session_is_422_when_the_header_is_missing(client):
+    """What: RequestContext.require_session() returns the id, or raises VALIDATION_ERROR when no header was sent.
+    Use when: always. Inputs: client. Output: assertions. Side effects: none.
+    Role: review PR19 I2 'decide the missing-header case': the dependency allows it, session handlers must call this."""
+    import pytest as _pt
+
+    from core.auth import RequestContext
+    from core.errors import CoreError
+
+    def ctx(session_id: str | None) -> RequestContext:
+        """What: build a bare context. Use when: this test. Inputs: session id or None. Output: RequestContext.
+        Side effects: none. Role: helper."""
+        return RequestContext(caller="agent_tools", scopes=frozenset(), request_id="r", trace_id="t",
+                              session_id=session_id, mode=None, turn_id=None, idempotency_key=None, demo_fault=None)
+
+    assert ctx(SESSION).require_session() == SESSION
+    with _pt.raises(CoreError) as exc:
+        ctx(None).require_session()
+    assert exc.value.code == "VALIDATION_ERROR"
