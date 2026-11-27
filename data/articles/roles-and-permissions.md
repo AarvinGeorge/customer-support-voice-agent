@@ -2,7 +2,7 @@
 article_id: roles-and-permissions
 title: "Roles and permissions"
 source_url: https://app.notion.com/p/4257c83d5896812f8c2ecfbb7aa2cb61
-last_edited_time: 2026-11-27T05:25:37.865Z
+last_edited_time: 2026-11-27T07:11:42.994Z
 tiers: [all]
 ---
 
@@ -44,3 +44,7 @@ Support identifies you as a person, not just as an account. You verify with your
 ## Changing roles or the account owner
 
 Changing someone's role or the account owner is handled by our account team. Ask support and we will open a request for you.
+
+## Making someone an admin
+
+To make someone a billing admin or an owner, or to change a member's role, ask support. Support opens a request for our account team, who handle changes to roles and the account owner.

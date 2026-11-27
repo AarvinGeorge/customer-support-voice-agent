@@ -301,3 +301,14 @@ def test_the_commit_token_is_not_reachable_from_tool_modules():
     assert "CORE_TOKEN_" + "COMMIT" in confirm.read_text() and confirm not in reached  # the check can fail
     holders = [p for p in (ROOT / "services" / "agent" / "src").rglob("*.py") if "CORE_TOKEN_" + "COMMIT" in p.read_text()]
     assert holders == [confirm]  # the confirm module is the one place the commit token is named
+
+
+async def test_a_2xx_body_that_is_not_json_is_an_unavailable_tool_call_error():
+    """I2 (review of PR #35): a malformed 200 from core maps to a retryable failure, not a raw exception."""
+    from agent.clients.http import ToolCallError, call_json
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b"<html>oops</html>"))
+    async with httpx.AsyncClient(transport=transport) as http:
+        with pytest.raises(ToolCallError) as info:
+            await call_json(http, "GET", "http://core/v1/x", {})
+    assert info.value.kind == "unavailable" and info.value.retryable

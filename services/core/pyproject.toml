@@ -1,5 +1,36 @@
 [project]
 name = "quillstack-core"
-version = "0.0.0"
+version = "0.1.0"
+description = "Quillstack core service: identity, accounts, actions, tickets, audit (lane A)"
 requires-python = ">=3.12"
-dependencies = ["fastapi>=0.115", "uvicorn[standard]>=0.32", "psycopg[binary]>=3.2"]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "psycopg[binary,pool]>=3.2",
+    "quillstack-contracts",
+    "pydantic>=2.9",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3", "httpx>=0.27"]
+
+[tool.uv.sources]
+# Non-editable: macOS hides .pth files in .venv and Python 3.13 skips them (BRIEF known trap).
+quillstack-contracts = { path = "../../packages/contracts", editable = false }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/core"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+# pg tests need the Compose Postgres. From the repo root:
+#   scripts/pg_tests.sh   (all pg suites on a throwaway stack; CI job "pg tests")
+# They fail (never skip) when the stack or the env is missing. CI runs the same script.
+addopts = "-q -m 'not pg'"
+markers = ["pg: needs the Compose Postgres (core_owner and core_app roles); deselected by default"]

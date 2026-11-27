@@ -68,7 +68,7 @@ async def call_json(http: httpx.AsyncClient, method: str, url: str, headers: dic
                     params: dict[str, Any] | None = None, body: Any = None) -> Any:
     """What: one request; the JSON body on 2xx, otherwise ToolCallError.
     Use when: client methods. Inputs: client, method, absolute URL, headers, query params, JSON body.
-    Output: decoded JSON. Side effects: the request. Role: transport and error mapping (no retry here: the
+    Output: decoded JSON (a non-JSON 2xx raises unavailable). Side effects: the request. Role: transport and error mapping (no retry here: the
     one retry layer for tools is ToolGuard)."""
     try:
         resp = await http.request(method, url, headers=headers, params=params, json=body)
@@ -78,7 +78,11 @@ async def call_json(http: httpx.AsyncClient, method: str, url: str, headers: dic
         raise ToolCallError("unavailable", message="The service could not be reached.") from exc
     if resp.status_code >= 300:
         raise _error_from(resp)
-    return resp.json()
+    try:
+        return resp.json()
+    except ValueError as exc:  # a 2xx that is not JSON: the service is not answering as contracted
+        raise ToolCallError("unavailable", status=resp.status_code,
+                            message="The service returned an unexpected answer.") from exc
 
 
 async def call_json_within(timeout_s: float, http: httpx.AsyncClient, method: str, url: str, headers: dict[str, str],
