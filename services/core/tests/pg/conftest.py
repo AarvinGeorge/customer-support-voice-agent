@@ -18,7 +18,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / "infra"))
-import migrate  # noqa: E402  (infra/migrate.py, the same runner the migrate_core job uses)
+import migrate  # noqa: E402  # pyright: ignore[reportMissingImports]  (infra/migrate.py, the same runner the migrate_core job uses)
 
 MIGRATIONS = ROOT / "services" / "core" / "migrations"
 
