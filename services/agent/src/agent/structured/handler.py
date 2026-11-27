@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable
 from contracts.events import FinalAnswer
 from langchain_core.messages import AIMessage, HumanMessage
 
+from agent.records import change_record, ticket_record
 from agent.clients.core_agent import CoreAgentClient
 from agent.escalation import Escalator, apology_is_last
 from agent.prompt import TurnContext, build_turn_message
@@ -116,17 +117,18 @@ class StructuredInput:
 
     def _reply(self, stream: TurnStream, prep: TurnPrep, human: Any, text: str, end_reason: str, *,
                say: str | None = None, final_extra: dict[str, Any] | None = None,
-               state: dict[str, Any] | None = None) -> StructuredResult:
-        """What: a deterministic reply: human line plus AI line (id ingress-{turn_id}) go to the thread.
+               state: dict[str, Any] | None = None, records: list[Any] | None = None) -> StructuredResult:
+        """What: a deterministic reply: human line plus AI line (id ingress-{turn_id}) go to the thread, then the
+        code-written records of what the code did (agent.records, D-071 part 2).
         Use when: every ending of step 13. Inputs: stream, prep, human line, text, end reason, say, final fields,
-        state. Output: StructuredResult with an outcome. Side effects: none. Role: s2.4 step 15 append."""
+        state, records. Output: StructuredResult with an outcome. Side effects: none. Role: s2.4 step 15 append."""
         say = speak(say if say is not None else text)
         voice = prep.control.mode == "voice"
         outcome = TurnOutcome.fixed(text, end_reason=end_reason, say=say)
         if final_extra:
             outcome.final = FinalAnswer.model_validate({**outcome.final.model_dump(mode="json"), **final_extra})
         msg = AIMessage(say if voice else text, id=ingress_message_id(prep.control.turn_id))
-        return StructuredResult(outcome=outcome, messages=[self._human(human), msg], state=state or {})
+        return StructuredResult(outcome=outcome, messages=[self._human(human), msg, *(records or [])], state=state or {})
 
     async def _ticket_offer(self, stream: TurnStream, prep: TurnPrep, human: Any) -> StructuredResult:
         """What: the s6.7 ticket offer accepted: one code ticket (reason model_unavailable) and its line, no model.
@@ -134,7 +136,8 @@ class StructuredInput:
         line. Output: result. Side effects: at most one ticket and one escalated event. Role: s6.7 button flow."""
         text, end_reason, ticket = await self.escalator.ticket_offer(prep.control, list(prep.values.get("messages") or []))
         return self._reply(stream, prep, human, text, end_reason,
-                           final_extra={"escalated": end_reason == "escalated", "ticket": ticket})
+                           final_extra={"escalated": end_reason == "escalated", "ticket": ticket},
+                           records=[ticket_record(prep.control, ticket, "model_unavailable")] if ticket else [])
 
     def _not_current(self, stream: TurnStream, prep: TurnPrep, human: str, pending_id: str) -> StructuredResult:
         """What: a press for a pending that is not the current one: no core call, outcome expired, changed false.
@@ -216,5 +219,13 @@ class StructuredInput:
         if reply.needs_verification:
             return await self._verify_again(stream, prep, human, reply.text)
         state = {} if reply.keep_pending else {"pending": None}
+        records = []
+        if reply.changed and reply.outcome in ("committed", "submitted"):
+            records.append(change_record(prep.control, "commit" if reply.outcome == "committed" else "submit",
+                                         reply.text, pending_action_id=pending.get("pending_action_id"),
+                                         outcome=reply.outcome, ticket=reply.ticket))
+        elif reply.ticket and reply.end_reason == "escalated":
+            records.append(ticket_record(prep.control, reply.ticket, "tool_failure"))
         return self._reply(stream, prep, human, reply.text, reply.end_reason, say=reply.say, state=state,
-                           final_extra={"escalated": reply.end_reason == "escalated", "ticket": reply.ticket})
+                           final_extra={"escalated": reply.end_reason == "escalated", "ticket": reply.ticket},
+                           records=records)

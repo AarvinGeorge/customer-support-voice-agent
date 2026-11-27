@@ -37,6 +37,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from agent.deadline import clamp_timeout
 from agent.models.structured import structured_output_kwargs
 from agent.models.usage import reply_truncated
+from agent.records import session_tickets
 from agent.turn_control import Route, TurnControl
 from agent.untrusted import escape_tags, harden, harden_obj
 
@@ -356,7 +357,7 @@ def needs_grounding(draft: str, turn_had_tool_result: bool) -> bool:
 # Ids of the lines our code writes to the thread (never a model draft): RouterMiddleware route lines, ingress
 # lines (agent.structured.pending), the Gate 2 clarify line, and the escalation limit, deadline and unavailable
 # lines (agent.escalation, agent.sse). Model messages carry provider or LangChain run ids, never these.
-CODE_LINE_PREFIXES = ("route-", "ingress-", "gate2-", "limit-", "deadline-", "unavailable-")
+CODE_LINE_PREFIXES = ("route-", "ingress-", "gate2-", "limit-", "deadline-", "unavailable-", "record-")
 FLOOR_DETAIL = "Verifier found no claim and gave no reason in a draft that needs grounding; failed closed"
 NO_CLAIMS_REASONS = frozenset({"clarifying_question", "conversation"})  # VERIFIER_PROMPT step 4
 
@@ -401,6 +402,7 @@ AGENT_CAPABILITIES = ("This support agent can open a ticket for the Quillstack s
                       "search the help articles, and prepare an account change that runs only after the customer's "
                       "yes. It cannot itself approve a refund, credit, discount or exception, and it cannot promise "
                       "when the team will reply.")
+SESSION_SOURCE_ID = "session_state"
 FIXED_LINE_PREFIXES = ("route-", "ingress-")  # RouterMiddleware and ingress lines (agent.structured.pending ids)
 FIXED_LINES_MAX = 3
 _SOURCE_TAGS = ("source", *VERIFIER_TAGS)
@@ -512,11 +514,30 @@ def _turns_ago(messages: list[BaseMessage], index: int) -> int:
     return sum(isinstance(m, HumanMessage) for m in messages[index + 1:])
 
 
-def session_evidence(values: dict[str, Any], messages: list[BaseMessage]) -> SessionEvidence:
+def session_state_text(values: dict[str, Any], messages: list[BaseMessage], control: TurnControl | None) -> str:
+    """What: the code-held facts about the session itself, one sentence each: verified in this conversation, waiting
+    for the customer to verify (agent.sessions flag, or asked this turn), the secure card on screen (waiting and not
+    verified), the tickets opened in this conversation (agent.records.session_tickets).
+    Use when: session_evidence (the session_state source). Inputs: state values, thread messages, control.
+    Output: text. Side effects: none.
+    Role: D-071 part 1 (RCA fix C): true statements about the session have a source."""
+    verified = bool(values.get("verified"))
+    awaiting = control is not None and (control.session_awaiting_verification or control.awaiting_verification)
+    tickets = session_tickets(messages)
+    yes = {True: "yes", False: "no"}
+    return (f"Verified in this conversation: {yes[verified]}. "
+            f"Waiting for the customer to verify: {yes[bool(awaiting) and not verified]}. "
+            f"The secure verification card is on the customer's screen: {yes[bool(awaiting) and not verified]}. "
+            f"Tickets opened in this conversation: {', '.join(tickets) if tickets else 'none'}.")
+
+
+def session_evidence(values: dict[str, Any], messages: list[BaseMessage],
+                     control: TurnControl | None = None) -> SessionEvidence:
     """What: Gate 2 evidence from every grounded source of the session (D-065, amends doc 07 s6.4), each block with
     one unique code-written sid the verifier copies (review PR #71 I1, I4) and a provenance record:
     0. agent_capabilities: the fixed AGENT_CAPABILITIES text, always;
-    1. account_context: the code-held verified context, only when the thread is verified;
+    1. account_context: the code-held verified context, only when the thread is verified; session_state, always:
+       verified or not, waiting for verification, the card on screen, tickets opened this session (D-071 part 1);
     2. fixed_line:<message id>: the last FIXED_LINES_MAX lines our code wrote to the thread (route and ingress);
     3. tool results in the checkpoint within the last GATE2_EVIDENCE_USER_TURNS user turns that _carried allows:
        a core result as one block, sid "<tool>@<n>" (n counts that tool's results in the window, oldest 1), with
@@ -525,7 +546,8 @@ def session_evidence(values: dict[str, Any], messages: list[BaseMessage]) -> Ses
     Budget: EVIDENCE_MAX_TOKENS (evidence_tokens). Code blocks first; then tool blocks newest first, and a block
     that does not fit is evicted (never citable) while newer ones keep priority.
     Use when: GroundingMiddleware, before the verifier. Inputs: agent state values, thread messages before the
-    draft. Output: SessionEvidence. Side effects: none.
+    draft, the turn's control (the session's awaiting-verification flag; None reads as not awaiting).
+    Output: SessionEvidence. Side effects: none.
     Role: D-065: the gate sees what the agent saw earlier in the session, bound to the verification it came from."""
     code: list[str] = [_source_block(CAPABILITIES_SOURCE_ID, "agent_capabilities", AGENT_CAPABILITIES)]
     provenance: dict[str, dict[str, Any]] = {CAPABILITIES_SOURCE_ID: {"kind": "agent_capabilities"}}
@@ -535,6 +557,8 @@ def session_evidence(values: dict[str, Any], messages: list[BaseMessage]) -> Ses
         code.append(_source_block(ACCOUNT_SOURCE_ID, "verified_context",
                                   json.dumps(data, sort_keys=True, ensure_ascii=False)))
         provenance[ACCOUNT_SOURCE_ID] = {"kind": "account_context"}
+    code.append(_source_block(SESSION_SOURCE_ID, "session_state", session_state_text(values, messages, control)))
+    provenance[SESSION_SOURCE_ID] = {"kind": "session_state"}
     fixed = [m for m in messages if isinstance(m, AIMessage) and str(m.id or "").startswith(FIXED_LINE_PREFIXES)]
     for m in fixed[-FIXED_LINES_MAX:]:
         sid = f"fixed_line:{m.id}"

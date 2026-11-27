@@ -128,7 +128,7 @@ async def test_the_verifier_gets_the_citable_ids_and_a_schema_whose_source_id_en
     model: Any = ver.model
     human = model.seen[0]
     listed = human.split("<citable_ids>\n")[1].split("\n</citable_ids>")[0].splitlines()
-    assert listed == ["account_context", "agent_capabilities", "refund-policy#2"]
+    assert listed == ["account_context", "agent_capabilities", "refund-policy#2", "session_state"]
     schema = model.kwargs[0]["schema"]
     source = schema["properties"]["claims"]["items"]["properties"]["source_id"]
     assert source == {"anyOf": [{"type": "string", "enum": listed}, {"type": "null"}]}

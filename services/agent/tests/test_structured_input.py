@@ -163,7 +163,8 @@ async def test_s1_commits_by_confirm_press_with_the_commit_token_and_x_turn_id()
     assert commit.token == COMMIT_TOKEN and commit.headers["idempotency-key"] == ex.PENDING_ID
     assert commit.headers["x-turn-id"] == outcome_turn_id(events) != prepare_turn_id(w)
     v = await w.values()
-    assert v["pending"] is None and v["messages"][-1].content == ex.COMMIT_RESULT.summary
+    assert v["pending"] is None and v["messages"][-2].content == ex.COMMIT_RESULT.summary
+    assert v["messages"][-1].response_metadata["qs_action"]["kind"] == "commit"  # the code record (D-071)
     assert Fake.seen and len(Fake.seen) == 1  # only the prepare turn called the model
 
 

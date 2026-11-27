@@ -107,6 +107,7 @@ class TurnControl:
     prepares: int = 0
     failures: dict[str, int] = field(default_factory=dict)
     awaiting_verification: bool = False
+    session_awaiting_verification: bool = False  # agent.sessions flag at turn start (ingress), D-071 part 1
     verify_attempts_left: int = 3
     # Gate 1 (agent.gates, doc 07 s6.5): the last search's verdict facts, the relevant chunks the model saw (for
     # citations), and a pending scope check (verdict none) that RouterMiddleware runs before the next model call.

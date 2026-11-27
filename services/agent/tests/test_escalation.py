@@ -104,7 +104,8 @@ async def test_gate1_rows_open_exactly_one_code_ticket(reason: str, lead: str) -
     body = ticket_bodies(w)[0][0]
     assert "do you sign a HIPAA BAA?" in body["summary"] and body["category"] == "other"
     thread = (await w.values())["messages"]
-    assert thread[-1].content == outcome.final.text  # the thread line carries the ticket, not the fallback
+    assert thread[-2].content == outcome.final.text  # the thread line carries the ticket, not the fallback
+    assert str(thread[-1].id).startswith("record-")  # then the code-written record of the ticket (D-071)
 
 
 class _Gate2(AgentMiddleware):
@@ -144,7 +145,8 @@ async def test_gate2_hook_removes_the_draft_and_opens_exactly_one_ticket(monkeyp
     assert outcome.final.text.startswith(lead)
     assert_one_code_ticket(w, outcome, events, reason)
     thread = (await w.values())["messages"]
-    assert all(m.id != "draft-1" for m in thread) and thread[-1].content == outcome.final.text
+    assert all(m.id != "draft-1" for m in thread) and thread[-2].content == outcome.final.text
+    assert str(thread[-1].id).startswith("record-")
     if reason == "needs_commitment":
         assert ticket_bodies(w)[0][0]["category"] == "commitment"
 
@@ -208,7 +210,7 @@ async def test_model_call_limit_opens_the_limit_reached_ticket_in_code() -> None
                                   "ticket for our team, ticket ending 8213.")
     assert_one_code_ticket(w, outcome, events, "limit_reached")
     thread = (await w.values())["messages"]
-    assert thread[-1].content == outcome.final.text
+    assert thread[-2].content == outcome.final.text and str(thread[-1].id).startswith("record-")
 
 
 async def test_both_models_unavailable_apologise_offer_a_ticket_and_create_none() -> None:

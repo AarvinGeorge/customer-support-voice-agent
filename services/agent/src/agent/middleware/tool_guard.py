@@ -111,13 +111,16 @@ def _kept_artifact(name: str, artifact: Any, state: Any = None) -> dict[str, Any
     """What: the part of a result kept on the ToolMessage (checkpointed, never sent to a model): bound_to, the
     verification it was fetched under (agent.gates.identity_key: "user|account" or None), on every result
     (review PR #71 I3); for search_kb also the relevant chunks with their citation fields, so Gate 2 can cite them
-    in later turns (D-065).
+    in later turns (D-065); for create_ticket the ticket id and display (session_state, D-071).
     Use when: the success path. Inputs: name, raw artifact, the agent state at the call.
     Output: {"bound_to": ..., "grounded_chunks"?: [...]}. Side effects: none.
     Role: code-held provenance for session evidence."""
     kept: dict[str, Any] = {"bound_to": identity_key(state if isinstance(state, dict) else {})}
     if name == "search_kb" and isinstance(artifact, dict) and isinstance(artifact.get("grounded_chunks"), list):
         kept["grounded_chunks"] = artifact["grounded_chunks"]
+    if name == "create_ticket" and isinstance(artifact, dict) and isinstance(artifact.get("ticket"), dict):
+        t = artifact["ticket"]
+        kept["ticket"] = {"ticket_id": t.get("ticket_id"), "display": t.get("display")}  # D-071 session_state
     return kept
 
 

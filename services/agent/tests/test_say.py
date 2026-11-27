@@ -130,7 +130,8 @@ async def test_voice_finals_are_spoken_end_to_end() -> None:
     assert outcome.final.text.endswith("ticket ending 8213.")
     assert outcome.final.say.endswith("ticket ending eight two one three.") and not UNSPEAKABLE.search(outcome.final.say)
     thread = (await w.values())["messages"]
-    assert thread[-1].content == outcome.final.say  # voice thread lines are the spoken form
+    assert thread[-2].content == outcome.final.say  # voice thread lines are the spoken form
+    assert str(thread[-1].id).startswith("record-")  # then the code record of the ticket (D-071)
 
 
 async def test_model_answers_get_a_plain_say_and_keep_markdown_in_text() -> None:

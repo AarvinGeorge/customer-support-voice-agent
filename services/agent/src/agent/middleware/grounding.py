@@ -79,7 +79,7 @@ class GroundingMiddleware(AgentMiddleware):
         if control.events is not None:
             control.events.emit("status", kind="checking_policy", message=CHECKING_POLICY_LINE)
         step = start_gate_step(control, "grounding_gate", "Checking the answer against policy")
-        evidence = session_evidence(state, messages[:-1])  # D-065: session-scoped, bounded, with provenance
+        evidence = session_evidence(state, messages[:-1], control)  # D-065, D-071: session-scoped, with provenance
         result = await self.verifier.verify(control, text, evidence)
         result = apply_floor(enforce_code_rules(result, text, evidence.chunks, tool_names=evidence.ids), floor)
         failures = int(state.get("grounding_failures") or 0)

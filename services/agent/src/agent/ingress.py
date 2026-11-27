@@ -441,7 +441,8 @@ class Ingress:
             scanned = scan_input(inp, session_redact_context(session))  # step 9a
             await self._awaiting_hint(session, scanned)
             control = TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
-                                  deadline=deadline_mono, demo_fault=inp.demo_fault, events=s)
+                                  deadline=deadline_mono, demo_fault=inp.demo_fault, events=s,
+                                  session_awaiting_verification=session.awaiting_verification)
             bind_turn_control(control)  # the turn task's own context; the only .set() (spike 15)
             cm = asyncio.timeout(hard_net)
             try:
