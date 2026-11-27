@@ -139,6 +139,20 @@ export function VoiceLine({ state, label, caption, error }: { state: string; lab
 }
 
 /**
+ * What: the display-only signed-in hint: the persona a landing row's Start named (D-076).
+ * Use when: ConsoleRoute matched ?as= against the persona list.
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: pre-fills the verification card's Account ID and titles it "Verify as <name>". Never sent
+ *   to the server; the PIN is still required and core verify alone establishes identity.
+ */
+export interface VerifyHint {
+  name: string;
+  accountId: string;
+}
+
+/**
  * What: props of ConsoleShell.
  * Use when: typing the component.
  * Inputs: none (type).
@@ -146,7 +160,7 @@ export function VoiceLine({ state, label, caption, error }: { state: string; lab
  * Side effects: none.
  * Role: `store` defaults to the app singleton; tests and the replay route pass their own.
  *   `langsmithProjectUrl` defaults to the public config value; `demoControls` fills the drawer's
- *   Demo controls slot (CS-E-07.S1.T4).
+ *   Demo controls slot (CS-E-07.S1.T4). `hint` pre-fills the verification card (D-076).
  */
 export interface ConsoleShellProps {
   sessionId: string | null;
@@ -154,6 +168,8 @@ export interface ConsoleShellProps {
   onNewConversation?: () => void;
   langsmithProjectUrl?: string;
   demoControls?: ReactNode;
+  /** The display-only signed-in hint, or null for the signed-out journey. */
+  hint?: VerifyHint | null;
   /** A stand-in voice controller (tests, the dev replay); the default is useVoice for the session. */
   voice?: VoiceController;
 }
@@ -172,6 +188,7 @@ export function ConsoleShell({
   onNewConversation,
   langsmithProjectUrl = publicConfig.langsmithProjectUrl,
   demoControls,
+  hint = null,
   voice: voiceOverride,
 }: ConsoleShellProps) {
   const thread = useStore(store, (s) => s.thread);
@@ -189,19 +206,28 @@ export function ConsoleShell({
   // Adjusting state while rendering when a value changed, instead of an effect (react.dev, "You
   // Might Not Need an Effect": Adjusting some state when a prop changes). A turn starting clears
   // the note; a new notice id announces the wait once, from retry_after_s (not the ticking clock).
-  const [seen, setSeen] = useState<{ busy: boolean; limitId: number | null; sessionId: string | null }>({ busy: false, limitId: null, sessionId });
-  const [account, setAccount] = useState("");
+  const hintId = hint?.accountId ?? null;
+  const [seen, setSeen] = useState<{ busy: boolean; limitId: number | null; sessionId: string | null; hintId: string | null }>({
+    busy: false,
+    limitId: null,
+    sessionId,
+    hintId,
+  });
+  const [account, setAccount] = useState(hintId ?? "");
   const [pickedTurnId, setPickedTurnId] = useState<string | null>(null);
-  if (seen.busy !== busy || seen.limitId !== limitId || seen.sessionId !== sessionId) {
-    setSeen({ busy, limitId, sessionId });
+  if (seen.busy !== busy || seen.limitId !== limitId || seen.sessionId !== sessionId || seen.hintId !== hintId) {
+    setSeen({ busy, limitId, sessionId, hintId });
     if (busy && !seen.busy) setLimitNote("");
     if (limitId !== null && limitId !== seen.limitId) {
       setLimitNote(limitS !== null && limitS > 0 ? `You can send again in about ${limitS} second${limitS === 1 ? "" : "s"}.` : "Sending is paused for a moment.");
     }
     // A new session starts clean: the typed Account ID and the picked turn belong to the old one.
     if (seen.sessionId !== sessionId) {
-      setAccount("");
+      setAccount(hintId ?? "");
       setPickedTurnId(null);
+    } else if (seen.hintId !== hintId && account === "") {
+      // The hint resolves after the persona list loads; it pre-fills only an empty field.
+      setAccount(hintId ?? "");
     }
   }
   const secondsLeft = useSecondsLeft(limit?.untilMs ?? null, clearLimit);
@@ -325,6 +351,8 @@ export function ConsoleShell({
   const cards: CardActions = useMemo(
     () => ({
       disabled: busy || locked !== null,
+      // "Verify as <name>" only while the field still holds the hinted account id.
+      verifyAs: hint !== null && account.trim().toUpperCase() === hint.accountId.toUpperCase() ? hint.name : null,
       account,
       setAccount,
       pinRef,
@@ -338,7 +366,7 @@ export function ConsoleShell({
       decide: (confirm: ConfirmInput) => run({ confirm }).finally(() => refocus("decide")),
       offerTicket: () => run({ ticket_offer: { accept: true } }).finally(() => refocus("decide")),
     }),
-    [busy, locked, run, account, refocus, store],
+    [busy, locked, run, account, refocus, store, hint],
   );
 
   /**
