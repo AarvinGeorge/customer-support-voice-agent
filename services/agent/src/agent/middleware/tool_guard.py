@@ -10,12 +10,14 @@ Output: ToolGuardMiddleware, ToolSpec, SPECS, clamp_timeout, retry_fits.
 Side effects: mutates TurnControl counters and route; emits step.started, step.completed and status events.
 Role: exactly one ToolMessage per tool call id, whatever blocks it (the spike 17c failure). Counters count
 EXECUTED calls only and are incremented before the first await, so parallel calls in one batch cannot race.
-A 4xx from core is an answer (returned to the model, never retried, not a failure); a timeout, 5xx or
-unreachable service is a failure. A failed, skipped, blocked or not-run result says "unknown", never empty.
+A call that fails argument validation gives its counts back (it never left the process). A 4xx from
+core is an answer (returned to the model, never retried, not a failure); a timeout, 5xx, unreachable service or
+any unexpected exception (for example a malformed 200 body) is a failure. A failed, skipped, blocked or not-run result says "unknown", never empty.
 """
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -31,6 +33,7 @@ from agent.middleware.visibility import visible_tool_names
 from agent.turn_control import CURRENT_CALL, CallScope, Route, TurnControl, require_control
 from agent.untrusted import unknown_result, wrap_result, wrap_search
 
+_log = logging.getLogger(__name__)
 PER_TOOL_LIMITS: dict[str, int] = {"search_kb": limits.SEARCH_KB_PER_TURN,
                                    "request_verification": limits.REQUEST_VERIFICATION_PER_TURN}
 
@@ -215,6 +218,9 @@ class ToolGuardMiddleware(AgentMiddleware):
                 err = ToolCallError("timeout", message="The service did not answer in time.")
             except ToolCallError as exc:
                 err = exc
+            except Exception as exc:  # malformed 2xx body or a tool bug: a failure, never a dangling call id
+                _log.warning("tool %s raised %s; treated as a tool failure", name, type(exc).__name__)
+                err = ToolCallError("unavailable", message="The service returned an unexpected answer.")
             else:
                 return self._success(control, step, call, spec, attempt, msg)
             if not err.retryable:  # 4xx: core's answer, given to the model; no retry, not a failure
@@ -248,11 +254,23 @@ class ToolGuardMiddleware(AgentMiddleware):
         if not isinstance(msg, ToolMessage):  # tools here never return Command; refuse anything else loudly
             raise TypeError(f"tool {name} returned {type(msg).__name__}, expected ToolMessage")
         if msg.status == "error":  # argument validation error from ToolNode: tell the model, not a failure
+            self._refund(control, name, spec)
             self._done(control, step, "error", spec.failed, attempt, detail="Invalid arguments")
             return self._message(call, {"status": "invalid_arguments", "message": str(msg.content)[:500]}, error=True)
         artifact = msg.artifact
         self._done(control, step, "ok", spec.title, attempt, detail=_detail(name, artifact), rule=_rule(name, artifact))
         return ToolMessage(content=_content(name, artifact, msg.content), tool_call_id=call["id"], name=name)
+
+    @staticmethod
+    def _refund(control: TurnControl, name: str, spec: ToolSpec) -> None:
+        """What: give back the counts _gate took for a call that failed argument validation.
+        Use when: the handler returned an argument error. Inputs: control, name, spec. Output: none.
+        Side effects: decrements tool_calls, per_tool[name] and (for a prepare) prepares.
+        Role: D-048 executed calls only; the corrected call can still run (review of PR #35, I1)."""
+        control.tool_calls = max(control.tool_calls - 1, 0)
+        control.per_tool[name] = max(control.per_tool.get(name, 0) - 1, 0)
+        if spec.prepare:
+            control.prepares = max(control.prepares - 1, 0)
 
     @staticmethod
     def _message(call: dict[str, Any], payload: dict[str, Any], *, error: bool) -> ToolMessage:

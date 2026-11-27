@@ -2,7 +2,7 @@
 article_id: refund-policy
 title: "Refund policy"
 source_url: https://app.notion.com/p/4257c83d5896817b9a5fcc8230b8a559
-last_edited_time: 2026-11-27T05:25:09.594Z
+last_edited_time: 2026-11-27T07:11:41.925Z
 tiers: [all]
 ---
 
@@ -22,6 +22,10 @@ Only an account owner or a billing admin can ask for a refund. Members cannot re
 
 A refund is always for the amount shown on the charge in our billing record. You choose which charge; you do not choose the amount.
 
+## Can a member request a refund?
+
+No. If you are a member, support explains that a refund request needs an account owner or a billing admin, and can open a ticket so the right person follows up.
+
 ## How refunds work
 
 1. Tell us which charge you mean, for example by its invoice ID or the date and amount.
@@ -34,6 +38,18 @@ Some charges cannot be refunded:
 
 - A charge that has already been refunded cannot be refunded again.
 - A charge that was never collected, for example a failed payment, cannot be refunded.
+
+## Did my refund go through, and when will I see it?
+
+Support can confirm that a refund was issued, and when, from your account records. Once a refund is issued, it goes back to the original payment method. How long it takes to reach your card or show on your statement depends on your bank.
+
+## Refund for a duplicate charge
+
+If you were charged twice for the same thing, ask for a refund of the duplicate charge. Tell us which charge you mean, for example by its invoice ID or by the date and amount. We check it against the refund rules for your plan in this article. You choose which charge; the amount is always the one shown on the charge in our billing record.
+
+## If a refund fails, was my account charged or changed?
+
+If something goes wrong while a refund is being issued, support checks the status of the refund before trying anything again, so a refund is never issued twice. Support tells you plainly what did and did not change. If support cannot confirm the result, it tells you the outcome is unconfirmed and opens a ticket for our team to check.
 
 ## Free plan
 
