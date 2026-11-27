@@ -81,18 +81,28 @@ class VoiceStore(Protocol):
     """What: the voice_sessions and transcript_items operations. Use when: typing.
     Inputs: see methods. Output: see methods. Side effects: database. Role: storage port."""
 
-    async def create_voice_session(self, row: VoiceSessionRow) -> None: ...
-    async def get_voice_session(self, voice_session_id: str) -> VoiceSessionRow | None: ...
+    async def create_voice_session(self, row: VoiceSessionRow) -> None:
+        """What: insert a voice session row. Use when: voice/token minted. Inputs: row. Output: none. Side effects: one INSERT. Role: port method."""
+        ...
+    async def get_voice_session(self, voice_session_id: str) -> VoiceSessionRow | None:
+        """What: look up a voice session. Use when: step 3 of ingress and transcript posts. Inputs: voice session id. Output: row or None. Side effects: one read. Role: port method."""
+        ...
     async def add_transcript_items(self, session_id: str, voice_session_id: str,
-                                   items: list[TranscriptItemIn]) -> int: ...
-    async def take_unmerged(self, session_id: str, turn_id: str, covered: CoveredItem | None) -> list[MergedItem]: ...
+                                   items: list[TranscriptItemIn]) -> int:
+        """What: store client-reported transcript items. Use when: POST /transcript. Inputs: session id, voice session id, items. Output: count stored. Side effects: INSERTs (re-posts ignored). Role: port method."""
+        ...
+    async def take_unmerged(self, session_id: str, turn_id: str, covered: CoveredItem | None) -> list[MergedItem]:
+        """What: claim unmerged transcript items for a turn. Use when: ingress step 12. Inputs: session id, turn id, covered item. Output: items to fold in. Side effects: UPDATE marks them merged. Role: port method."""
+        ...
 
 
 class Minter(Protocol):
     """What: mints a Realtime client secret. Use when: typing. Inputs: session config. Output: MintedSecret.
     Side effects: provider call. Role: port (OpenAIRealtimeMinter in production)."""
 
-    async def mint(self, session: dict[str, Any]) -> MintedSecret: ...
+    async def mint(self, session: dict[str, Any]) -> MintedSecret:
+        """What: mint a Realtime client secret. Use when: voice/token. Inputs: session config. Output: MintedSecret. Side effects: one provider call. Role: port method."""
+        ...
 
 
 @dataclass
