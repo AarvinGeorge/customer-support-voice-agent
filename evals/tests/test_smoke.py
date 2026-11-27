@@ -254,7 +254,7 @@ def test_summary_passes_only_when_every_case_passes_the_logs_are_clean_and_the_t
     text, ok = smoke.render_summary(_rows(), ledger, CLEAN_LOGS, META, 25, None)
     assert ok and text.splitlines()[0].startswith("LIVE SMOKE ") and text.splitlines()[-1] == "RESULT: PASS"
     assert "agent 2, verifier 1, classifier 0 = 3 model calls (cap 25); embeddings 3 (ingest 1, search 2" in text
-    assert len(text.splitlines()) <= 30 and "—" not in text
+    assert len(text.splitlines()) <= 30 and "\u2014" not in text
     assert not smoke.render_summary(_rows(False), ledger, CLEAN_LOGS, META, 25, None)[1]
     assert not smoke.render_summary(_rows(), ledger, None, META, 25, None)[1]
     assert not smoke.render_summary(_rows(), ledger, {**CLEAN_LOGS, "verifier failed": 1}, META, 25, None)[1]
