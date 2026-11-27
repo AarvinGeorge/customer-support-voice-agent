@@ -1,0 +1,175 @@
+# Quillstack policy: the one source of truth for limits (L1 s6, doc 07 s13.1).
+# Read by core (extra=forbid, frozen) and by knowledge at ingest ({policy.<key>} placeholders).
+# Values equal L1 s5 and s6. Designed only and not here: A2 field expansion, preferences beyond the keys below.
+version_label: "2026-11-27.1"
+timezone: "America/New_York"
+currency: "USD"
+
+roles:
+  billing_roles: [owner, billing_admin]
+  all_roles: [owner, billing_admin, member]
+
+tiers:
+  free:       { price_cents_per_seat_month: 0,    billing: none }
+  pro:        { price_cents_per_seat_month: 800,  billing: card_monthly,   seats: [3, 30] }
+  business:   { price_cents_per_seat_month: 1600, billing: invoice_annual, seats: [30, 300] }
+  enterprise: { price_cents_per_seat_month: null, billing: contract }
+
+actions:
+  refund:
+    enabled: true
+    repeat_window_days: 90
+    tiers:
+      free:       { eligible: false }
+      pro:        { eligible: true, window_days: 14, late_band_days: 7, auto_cap_cents: 15000 }
+      business:   { eligible: true, window_days: 30, approval_only: true }
+      enterprise: { eligible: true, approval_only: true }
+    blocked_statuses: [trialing, past_due]
+    pending_ttl_seconds: 600
+    readback:
+      chat: "I can refund {amount} for the charge on {charge_date} ({charge_label}). Shall I go ahead?"
+      voice: "I can refund {amount} for the charge on {charge_date_spoken}, {charge_label_spoken}. Shall I go ahead?"
+    readback_approval:
+      chat: "I can't issue this refund myself, but I can send a request to refund {amount} for {charge_label} to our team for approval. Shall I send this to our team for approval?"
+      voice: "I can't issue this refund myself, but I can send a request to refund {amount} for {charge_label_spoken} to our team for approval. Shall I send this to our team for approval?"
+  billing_email:
+    enabled: true
+    per_account_per_day: 1
+    step_up_required_tiers: [pro, business]
+    approval_tiers: [enterprise]
+    step_up_valid_seconds: 300
+    pending_ttl_seconds: 600
+    readback:
+      chat: "I'll change the billing contact email from {old_email_masked} to {new_email}. To confirm, enter your support PIN in the card and press Confirm."
+      voice: "I'll change the billing email to {new_email_spelled}. To confirm, please type your support PIN into the card on screen and press Confirm."
+    readback_approval:
+      chat: "I can't change the billing contact email myself, but I can send a request to change it from {old_email_masked} to {new_email} to our team for approval. Shall I send this to our team for approval?"
+      voice: "I can't change the billing email myself, but I can send a request to change it to {new_email_spelled} to our team for approval. Shall I send this to our team for approval?"
+  notification_prefs:
+    enabled: true
+    allowed_keys: [product_updates, billing_notices, incident_alerts, weekly_digest]
+  grace_extension:
+    enabled: false
+    requires_status: past_due
+    tiers:
+      free:       { eligible: false }
+      pro:        { eligible: true, days: 7,  once_per_months: 12 }
+      business:   { eligible: true, days: 14, once_per_months: 6 }
+      enterprise: { eligible: true, approval_only: true }
+    pending_ttl_seconds: 600
+    readback:
+      chat: "I can extend your payment grace period by {days} days, until {grace_until}. Shall I go ahead?"
+      voice: "I can extend your payment grace period by {days} days, until {grace_until_spoken}. Shall I go ahead?"
+    readback_approval:
+      chat: "I can't extend the grace period myself, but I can send a request for an extension to our team for approval. Shall I send this to our team for approval?"
+      voice: "I can't extend the grace period myself, but I can send a request for an extension to our team for approval. Shall I send this to our team for approval?"
+
+identity:
+  pin_digits: 4
+  max_failures_per_session: 3
+  account_lock: { failures: 5, window_minutes: 15, lock_minutes: 15 }
+  session_ttl_minutes: 120
+
+tickets:
+  priority_by_tier: { enterprise: P2, business: P2, pro: P3, free: P4, unverified: P4 }
+  enterprise_blocking_priority: P1
+  target_label: { P1: "1 hour", P2_enterprise: "4 hours", P2: "8 hours", P3: "24 hours", P4: "72 hours" }
+  queues: [billing, technical, account, approvals]
+  category_queue:
+    billing: billing
+    refund: billing
+    access: technical
+    sso: technical
+    integration: technical
+    bug: technical
+    account_change: account
+    commitment: account
+    human_requested: account
+    other: technical
+  limits: { verified_per_account_per_day: 5, unverified_per_session: 2 }
+
+reason_codes:
+  ROLE_NOT_PERMITTED:
+    decision: declined
+    policy_ref: { article: roles-and-permissions, section: billing-permissions }
+    message: "Only an account owner or billing admin can make billing changes."
+  FREE_NOTHING_CHARGED:
+    decision: declined
+    policy_ref: { article: refund-policy, section: free-plan }
+    message: "The Free plan has no charges to refund."
+  TRIAL_NOTHING_TO_REFUND:
+    decision: declined
+    policy_ref: { article: refund-policy, section: trials }
+    message: "Trials are not charged, so there is nothing to refund."
+  PAST_DUE:
+    decision: declined
+    policy_ref: { article: refund-policy, section: past-due-accounts }
+    message: "Refunds can't be issued while the account has an unpaid balance. I've passed this to our billing team."
+    followup_queue: billing
+  ALREADY_REFUNDED:
+    decision: declined
+    policy_ref: { article: refund-policy, section: how-refunds-work }
+    message: "That charge has already been refunded."
+  CHARGE_NOT_REFUNDABLE:
+    decision: declined
+    policy_ref: { article: refund-policy, section: how-refunds-work }
+    message: "That charge can't be refunded because it was not collected."
+  PRO_PAST_LATE_BAND:
+    decision: declined
+    policy_ref: { article: refund-policy, section: pro-plan-refunds }
+    message: "Pro refunds are possible up to {window} days after the charge, or up to {late} days later with approval; this charge is {age} days old."
+  OUTSIDE_WINDOW:
+    decision: declined
+    policy_ref: { article: refund-policy, section: business-plan-refunds }
+    message: "Business refunds are possible within {window} days of the charge; this charge is {age} days old."
+  PRO_LATE_IN_BAND:
+    decision: needs_approval
+    policy_ref: { article: refund-policy, section: pro-plan-refunds }
+  PRO_OVER_CAP:
+    decision: needs_approval
+    policy_ref: { article: refund-policy, section: pro-plan-refunds }
+  PRO_SECOND_IN_REPEAT_WINDOW:
+    decision: needs_approval
+    policy_ref: { article: refund-policy, section: pro-plan-refunds }
+  BUSINESS_APPROVAL_REQUIRED:
+    decision: needs_approval
+    policy_ref: { article: refund-policy, section: business-plan-refunds }
+  ENTERPRISE_HUMAN_DECIDES:
+    decision: needs_approval
+    policy_ref: { article: support-and-escalation, section: approvals }
+  PRO_WITHIN_LIMITS:
+    decision: allowed
+    policy_ref: { article: refund-policy, section: pro-plan-refunds }
+  EMAIL_DAILY_LIMIT:
+    decision: declined
+    policy_ref: { article: billing-invoices-payments, section: billing-contact }
+    message: "The billing contact email can be changed once per day for each account, and it has already been changed today."
+  EMAIL_NO_CHANGE:
+    decision: declined
+    policy_ref: { article: billing-invoices-payments, section: billing-contact }
+    message: "That is already the billing contact email, so nothing needs to change."
+  EMAIL_STEP_UP:
+    decision: allowed
+    requires_step_up: true
+    policy_ref: { article: billing-invoices-payments, section: billing-contact }
+  EMAIL_ENTERPRISE_APPROVAL:
+    decision: needs_approval
+    policy_ref: { article: billing-invoices-payments, section: billing-contact }
+  NO_BILLING_ON_PLAN:
+    decision: declined
+    policy_ref: { article: plans-pricing-contracts, section: free-plan }
+    message: "The Free plan has no billing, so there is no billing contact to change."
+  GRACE_NOT_PAST_DUE:
+    decision: declined
+    policy_ref: { article: billing-invoices-payments, section: grace-extension }
+    message: "A grace extension is only available while the account has an overdue payment, and this account does not."
+  GRACE_ALREADY_USED:
+    decision: declined
+    policy_ref: { article: billing-invoices-payments, section: grace-extension }
+    message: "This account has already used its grace extension for the current period."
+  GRACE_WITHIN_LIMITS:
+    decision: allowed
+    policy_ref: { article: billing-invoices-payments, section: grace-extension }
+  GRACE_ENTERPRISE_APPROVAL:
+    decision: needs_approval
+    policy_ref: { article: billing-invoices-payments, section: grace-extension }
