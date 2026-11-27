@@ -18,7 +18,7 @@ from typing import Any
 from contracts import limits
 from contracts.agent_api import VerifiedPerson
 from contracts.events import FinalAnswer
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 
 from agent.clients.core_agent import CoreAgentClient
 from agent.clients.http import ToolCallError
@@ -28,7 +28,9 @@ from agent.middleware.router import TICKET_CLAUSE, VERIFY_LINE
 from agent.middleware.tool_guard import clamp_timeout
 from agent.sse import TurnOutcome, TurnStream
 from agent.steps import Step
-from agent.structured.pending import ingress_message_id
+from agent.gates import identity_key
+from agent.line_ids import INGRESS, code_line
+from agent.records import ticket_record
 from agent.turn_body import SessionFlags, StructuredResult
 from agent.turn_control import TurnControl
 
@@ -58,7 +60,7 @@ def _fixed(stream: TurnStream, control: TurnControl, text: str, end_reason: str,
     outcome.final = FinalAnswer.model_validate({**outcome.final.model_dump(mode="json"), "escalated": escalated,
                                                 "ticket": ticket})
     return StructuredResult(outcome=outcome, messages=[HumanMessage(CARD_SUBMITTED_LINE),
-                                                       AIMessage(text, id=ingress_message_id(control.turn_id))])
+                                                       code_line(INGRESS, control.turn_id, text, control.identity)])
 
 
 def _retry_prompt(stream: TurnStream, text: str, attempts_left: int) -> None:
@@ -81,7 +83,7 @@ async def _no_pin(control: TurnControl, flags: SessionFlags | None, escalator: E
     outcome = TurnOutcome.fixed(NO_PIN_LINE, end_reason="answered")
     line = outcome.final.say if control.mode == "voice" else NO_PIN_LINE
     return StructuredResult(outcome=outcome, messages=[HumanMessage(NO_PIN_PRESSED),
-                                                       AIMessage(line, id=ingress_message_id(control.turn_id))])
+                                                       code_line(INGRESS, control.turn_id, line, control.identity)])
 
 
 async def verify_card(stream: TurnStream, control: TurnControl, body: Any, core: CoreAgentClient,
@@ -138,6 +140,7 @@ async def verify_card(stream: TurnStream, control: TurnControl, body: Any, core:
     state: dict[str, Any] = {"verified": True, "claims_snapshot": claims}
     if memory.snapshot is not None:
         state["context_snapshot"] = memory.snapshot
+    control.identity = identity_key(state)  # every line and record from here on is this verification's (N3)
     held = before.held if before is not None else None
     if held and escalator is not None and before is not None and \
             not escalator.hold_is_for(held, before, claims.get("user_id")):
@@ -154,6 +157,8 @@ async def verify_card(stream: TurnStream, control: TurnControl, body: Any, core:
         line = outcome.final.say if control.mode == "voice" else text
         return StructuredResult(outcome=outcome, state=state,  # the code record: what the system did, in the thread
                                 messages=[HumanMessage(VERIFIED_THREAD_LINE),
-                                          AIMessage(line, id=ingress_message_id(control.turn_id))])
+                                          code_line(INGRESS, control.turn_id, line, control.identity),
+                                          *([ticket_record(control, ticket, str(held.get("reason") or "other"))]
+                                            if ticket else [])])
     return StructuredResult(model_text=VERIFIED_THREAD_LINE, verification="just_verified", state=state,
                             context_stale=memory.stale)

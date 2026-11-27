@@ -20,8 +20,11 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from contracts.events import FinalAnswer
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 
+from agent.gates import identity_key
+from agent.line_ids import INGRESS, code_line
+from agent.records import change_record, ticket_record
 from agent.clients.core_agent import CoreAgentClient
 from agent.escalation import Escalator, apology_is_last
 from agent.prompt import TurnContext, build_turn_message
@@ -29,7 +32,7 @@ from agent.say import speak
 from agent.sse import TurnOutcome, TurnStream
 from agent.structured.confirm import ActionReply, Confirmer
 from agent.structured.grammar import is_strict_no, is_strict_yes
-from agent.structured.pending import confirm_label, ingress_message_id, is_adjacent, pending_ref
+from agent.structured.pending import confirm_label, is_adjacent, pending_ref
 from agent.structured.verification import verify_card
 from agent.structured.voice_yes import REPROMPT_LINE, VoiceGate, voice_gate, voice_thread_text
 from agent.turn_body import SessionFlags, StructuredResult, TurnPrep
@@ -116,17 +119,19 @@ class StructuredInput:
 
     def _reply(self, stream: TurnStream, prep: TurnPrep, human: Any, text: str, end_reason: str, *,
                say: str | None = None, final_extra: dict[str, Any] | None = None,
-               state: dict[str, Any] | None = None) -> StructuredResult:
-        """What: a deterministic reply: human line plus AI line (id ingress-{turn_id}) go to the thread.
+               state: dict[str, Any] | None = None, records: list[Any] | None = None) -> StructuredResult:
+        """What: a deterministic reply: human line plus AI line (id ingress-{turn_id}) go to the thread, then the
+        code-written records of what the code did (agent.records, D-071 part 2).
         Use when: every ending of step 13. Inputs: stream, prep, human line, text, end reason, say, final fields,
-        state. Output: StructuredResult with an outcome. Side effects: none. Role: s2.4 step 15 append."""
+        state, records. Output: StructuredResult with an outcome. Side effects: none. Role: s2.4 step 15 append."""
         say = speak(say if say is not None else text)
         voice = prep.control.mode == "voice"
         outcome = TurnOutcome.fixed(text, end_reason=end_reason, say=say)
         if final_extra:
             outcome.final = FinalAnswer.model_validate({**outcome.final.model_dump(mode="json"), **final_extra})
-        msg = AIMessage(say if voice else text, id=ingress_message_id(prep.control.turn_id))
-        return StructuredResult(outcome=outcome, messages=[self._human(human), msg], state=state or {})
+        bound = identity_key({**prep.values, **(state or {})})  # the verification this line is written under (N3)
+        msg = code_line(INGRESS, prep.control.turn_id, say if voice else text, bound)
+        return StructuredResult(outcome=outcome, messages=[self._human(human), msg, *(records or [])], state=state or {})
 
     async def _ticket_offer(self, stream: TurnStream, prep: TurnPrep, human: Any) -> StructuredResult:
         """What: the s6.7 ticket offer accepted: one code ticket (reason model_unavailable) and its line, no model.
@@ -136,7 +141,8 @@ class StructuredInput:
         if prep.control.awaiting_verification and self.flags is not None:  # D-070 hold: the card was requested
             await self.flags.set_awaiting_verification(prep.control.session_id, True)
         return self._reply(stream, prep, human, text, end_reason,
-                           final_extra={"escalated": end_reason == "escalated", "ticket": ticket})
+                           final_extra={"escalated": end_reason == "escalated", "ticket": ticket},
+                           records=[ticket_record(prep.control, ticket, "model_unavailable")] if ticket else [])
 
     def _not_current(self, stream: TurnStream, prep: TurnPrep, human: str, pending_id: str) -> StructuredResult:
         """What: a press for a pending that is not the current one: no core call, outcome expired, changed false.
@@ -218,5 +224,13 @@ class StructuredInput:
         if reply.needs_verification:
             return await self._verify_again(stream, prep, human, reply.text)
         state = {} if reply.keep_pending else {"pending": None}
+        records = []
+        if reply.changed and reply.outcome in ("committed", "submitted"):
+            records.append(change_record(prep.control, "commit" if reply.outcome == "committed" else "submit",
+                                         reply.text, pending_action_id=pending.get("pending_action_id"),
+                                         outcome=reply.outcome, ticket=reply.ticket))
+        elif reply.ticket and reply.end_reason == "escalated":
+            records.append(ticket_record(prep.control, reply.ticket, "tool_failure"))
         return self._reply(stream, prep, human, reply.text, reply.end_reason, say=reply.say, state=state,
-                           final_extra={"escalated": reply.end_reason == "escalated", "ticket": reply.ticket})
+                           final_extra={"escalated": reply.end_reason == "escalated", "ticket": reply.ticket},
+                           records=records)

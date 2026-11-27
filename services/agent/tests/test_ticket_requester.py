@@ -95,7 +95,8 @@ async def test_verifying_opens_the_held_ticket_for_that_person_and_clears_the_ho
     assert outcome.final.text == f"Thanks, {ex.CLAIMS.display_name}. I've opened a ticket for our team, ticket ending 8213."
     assert holds.held is None
     messages = (await w.values())["messages"]
-    assert isinstance(messages[-2], HumanMessage) and messages[-1].content == outcome.final.text  # code record
+    assert isinstance(messages[-3], HumanMessage) and messages[-2].content == outcome.final.text  # the line
+    assert str(messages[-1].id).startswith("record-")  # then the code record of the ticket (D-071 part 2)
 
 
 async def test_no_escalation_fires_while_the_verification_card_is_pending() -> None:
@@ -193,3 +194,25 @@ async def test_expiry_of_the_verification_clears_the_hold() -> None:
     await w.seed({"messages": [], **OWNER})
     await w.send(text="hello again")
     assert holds.held is None
+
+
+async def test_the_held_ticket_opened_after_verification_gets_its_code_record_bound_to_that_person() -> None:
+    # D-071 part 2 with D-070: the ticket the code opens after the card succeeds is written to the thread as a code
+    # record, stamped with the verification it was opened under, so the model and Gate 2 know it exists.
+    from agent.gates import identity_key
+    from agent.records import RECORD_ID_PREFIX, session_tickets
+
+    holds = MemoryHolds()
+    w = World([call("search_kb", {"query": "hipaa baa"})], tools={"search_kb": routed_search("not_in_docs")},
+              verified=False, holds=holds)
+    await w.send(text=QUESTION)
+    outcome, _ = await w.send(verification={"account_id": ex.ACCOUNT_ID, "pin": ex.STUB_PIN})
+    values = await w.values()
+    records = [m for m in values["messages"] if str(m.id or "").startswith(RECORD_ID_PREFIX)]
+    assert len(records) == 1 and records[0].response_metadata["qs_action"]["kind"] == "ticket"
+    assert "ticket ending 8213" in str(records[0].content)
+    key = identity_key(values)
+    assert key is not None and records[0].response_metadata["bound_to"] == key
+    line = [m for m in values["messages"] if m.content == outcome.final.text][-1]
+    assert line.response_metadata["bound_to"] == key  # the line is written under the new verification (N3)
+    assert session_tickets(values["messages"], key) == ["ticket ending 8213"]

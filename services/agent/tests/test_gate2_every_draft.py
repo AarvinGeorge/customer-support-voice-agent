@@ -19,6 +19,7 @@ from agent import gates, line_ids
 from agent.gates import CLARIFY_LINE, enforce_code_rules, is_code_line, parse_verifier_reply
 from agent.middleware.grounding import GroundingMiddleware
 from agent.middleware.router import route_message
+from agent.records import ticket_record
 from agent.structured.pending import ingress_message_id
 from agent.turn_control import TURN_CONTROL, Route, TurnControl, bind_turn_control
 
@@ -159,12 +160,13 @@ def code_line_ids() -> list[str]:
     control.set_route(Route("decline_off_topic"))
     built = [str(route_message(control).id), ingress_message_id("T1")]  # from the writers themselves
     return built + [line_ids.line_id(p, "T1") for p in (line_ids.GATE2, line_ids.LIMIT, line_ids.DEADLINE,
-                                                       line_ids.UNAVAILABLE)]
+                                                       line_ids.UNAVAILABLE)] + [
+        str(ticket_record(control, {"display": "ticket ending 8213"}, "deadline").id)]  # agent.records (D-071)
 
 
 def test_every_prefix_constant_is_a_code_line_prefix_and_no_other_id_can_be_built():
     consts = {v for k, v in vars(line_ids).items() if k.isupper() and isinstance(v, str)}
-    assert consts == set(line_ids.CODE_LINE_PREFIXES) and len(consts) == 6
+    assert consts == set(line_ids.CODE_LINE_PREFIXES) and len(consts) == 7  # RECORD added (D-071 part 2)
     with pytest.raises(ValueError):
         line_ids.line_id("draft-", "T1")
 

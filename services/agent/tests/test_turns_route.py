@@ -1005,3 +1005,37 @@ def test_wiring_gaps_flags_a_body_without_structured_input_or_without_last_turn(
     app.state.ingress.run_agent = object()
     gaps, _ = composition.wiring_gaps(app)
     assert any(g.startswith("turn body") for g in gaps), gaps
+
+
+async def test_wire_app_schedules_the_verifier_warm_up_with_the_runtime_verifier_and_provider(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Review PR #71 m7: removing the wiring line must fail a test. wire_app runs inside the lifespan's loop.
+    monkeypatch.setenv("CORE_TOKEN_COMMIT", COMMIT_FROM_ENV)
+    seen: list[tuple[Any, str]] = []
+    verifier = object()
+
+    def fake_start(v: Any, provider: str) -> str:
+        """What: record the scheduling. Use when: this test. Inputs: verifier, provider. Output: a marker.
+        Side effects: appends. Role: spy."""
+        seen.append((v, provider))
+        return "scheduled"
+
+    class Reg(FakeRegistry):
+        """What: the fake registry plus the grounding_verifier spec. Use when: this test. Inputs: none.
+        Output: spec(). Side effects: none. Role: fake."""
+
+        def spec(self, role: str) -> Any:
+            """What: a spec with a provider. Use when: wire_app. Inputs: role. Output: namespace.
+            Side effects: none. Role: fake."""
+            return SimpleNamespace(provider="anthropic")
+
+    def fake_runtime(cfg: Settings, *, http: Any, checkpointer: Any, registry: Any = None) -> Any:
+        """What: a runtime with a verifier. Use when: this test. Inputs: as build_agent_runtime. Output: namespace.
+        Side effects: none. Role: fake."""
+        return SimpleNamespace(agent=object(), core=object(), registry=Reg(), verifier=verifier)
+
+    monkeypatch.setattr(composition, "build_agent_runtime", fake_runtime)
+    monkeypatch.setattr(composition, "start_verifier_warm_up", fake_start)
+    state = SimpleNamespace(checkpointer=object(), pg_pool=object(), redis=object(), http=object(), voice=None)
+    assert composition.wire_app(SimpleNamespace(state=state), settings()) is not None  # type: ignore[arg-type]
+    assert seen == [(verifier, "anthropic")] and state.verifier_warm_up == "scheduled"
