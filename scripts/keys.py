@@ -92,9 +92,11 @@ def read_env(path: Path) -> dict[str, str]:
 def upsert_env(path: Path, name: str, value: str) -> None:
     """What: set NAME=value in the env file, replacing an existing line or appending one.
     Use when: storing a key. Inputs: path, name, value (no newlines). Output: none.
-    Side effects: atomic rewrite of the file with mode 0600. Role: the only writer of .env."""
+    Side effects: atomic rewrite of the file with mode 0600; a symlinked path is resolved first so the
+    link stays a link and the target is the file rewritten. Role: the only writer of .env."""
     if "\n" in value or "\r" in value:
         raise ValueError("value must be a single line")
+    path = Path(os.path.realpath(path))
     lines = path.read_text().splitlines(keepends=True) if path.exists() else []
     new_line = f"{name}={value}\n"
     replaced = False

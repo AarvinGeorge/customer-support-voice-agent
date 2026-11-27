@@ -159,5 +159,44 @@ class EnvParityTests(unittest.TestCase):
             self.assertIn(n, keys.SPECS)
 
 
+class SymlinkTests(unittest.TestCase):
+    """What: tests that writes go through a .env symlink to the real file.
+    Use when: changing upsert_env or generate_missing. Inputs: none. Output: assertions.
+    Side effects: temp dirs only. Role: stops worktrees from forking the secrets file."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = Path(self.dir.name)
+        (root / "main").mkdir()
+        (root / "wt").mkdir()
+        self.target = root / "main" / ".env"
+        self.target.write_text("A=1\n")
+        os.chmod(self.target, 0o600)
+        self.link = root / "wt" / ".env"
+        self.link.symlink_to(self.target)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_upsert_through_symlink_updates_target_and_keeps_link(self):
+        keys.upsert_env(self.link, "B", "2")
+        self.assertTrue(self.link.is_symlink())
+        self.assertEqual(self.target.read_text(), "A=1\nB=2\n")
+        self.assertEqual(stat.S_IMODE(os.stat(self.target).st_mode), 0o600)
+
+    def test_gen_through_symlink_updates_target_and_keeps_link(self):
+        made = keys.generate_missing(self.link)
+        self.assertTrue(made)
+        self.assertTrue(self.link.is_symlink())
+        self.assertIn("PIN_PEPPER", keys.read_env(self.target))
+        self.assertEqual(stat.S_IMODE(os.stat(self.target).st_mode), 0o600)
+        self.assertEqual(keys.generate_missing(self.link), [])
+
+    def test_no_stray_temp_files_left(self):
+        keys.upsert_env(self.link, "B", "2")
+        self.assertEqual(sorted(p.name for p in self.target.parent.iterdir()), [".env"])
+        self.assertEqual(sorted(p.name for p in self.link.parent.iterdir()), [".env"])
+
+
 if __name__ == "__main__":
     unittest.main()
