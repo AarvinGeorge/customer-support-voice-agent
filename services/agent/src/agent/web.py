@@ -18,6 +18,8 @@ from fastapi.responses import JSONResponse
 from langchain_core.utils.uuid import uuid7
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from agent.sse import INTERNAL_ERROR_CLASS
+
 log = logging.getLogger("agent.web")
 
 
@@ -66,7 +68,7 @@ def install_http(app: FastAPI, served_by: str) -> None:
         except Exception:  # noqa: BLE001 - last line of defence; never leak internals
             log.exception("unhandled error request_id=%s trace_id=%s", request.state.request_id,
                           request.state.trace_id)
-            response = error_response(request, 500, "provider_5xx", "INTERNAL",
+            response = error_response(request, 500, INTERNAL_ERROR_CLASS, "INTERNAL",
                                       "Something went wrong on our side. Please try again.",
                                       retryable=True, changed=None)
         response.headers["X-Request-Id"] = request.state.request_id

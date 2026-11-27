@@ -124,6 +124,7 @@ async def test_unhandled_exception_returns_envelope_not_a_stack_trace():
     assert "secret internals" not in r.text
     env = ErrorEnvelope.model_validate(r.json())
     assert env.error.code == "INTERNAL" and env.error.changed is None and env.error.retryable is True
+    assert env.error.class_ == "core_unavailable"  # closest internal class; never a provider_* class
     assert r.headers["X-Served-By"] == "agent_a"
 
 
