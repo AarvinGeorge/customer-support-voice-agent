@@ -12,6 +12,8 @@ CREATE INDEX CONCURRENTLY, which cannot run inside the SQL runner's transaction 
 """
 from __future__ import annotations
 
+from typing import Any
+
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 
@@ -21,4 +23,5 @@ async def run(url: str) -> None:
     Side effects: DDL and one REVOKE in schema agent. Role: hook entry point."""
     async with AsyncPostgresSaver.from_conn_string(url) as saver:
         await saver.setup()
-        await saver.conn.execute("REVOKE ALL ON agent.checkpoint_migrations FROM agent_app")
+        conn: Any = saver.conn  # from_conn_string opens one AsyncConnection, never a pool
+        await conn.execute("REVOKE ALL ON agent.checkpoint_migrations FROM agent_app")

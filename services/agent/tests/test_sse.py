@@ -124,6 +124,8 @@ async def test_frames_match_the_contract_and_the_draft_flushes_in_40_char_tokens
     assert "".join(tokens) == answer and [len(t) for t in tokens] == [40, len(answer) - 40]
     steps = [(e.type, getattr(e, "kind", None)) for e in events if e.type.startswith("step.")]
     assert steps == [("step.started", "model"), ("step.completed", None)] * 2
+    ids = [e.step_id.rsplit(":", 1)[-1] for e in events if e.type.startswith("step.")]
+    assert ids == ["1", "1", "2", "2"], ids  # review PR #17 M1: no skipped step numbers
     done = events[-1]
     assert isinstance(done, TurnCompletedEvent) and done.final.text == answer and done.end_reason == "answered"
     assert done.usage.model_calls == 2 and done.usage.tool_calls == 1 and done.replayed is False

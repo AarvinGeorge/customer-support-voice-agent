@@ -330,7 +330,7 @@ async def stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[st
                         model_name = (m.response_metadata or {}).get("model_name") or model_name
                     model_used = model_name
                     usage = add_usage(usage, call.model_copy(update={"model_calls": 1, "models_used": [model_name]}))
-                    stream.emit("step.completed", step_id=attempt.get("step_id", stream.next_step_id()),
+                    stream.emit("step.completed", step_id=attempt.get("step_id") or stream.next_step_id(),
                                 status="error" if chunk.get("error") else "ok", ms=stream.ms() - attempt.get("t", 0),
                                 title="Thought it through", summary={}, attempt=1, model=model_name,
                                 input_tokens=call.input_tokens, output_tokens=call.output_tokens,
