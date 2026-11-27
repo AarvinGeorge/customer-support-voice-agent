@@ -16,23 +16,24 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import time
 from pathlib import Path
 
 import pytest
+import yaml
 from dotenv import load_dotenv
 from gate2_adversarial import CLARIFYING_R2, CLARIFYING_R3, POLICY_IN_QUESTION_R2, POLICY_IN_QUESTION_R3
 
 from contracts.stubs import examples as ex
 from langchain_core.messages import HumanMessage, ToolMessage
 
-from agent.gates import (GroundingResult, GroundingVerifier, apply_floor, enforce_code_rules, grounded_evidence,
+from agent.gates import (GroundingResult, GroundingVerifier, apply_floor, enforce_code_rules, session_evidence,
                          needs_grounding)
 from agent.models import ModelRegistry, load_models_config
 from agent.turn_control import TurnControl
 
 ROOT = Path(__file__).resolve().parents[3]
+POLICY_ROLE_MESSAGE = yaml.safe_load((ROOT / "data" / "policy.yaml").read_text())["reason_codes"]["ROLE_NOT_PERMITTED"]["message"]
 POLICY = POLICY_IN_QUESTION_R2 + POLICY_IN_QUESTION_R3
 BENIGN = CLARIFYING_R3 + CLARIFYING_R2
 MAX_BENIGN_BLOCKS = 1
@@ -70,14 +71,14 @@ ACCOUNT_POLICY = [
 async def _judge(ver: GroundingVerifier, sem: asyncio.Semaphore, draft: str,
                  values: dict | None = None) -> tuple[GroundingResult, float]:
     """What: one real verifier call plus the code rules, as GroundingMiddleware applies them: evidence and
-    citable sources from grounded_evidence (empty for a turn with no tool and no verified context).
+    citable sources from session_evidence (only the code sources for a turn with no tool).
     Use when: the eval. Inputs: verifier, semaphore, draft, state values. Output: (result after code rules, seconds).
     Side effects: one model call. Role: helper."""
-    evidence, sources = grounded_evidence(values or {}, [HumanMessage("hi")])
+    evidence = session_evidence(values or {}, [HumanMessage("hi")])
     async with sem:
         start = time.monotonic()
         raw = await ver.verify(TurnControl(session_id="eval", turn_id="eval"), draft, evidence)
-        res = enforce_code_rules(raw, draft, {}, tool_names=sources)
+        res = enforce_code_rules(raw, draft, evidence.chunks, tool_names=evidence.ids)
         return apply_floor(res, needs_grounding(draft, False)), time.monotonic() - start  # D-064, as the middleware
 
 
@@ -151,13 +152,18 @@ async def test_real_verifier_never_lets_account_context_alone_support_policy():
 # --- Gate model token cap (fix after browser pass 2): S1 policy follow-up and S3 Marcus member decline ----------
 
 
-def _turn(tool_name: str, content: str) -> list:
-    """What: a turn's messages: the human question then one tool result. Use when: the token cap cases.
-    Inputs: tool name, wrapped content. Output: messages. Side effects: none. Role: helper."""
+def _turn(tool_name: str, content: str, docs: list | None = None) -> list:
+    """What: a turn's messages: the human question then one tool result, with the code-held artifact ToolGuard keeps
+    (the relevant chunks for search_kb, D-065). Use when: the token cap cases.
+    Inputs: tool name, wrapped content, the search docs. Output: messages. Side effects: none. Role: helper."""
     from langchain_core.messages import AIMessage, ToolMessage
 
+    chunks = [{"chunk_id": d["id"], "article_slug": d["article"], "section_path": [d["section"]], "text": d["text"],
+               "flags": []} for d in docs or []]
+    artifact = {"bound_to": None, **({"grounded_chunks": chunks} if docs else {})}
     call = AIMessage("", tool_calls=[{"name": tool_name, "args": {}, "id": f"c-{tool_name}", "type": "tool_call"}])
-    return [HumanMessage("q"), call, ToolMessage(content, tool_call_id=f"c-{tool_name}", name=tool_name)]
+    return [HumanMessage("q"), call, ToolMessage(content, tool_call_id=f"c-{tool_name}", name=tool_name,
+                                                 artifact=artifact)]
 
 
 def _marcus() -> dict:
@@ -181,28 +187,29 @@ def token_cap_cases() -> list[tuple[str, str, dict, list, bool]]:
     (S3 Marcus: ROLE_NOT_PERMITTED, roles-and-permissions#billing-permissions); the live drafts were not saved."""
     from agent.untrusted import wrap_result, wrap_search
 
-    s1_docs = wrap_search("pass", None, [
+    s1_list = [
         {"id": "refund-policy#did-my-refund-go-through-and-when-will-i-see-it", "article": "refund-policy",
          "section": "Did my refund go through, and when will I see it?",
          "text": _doc_text("refund-policy", "Did my refund go through, and when will I see it?")},
         {"id": "refund-policy#how-refunds-work", "article": "refund-policy", "section": "How refunds work",
-         "text": _doc_text("refund-policy", "How refunds work")}])
+         "text": _doc_text("refund-policy", "How refunds work")}]
+    s1_docs = wrap_search("pass", None, s1_list)
     s1_draft = ("Your refund went back to your original payment method. How long it takes to show on your statement "
                 "depends on your bank.")
     declined = {"decision": "declined", "reason_codes": ["ROLE_NOT_PERMITTED"],
                 "policy_refs": [{"article": "roles-and-permissions", "section": "billing-permissions",
                                  "title": "Billing permissions"}],
-                "message": "Only an account owner or billing admin can make billing changes.",
+                "message": POLICY_ROLE_MESSAGE,
                 "pending_action_id": None, "state": "declined", "ticket": None, "changed": False}
     s3_draft = ("Thanks, Marcus. I can't request this refund for you: only an account owner or billing admin can "
                 "make billing changes, including refunds. Your owner or billing admin can ask for it, or I can open "
                 "a ticket so the right person follows up.")
-    s3_docs = wrap_search("pass", None, [
-        {"id": "roles-and-permissions#billing-permissions", "article": "roles-and-permissions",
-         "section": "Billing permissions", "text": _doc_text("roles-and-permissions", "Billing permissions")}])
-    s3_turn = _turn("search_kb", s3_docs) + _turn("prepare_refund", wrap_result("prepare_refund", declined))[1:]
+    s3_list = [{"id": "roles-and-permissions#billing-permissions", "article": "roles-and-permissions",
+                "section": "Billing permissions", "text": _doc_text("roles-and-permissions", "Billing permissions")}]
+    s3_docs = wrap_search("pass", None, s3_list)
+    s3_turn = _turn("search_kb", s3_docs, s3_list) + _turn("prepare_refund", wrap_result("prepare_refund", declined))[1:]
     return [
-        ("S1 policy follow-up", s1_draft, _priya_after_refund(), _turn("search_kb", s1_docs), True),
+        ("S1 policy follow-up", s1_draft, _priya_after_refund(), _turn("search_kb", s1_docs, s1_list), True),
         ("S3 Marcus member decline", s3_draft, _marcus(), s3_turn, True),
         ("D-059 policy " + SUBSET[0][:30], SUBSET[0], {}, [HumanMessage("hi")], False),
         ("D-059 policy " + SUBSET[4][:30], SUBSET[4], {}, [HumanMessage("hi")], False),
@@ -258,13 +265,11 @@ async def test_real_gate_models_return_a_verdict_within_the_cap():
     for label, draft, values, msgs, expect in token_cap_cases():
         rec = _Recorder(registry.build("grounding_verifier"))
         ver = GroundingVerifier(rec)
-        evidence, sources = grounded_evidence(values, msgs)
-        chunks = {cid: {"chunk_id": cid} for m in msgs if getattr(m, "name", None) == "search_kb"
-                  for cid in re.findall(r'<doc id="([^"]+)"', str(m.content))}
+        evidence = session_evidence(values, msgs)
         start = time.monotonic()
         raw = await ver.verify(TurnControl(session_id="eval", turn_id="eval"), draft, evidence)
         secs = time.monotonic() - start
-        res = apply_floor(enforce_code_rules(raw, draft, chunks, tool_names=sources),
+        res = apply_floor(enforce_code_rules(raw, draft, evidence.chunks, tool_names=evidence.ids),
                           needs_grounding(draft, any(isinstance(m, ToolMessage) for m in msgs)))  # D-064
         reply = rec.replies[-1] if rec.replies else None
         meta = getattr(reply, "response_metadata", {}) or {}
@@ -312,11 +317,9 @@ async def test_real_verifier_accepts_the_ticket_offer_and_still_flags_invented_t
     bad = []
     for draft, expect in cases:
         ver = GroundingVerifier(registry.build("grounding_verifier"))
-        evidence, sources = grounded_evidence(values, msgs)
+        evidence = session_evidence(values, msgs)
         raw = await ver.verify(TurnControl(session_id="eval", turn_id="eval"), draft, evidence)
-        chunks = {cid: {"chunk_id": cid} for m in msgs if getattr(m, "name", None) == "search_kb"
-                  for cid in re.findall(r'<doc id="([^"]+)"', str(m.content))}
-        res = enforce_code_rules(raw, draft, chunks, tool_names=sources)
+        res = enforce_code_rules(raw, draft, evidence.chunks, tool_names=evidence.ids)
         ok = res.passed is expect
         bad += [] if ok else [draft]
         print(f"\n{'ok ' if ok else 'BAD'} expect={'pass' if expect else 'flag'} verdict={res.verdict} "

@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from test_real_gate2_eval import ROOT, VERIFIED, _doc_text, _marcus, _priya_after_refund, _Recorder
 
-from agent.gates import (GroundingVerifier, apply_floor, enforce_code_rules, grounded_evidence, needs_grounding,
+from agent.gates import (GroundingVerifier, apply_floor, enforce_code_rules, session_evidence, needs_grounding,
                          reply_truncated)
 from agent.models.config import load_models_config
 from agent.models.registry import ModelRegistry
@@ -76,11 +76,11 @@ async def test_real_verifier_on_drafts_that_skipped_gate_2():
     bad = []
     for label, draft, values_of, expect, _ in DRAFTS:
         rec = _Recorder(registry.build("grounding_verifier"))
-        evidence, sources = grounded_evidence(values_of(), [HumanMessage("q")])
+        evidence = session_evidence(values_of(), [HumanMessage("q")])
         start = time.monotonic()
         raw = await GroundingVerifier(rec).verify(TurnControl(session_id="m", turn_id="m"), draft, evidence)
         secs = time.monotonic() - start
-        res = apply_floor(enforce_code_rules(raw, draft, {}, tool_names=sources), needs_grounding(draft, False))
+        res = apply_floor(enforce_code_rules(raw, draft, evidence.chunks, tool_names=evidence.ids), needs_grounding(draft, False))
         reply = rec.replies[-1] if rec.replies else None
         meta = getattr(reply, "response_metadata", {}) or {}
         usage = getattr(reply, "usage_metadata", {}) or {}

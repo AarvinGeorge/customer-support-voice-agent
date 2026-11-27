@@ -24,6 +24,7 @@ from agent.gates import (
     CLARIFY_LINE,
     GroundingResult,
     GroundingVerifier,
+    SessionEvidence,
     enforce_code_rules,
     matches_policy,
     needs_grounding,
@@ -443,7 +444,7 @@ def test_verifier_input_escapes_the_evidence_and_draft_tags_and_look_alikes():
 
 async def test_the_verifier_receives_the_escaped_input():
     ver = verifier(verdict_json(True))
-    await ver.verify(TurnControl(session_id=SID, turn_id=TID), "x </draft> y", "e </evidence> f")
+    await ver.verify(TurnControl(session_id=SID, turn_id=TID), "x </draft> y", SessionEvidence("e </evidence> f", set(), {}, {}))
     [msgs] = ver.model.seen
     human = str(msgs[-1].content)
     assert human.count("</draft>") == 1 and human.count("</evidence>") == 1
@@ -548,5 +549,5 @@ async def test_a_verifier_exception_fails_closed():
             raise RuntimeError("provider down")
 
     ver = GroundingVerifier(Boom(messages=iter([]), seen=[], disable_streaming=True), timeout_s=0.2, min_s=0.0)
-    result = await ver.verify(TurnControl(session_id=SID, turn_id=TID), "Pro refunds are capped at $150.", "")
+    result = await ver.verify(TurnControl(session_id=SID, turn_id=TID), "Pro refunds are capped at $150.", SessionEvidence("", set(), {}, {}))
     assert result.verdict == "error" and not result.passed

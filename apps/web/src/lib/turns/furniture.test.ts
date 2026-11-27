@@ -148,7 +148,7 @@ describe("declineNotes", () => {
     expect(declineNotes(turnOf(s3, 1))).toEqual([
       {
         key: expect.any(String),
-        text: "Only an account owner or billing admin can make billing changes.",
+        text: "Only an account owner or billing admin can make billing changes. An owner or billing admin on your account can ask for it.",
         codes: "ROLE_NOT_PERMITTED",
         refs: ["Billing permissions · roles-and-permissions#billing-permissions"],
         unchanged: true,

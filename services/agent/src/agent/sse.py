@@ -24,7 +24,7 @@ from contracts.errors import ErrorBody
 from contracts.events import KEEPALIVE, Citation, Envelope, FinalAnswer, FinalConfidence, Usage, format_sse, parse_event
 from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 
-from agent.gates import answered_with_citations
+from agent.gates import answered_with_support
 from agent.middleware.router import route_reply
 from agent.models.usage import add_usage, normalize_usage, token_usage
 from agent.say import speak
@@ -325,9 +325,9 @@ def classify_final(stream: TurnStream, messages: list[Any], model_ids: set[str],
         cites = [Citation.model_validate(c) for c in (control.citations if control is not None else [])]
         final = FinalAnswer(text=text, say=text, citations=cites, escalated=False, confidence=final_confidence(control))
         # Gate 1 row 2: a first weak turn ends with the model's one clarifying question; D-066: unless the model
-        # answered and Gate 2 passed it with citations, which is an answer.
+        # answered and Gate 2 passed it with a supported claim, which is an answer.
         clarify = (control is not None and (control.retrieval or {}).get("decision") == "clarify"
-                   and not answered_with_citations(control))
+                   and not answered_with_support(control))
         return TurnOutcome(final=final, usage=usage, end_reason="clarify" if clarify else "answered",
                            model_used=model_used)
     # Another hook-written line (Gate 2): deterministic, no tokens.

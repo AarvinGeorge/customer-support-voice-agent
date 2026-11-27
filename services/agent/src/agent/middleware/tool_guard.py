@@ -30,7 +30,7 @@ from langchain_core.messages import ToolMessage
 
 from agent.clients.http import ToolCallError
 from agent.deadline import clamp_timeout, retry_fits  # shared doc 07 s8.2 helpers (re-exported)
-from agent.gates import retrieval_unavailable
+from agent.gates import identity_key, retrieval_unavailable
 from agent.middleware.visibility import visible_tool_names
 from agent.turn_control import CURRENT_CALL, CallScope, Route, TurnControl, require_control
 from agent.untrusted import unknown_result, wrap_result, wrap_search
@@ -107,14 +107,18 @@ def _rule(name: str, artifact: Any) -> dict[str, Any] | None:
     return {"decision": artifact["decision"], "reason_code": codes[0], "policy_ref": refs[0]}
 
 
-def _kept_artifact(name: str, artifact: Any) -> dict[str, Any] | None:
-    """What: the part of a raw result kept on the ToolMessage (checkpointed, never sent to a model): for search_kb
-    the relevant chunks with their citation fields, so Gate 2 can cite them in later turns (D-065); nothing else.
-    Use when: the success path. Inputs: name, raw artifact. Output: {"grounded_chunks": [...]} or None.
-    Side effects: none. Role: code-held provenance for session evidence."""
+def _kept_artifact(name: str, artifact: Any, state: Any = None) -> dict[str, Any]:
+    """What: the part of a result kept on the ToolMessage (checkpointed, never sent to a model): bound_to, the
+    verification it was fetched under (agent.gates.identity_key: "user|account" or None), on every result
+    (review PR #71 I3); for search_kb also the relevant chunks with their citation fields, so Gate 2 can cite them
+    in later turns (D-065).
+    Use when: the success path. Inputs: name, raw artifact, the agent state at the call.
+    Output: {"bound_to": ..., "grounded_chunks"?: [...]}. Side effects: none.
+    Role: code-held provenance for session evidence."""
+    kept: dict[str, Any] = {"bound_to": identity_key(state if isinstance(state, dict) else {})}
     if name == "search_kb" and isinstance(artifact, dict) and isinstance(artifact.get("grounded_chunks"), list):
-        return {"grounded_chunks": artifact["grounded_chunks"]}
-    return None
+        kept["grounded_chunks"] = artifact["grounded_chunks"]
+    return kept
 
 
 def _content(name: str, artifact: Any, raw_content: Any) -> str:
@@ -234,7 +238,7 @@ class ToolGuardMiddleware(AgentMiddleware):
                 _log.warning("tool %s raised %s; treated as a tool failure", name, type(exc).__name__)
                 err = ToolCallError("unavailable", message="The service returned an unexpected answer.")
             else:
-                return self._success(control, step, call, spec, attempt, msg)
+                return self._success(control, step, call, spec, attempt, msg, request.state)
             if not err.retryable:  # 4xx: core's answer, given to the model; no retry, not a failure
                 self._done(control, step, "error", spec.failed, attempt, detail=err.message[:80] or None)
                 return self._message(call, {"status": "error", "code": err.code, "message": err.message,
@@ -260,7 +264,7 @@ class ToolGuardMiddleware(AgentMiddleware):
             return self._message(call, unknown_result(status, changed=err.changed, message=err.message), error=True)
 
     def _success(self, control: TurnControl, step: tuple[str | None, int], call: dict[str, Any], spec: ToolSpec,
-                 attempt: int, msg: Any) -> ToolMessage:
+                 attempt: int, msg: Any, state: Any = None) -> ToolMessage:
         """What: finish a call whose handler returned: wrap its result (or its argument error) for the model.
         Use when: the handler returned a ToolMessage. Inputs: control, step, call, spec, attempt, message.
         Output: ToolMessage without the raw artifact. Side effects: one event. Role: success path."""
@@ -274,7 +278,7 @@ class ToolGuardMiddleware(AgentMiddleware):
         artifact = msg.artifact
         self._done(control, step, "ok", spec.title, attempt, detail=_detail(name, artifact), rule=_rule(name, artifact))
         return ToolMessage(content=_content(name, artifact, msg.content), tool_call_id=call["id"], name=name,
-                           artifact=_kept_artifact(name, artifact))
+                           artifact=_kept_artifact(name, artifact, state))
 
     @staticmethod
     def _refund(control: TurnControl, name: str, spec: ToolSpec) -> None:

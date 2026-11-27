@@ -80,17 +80,21 @@ class GroundingMiddleware(AgentMiddleware):
             control.events.emit("status", kind="checking_policy", message=CHECKING_POLICY_LINE)
         step = start_gate_step(control, "grounding_gate", "Checking the answer against policy")
         evidence = session_evidence(state, messages[:-1])  # D-065: session-scoped, bounded, with provenance
-        result = await self.verifier.verify(control, text, evidence.text)
+        result = await self.verifier.verify(control, text, evidence)
         result = apply_floor(enforce_code_rules(result, text, evidence.chunks, tool_names=evidence.ids), floor)
         failures = int(state.get("grounding_failures") or 0)
         claims = result.claims
         counts: dict[str, Any] = {"claims_total": len(claims), "claims_supported": sum(c["supported"] for c in claims),
                                   "claims": claims, "commitment": result.commitment,
-                                  "chunk_ids": sorted(control.retrieval_chunks)}
+                                  "chunk_ids": sorted(evidence.chunks)}  # the session chunks in the evidence (M6)
+        sources = {c["source_id"]: evidence.provenance[c["source_id"]] for c in claims
+                   if c["supported"] and c.get("source_id") in evidence.provenance}  # review PR #71 I4
         if result.passed:
             control.grounding = "pass"
+            control.grounding_supported = counts["claims_supported"]
             control.citations = citations_for(control, result, evidence.chunks)
-            step.finish(gate="grounding", verdict="pass", decision="answer", title=_TITLES["answer"], **counts)
+            step.finish(gate="grounding", verdict="pass", decision="answer", title=_TITLES["answer"],
+                        sources=sources, **counts)
             return {"grounding_failures": 0} if failures else None
         control.grounding = "fail"
         if result.commitment:
@@ -105,7 +109,7 @@ class GroundingMiddleware(AgentMiddleware):
         detail = ERROR_DETAILS.get(result.reason or "") if error else (
             FLOOR_DETAIL if result.reason == "no_claims_floor" else None)
         step.finish(gate="grounding", verdict=verdict, decision=decision, title=_TITLES[decision],
-                    status="error" if error else "ok", reason=result.reason, detail=detail, **counts)
+                    status="error" if error else "ok", reason=result.reason, detail=detail, sources=sources, **counts)
         removal = RemoveMessage(id=str(draft.id))
         if reason is None:
             line = AIMessage(CLARIFY_LINE, id=f"gate2-{control.turn_id}")

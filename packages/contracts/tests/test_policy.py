@@ -423,3 +423,73 @@ def test_role_decline_states_the_next_step_it_allows():
     msg = yaml.safe_load(POLICY.read_text())["reason_codes"]["ROLE_NOT_PERMITTED"]["message"]
     assert msg.startswith("Only an account owner or billing admin can make billing changes.")
     assert "an owner or billing admin on your account can ask for it" in msg.lower()
+
+
+_STOP = frozenset("that this with have been from your their there which while because cannot nothing already these "
+                  "those after than then only into they them what when where would could should about over also "
+                  "just".split())
+MESSAGE_SECTION_OVERLAP_MIN = 0.5  # measured 2026-11-27: lowest 0.50 (GRACE_ALREADY_USED), most 0.8 to 1.0
+
+
+def _section_text(article: str, slug: str) -> str:
+    """What: the body of one article section, its subsections included, up to the next heading of the same or a
+    higher level. Use when: the message-to-section tie. Inputs: article slug, section slug. Output: text.
+    Side effects: reads one file. Role: helper."""
+    import re
+    lines, out, level = (REPO / "data" / "articles" / f"{article}.md").read_text().splitlines(), [], None
+    for line in lines:
+        m = re.match(r"(#+)\s+(.*)", line)
+        if m:
+            heading = re.sub(r"[^a-z0-9]+", "-", m.group(2).lower()).strip("-")
+            if level is not None and len(m.group(1)) <= level:
+                break
+            if level is None and heading == slug:
+                level = len(m.group(1))
+                continue
+        if level is not None:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _content_words(text: str) -> set[str]:
+    """What: lowercase words of 4 or more letters, placeholders and _STOP removed. Use when: the overlap test.
+    Inputs: text. Output: set. Side effects: none. Role: helper."""
+    import re
+    return {w for w in re.findall(r"[a-z]+", re.sub(r"\{[a-z_]+\}", " ", text.lower())) if len(w) >= 4
+            and w not in _STOP}
+
+
+def test_every_decline_message_is_stated_by_the_article_section_it_cites():
+    """Review PR #71 M3: a decline message is what the customer is told, and its policy_ref is the article section
+    Gate 2 and the customer can check it against. Most of the message's content words must appear in that section
+    (subsections included), so a message rewritten away from its article, or a policy_ref pointed at the wrong
+    section, fails here. Meaning is checked live by Gate 2; this is the drift floor."""
+    _articles_dir()
+    c = load_policy(POLICY)
+    low = {}
+    for code, rc in c.reason_codes.items():
+        if not rc.message:
+            continue
+        section = _section_text(rc.policy_ref.article, rc.policy_ref.section)
+        assert section.strip(), (code, rc.policy_ref)
+        words = _content_words(rc.message)
+        share = len(words & _content_words(section)) / len(words)
+        if share < MESSAGE_SECTION_OVERLAP_MIN:
+            low[code] = (round(share, 2), sorted(words - _content_words(section)))
+    assert not low, low
+
+
+def test_role_decline_next_step_is_stated_by_its_section():
+    """Browser pass 2b: the next step the decline gives ("an owner or billing admin ... can ask for it") must be
+    what the cited section says (the request needs an owner or billing admin)."""
+    c = load_policy(POLICY)
+    rc = c.reason_codes["ROLE_NOT_PERMITTED"]
+    section = _section_text(rc.policy_ref.article, rc.policy_ref.section).lower()
+    assert "needs an owner or billing admin" in section and "owner or billing admin" in rc.message.lower()
+
+
+def test_the_s3_fixture_decline_message_is_the_policy_message():
+    """Review PR #71 M3: the contract fixtures quote the decline core sends; a stale copy would test the old text."""
+    from contracts.fixtures_build import ROLE_DECLINE_MESSAGE
+
+    assert ROLE_DECLINE_MESSAGE == load_policy(POLICY).reason_codes["ROLE_NOT_PERMITTED"].message
