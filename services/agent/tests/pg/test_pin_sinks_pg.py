@@ -53,11 +53,12 @@ KEPT = "QS-10423"
 VISITOR = "pg-sink-visitor"
 KEY = "k" * 32
 ORIGIN = "https://test"
-# The raw PIN as a standalone group: not inside a uuid group, a hex digest or a timestamp.
+# The raw PIN as a standalone group: not inside a uuid group, a hex digest or a timestamp (a log asctime such as
+# "10:55:34,821" must not count as "4,821", seen once as a flake).
 # Hex-led or hex-trailed digits are uuid groups or timestamps; every spoken, grouped and Unicode form is listed.
 SECRET = re.compile(r"(?<![0-9a-f-])4821(?![0-9a-f])|104234821|10423-4821|four[ ,.-]+eight[ ,.-]+two[ ,.-]+(?:one|oh)"
                     r"|forty[ -]?eight|twenty[ -]?one|48 21|4[ -]8[ -]2[ -]1|\uff14\uff18\uff12\uff11"
-                    r"|\u0664\u0668\u0662\u0661|4,821|4 821|4\.8\.2\.1|48\s+21|4/8/2/1|(?<![0-9a-f-])4481(?![0-9a-f])"
+                    r"|\u0664\u0668\u0662\u0661|(?<!\d)4,821|(?<!\d)4 821|4\.8\.2\.1|(?<!\d)48\s+21|4/8/2/1|(?<![0-9a-f-])4481(?![0-9a-f])"
                     r"|double four|four thousand|(?<![0-9a-f-])0482(?![0-9a-f])|nought four", re.IGNORECASE)
 
 
@@ -487,7 +488,8 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
         # checkpoint blobs are msgpack: decode them as UTF-8 too, so Unicode digits are searched in both forms.
         sinks["checkpoint_blobs (utf-8)"] = sinks["checkpoint_blobs"].encode("latin-1").decode("utf-8", "replace")
         sinks["checkpoint_writes (utf-8)"] = sinks["checkpoint_writes"].encode("latin-1").decode("utf-8", "replace")
-        leaks = {name: secret_hits(text)[:5] for name, text in sinks.items() if secret_hits(text)}
+        leaks = {name: [line[:300] for line in text.splitlines() if secret_hits(line)][:3]
+                 for name, text in sinks.items() if secret_hits(text)}
         assert leaks == {}, f"raw PIN found in: {leaks}"
     finally:
         run_trees.configure(client=previous_client, enabled=None)
