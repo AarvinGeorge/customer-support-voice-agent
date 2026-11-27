@@ -30,7 +30,7 @@ from langchain_core.utils.uuid import uuid7
 
 from agent.access import owned_session
 from agent.assembly import run_config
-from agent.ingress import Ingress, IngressInput, SessionRow, TurnRow, to_response
+from agent.ingress import Ingress, IngressInput, MergeResult, SessionRow, TurnRow, to_response
 from agent.limits.ratelimit import canonical_sid, limit_session_post, limit_voice_token, turn_counter
 from agent.models.config import RoleSpec
 from agent.prompt import _escape_frame  # pyright: ignore[reportPrivateUsage]  (the frame-tag escaper, M5)
@@ -150,16 +150,18 @@ class TranscriptMerger:
         Role: constructor."""
         self.store = store
 
-    async def __call__(self, inp: IngressInput, row: TurnRow) -> str | None:
+    async def __call__(self, inp: IngressInput, row: TurnRow) -> MergeResult:
         """What: claim unmerged client items, leaving out the item this voice/ask answers.
         Use when: Ingress._merge. Inputs: input (body is a VoiceAskRequest for voice), row.
-        Output: wrapped text or None. Side effects: UPDATE/INSERT. Role: merge."""
+        Output: MergeResult (wrapped text or None, and whether any claimed row is a user item, counted before the
+        display cap). Side effects: UPDATE/INSERT. Role: merge."""
         covered = None
         req = inp.body
         if isinstance(req, VoiceAskRequest) and req.user_item_id:
             text = redaction.redact(req.user_transcript or req.question, inp.redact_context or RedactContext())
             covered = CoveredItem(req.user_item_id, req.voice_session_id, text)  # redacted before storage (I1)
-        return format_merged(await self.store.take_unmerged(inp.session_id, row.turn_id, covered))
+        items = await self.store.take_unmerged(inp.session_id, row.turn_id, covered)
+        return MergeResult(format_merged(items), any(it.role == "user" for it in items))
 
 
 class RedisCallKeys:
