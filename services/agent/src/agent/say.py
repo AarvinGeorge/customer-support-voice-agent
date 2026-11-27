@@ -7,11 +7,18 @@ numbers and percents are words.
 Use when: every FinalAnswer (the SSE adapter applies it to `say` before turn.completed), every voice route line and
 deterministic voice reply, and any fixed line given to the voice model.
 Inputs: a chat line or a model draft. Output: speak(text) -> str; number_words, spell.
-Side effects: none. Role: one place for the spoken form; idempotent on its own output (no digits remain).
+Never raises: a token that is not a valid date is spoken as plain numbers, and any unexpected error falls back to
+the markdown-stripped text (logged), so model text can never crash a turn. Signs are kept ("minus twenty dollars"),
+ordinals are spoken ("the 1st" is "the first"), multi-part ids use the last four characters of the whole id
+(INV-2026-0412 is "invoice ending zero four one two").
+Side effects: an ERROR log on the fallback. Role: one place for the spoken form; idempotent on its own output.
 """
 from __future__ import annotations
 
+import logging
 import re
+
+log = logging.getLogger("agent.say")
 
 _ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
          "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"]
@@ -20,7 +27,9 @@ _ORDINAL = {"one": "first", "two": "second", "three": "third", "five": "fifth", 
             "twelve": "twelfth"}
 _MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
            "November", "December"]
-_MONTH_RE = r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?"
+_MONTH_RE = (r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?"
+             r"|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b\.?")
+_MINUS = "-\u2212"
 _ID_NOUNS = {"TCK": "ticket", "CH": "charge", "PA": "request", "QS": "account", "INV": "invoice", "U": "user"}
 
 
@@ -67,9 +76,12 @@ def spell(chars: str) -> str:
     return " ".join(_ONES[int(c)] if c.isdigit() else c.upper() for c in chars)
 
 
-def _date(day: int, month: int, year: int | None) -> str:
-    """What: "the twenty-first of November[ twenty twenty-six]". Use when: date rules. Inputs: day, month 1..12,
-    year. Output: words. Side effects: none. Role: helper (the form core uses in readback voice lines)."""
+def _date(day: int, month: int, year: int | None) -> str | None:
+    """What: "the twenty-first of November[ twenty twenty-six]", or None when day or month is out of range.
+    Use when: date rules. Inputs: day, month, year. Output: words or None (the caller keeps the text as written).
+    Side effects: none. Role: helper (the form core uses in readback voice lines)."""
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
     return f"the {ordinal_words(day)} of {_MONTHS[month - 1]}" + (f" {year_words(year)}" if year else "")
 
 
@@ -79,24 +91,34 @@ def _month(name: str) -> int:
     return [m[:3] for m in _MONTHS].index(name[:3].title()) + 1
 
 
+def _date_or_text(match: re.Match[str], day: str, month: int | None, year: str | None) -> str:
+    """What: the spoken date, or the matched text unchanged when it is not a valid date (the number rule then speaks
+    its digits). Use when: the date rules. Inputs: match, day digits, month number (None: unknown), year digits.
+    Output: text. Side effects: none. Role: helper."""
+    spoken = _date(int(day), month, int(year) if year else None) if month is not None else None
+    return spoken if spoken is not None else match.group(0)
+
+
 def _money(match: re.Match[str]) -> str:
-    """What: "$96.50" as "ninety-six dollars and fifty cents". Use when: the amount rule. Inputs: match.
-    Output: words. Side effects: none. Role: helper."""
-    dollars = int(match.group(1).replace(",", ""))
-    cents = int(match.group(2) or 0)
+    """What: "$96.50" as "ninety-six dollars and fifty cents", with a sign before or after the "$" as "minus".
+    Use when: the amount rule. Inputs: match (groups: sign, sign, dollars, cents). Output: words.
+    Side effects: none. Role: helper."""
+    minus = "minus " if match.group(1) or match.group(2) else ""
+    dollars = int(match.group(3).replace(",", ""))
+    cents = int(match.group(4) or 0)
     parts = []
     if dollars:
         parts.append(f"{number_words(dollars)} dollar{'s' if dollars != 1 else ''}")
     if cents:
         parts.append(f"{number_words(cents)} cent{'s' if cents != 1 else ''}")
-    return " and ".join(parts) or "zero dollars"
+    return minus + (" and ".join(parts) or "zero dollars")
 
 
 def _ident(match: re.Match[str]) -> str:
     """What: an id as "<noun> ending <last four spelled>"; the noun is dropped when the word before already says it.
     Use when: the id rule. Inputs: match (groups: word before, prefix, body). Output: words. Side effects: none.
     Role: helper."""
-    before, prefix, body = match.group(1) or "", match.group(2), match.group(3)
+    before, prefix, body = match.group(1) or "", match.group(2), match.group(3).replace("-", "")
     noun = _ID_NOUNS.get(prefix, "")
     lead = "" if not noun or before.strip().lower() == noun else f"{noun} "
     return f"{before}{lead}ending {spell(body[-4:])}"
@@ -130,22 +152,45 @@ def _strip_markdown(text: str) -> str:
 
 def speak(text: str) -> str:
     """What: the spoken form of a line (see module). Use when: building FinalAnswer.say and voice lines.
-    Inputs: text (markdown allowed). Output: plain text with no markdown, no raw id and no digit.
-    Side effects: none. Role: the say builder."""
-    s = _strip_markdown(text)
-    s = re.sub(r"(\b\w+\s)?\b([A-Z]{1,4})-([0-9A-Z]{4,})\b", _ident, s)
+    Inputs: text (markdown allowed). Output: plain text with no markdown and no raw id; never raises (on an
+    unexpected error the markdown-stripped text, logged). Side effects: an ERROR log on the fallback.
+    Role: the say builder."""
+    stripped = _strip_markdown(text)
+    try:
+        return _tidy(_spoken(stripped))
+    except Exception:  # noqa: BLE001 (untrusted model text must never crash a turn)
+        log.exception("say fallback: text spoken as written chars=%d", len(stripped))
+        return _tidy(stripped)
+
+
+def _tidy(s: str) -> str:
+    """What: collapse spaces and drop spaces before punctuation. Use when: speak. Inputs: text. Output: text.
+    Side effects: none. Role: helper."""
+    return re.sub(r"\s+([.,!?])", r"\1", re.sub(r"[ \t]+", " ", s)).strip()
+
+
+def _month_of(name: str | None) -> int | None:
+    """What: _month, or None for no name. Use when: date rules. Inputs: name. Output: 1..12 or None.
+    Side effects: none. Role: helper."""
+    return _month(name) if name else None
+
+
+def _spoken(s: str) -> str:
+    """What: the ordered rules (ids, references, amounts, dates, ordinals, percents, signs, numbers).
+    Use when: speak. Inputs: markdown-free text. Output: spoken text. Side effects: none. Role: helper."""
+    s = re.sub(r"(\b\w+\s)?\b([A-Z]{1,4})-([0-9A-Z]{4,}(?:-[0-9A-Z]+)*)\b", _ident, s)
     s = re.sub(r"\b(ending|reference)\s+((?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{4})\b",
                lambda m: f"{m.group(1)} {spell(m.group(2))}", s)
-    s = re.sub(r"\$\s?(\d[\d,]*)(?:\.(\d{2}))?", _money, s)
-    s = re.sub(r"\b(\d{4})-(\d{2})-(\d{2})\b",
-               lambda m: _date(int(m.group(3)), int(m.group(2)), int(m.group(1))), s)
-    s = re.sub(rf"\b(\d{{1,2}})\s+{_MONTH_RE}(?:\s+(\d{{4}}))?",
-               lambda m: _date(int(m.group(1)), _month(m.group(2)), int(m.group(3)) if m.group(3) else None), s)
-    s = re.sub(rf"\b{_MONTH_RE}\s+(\d{{1,2}})(?:,?\s+(\d{{4}}))?\b",
-               lambda m: _date(int(m.group(2)), _month(m.group(1)), int(m.group(3)) if m.group(3) else None), s)
+    s = re.sub(rf"(?:(?<!\w)([{_MINUS}])\s?)?\$\s?([{_MINUS}])?(\d[\d,]*)(?:\.(\d{{2}}))?", _money, s)
+    s = re.sub(r"\b(\d{4})-(\d{2})-(\d{2})\b", lambda m: _date_or_text(m, m.group(3), int(m.group(2)), m.group(1)), s)
+    s = re.sub(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+{_MONTH_RE}(?:\s+(\d{{4}}))?",
+               lambda m: _date_or_text(m, m.group(1), _month_of(m.group(2)), m.group(3)), s)
+    s = re.sub(rf"\b{_MONTH_RE}\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(\d{{4}}))?\b",
+               lambda m: _date_or_text(m, m.group(2), _month_of(m.group(1)), m.group(3)), s)
+    s = re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", lambda m: ordinal_words(int(m.group(1))), s)
     s = re.sub(r"(\d+(?:\.\d+)?)\s?%", lambda m: f"{_number_text(m.group(1))} percent", s)
-    s = re.sub(r"\d[\d,]*(?:\.\d+)?", _number, s)
-    return re.sub(r"\s+([.,!?])", r"\1", re.sub(r"[ \t]+", " ", s)).strip()
+    s = re.sub(rf"(?<![\w.])[{_MINUS}](?=\d)", "minus ", s)
+    return re.sub(r"\d[\d,]*(?:\.\d+)?", _number, s)
 
 
 def _number_text(raw: str) -> str:

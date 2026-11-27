@@ -144,3 +144,66 @@ async def test_apology_say_in_voice() -> None:
     w = World(model=Boom(messages=iter([])), fallback=Boom(messages=iter([])))
     outcome, _ = await w.send(mode="voice", text="help")
     assert outcome.final.say == escalation.MODEL_UNAVAILABLE_LINE
+
+
+@pytest.mark.parametrize("raw,spoken", [
+    # review PR #54 I1: invalid dates are spoken as numbers, never raise
+    ("batch 2026-13-45", "batch two thousand twenty-six-thirteen-forty-five"),
+    ("on 2026-00-10", "on two thousand twenty-six-zero-ten"),
+    ("on 45 Nov", "on forty-five Nov"),
+    # I2: negative amounts keep their sign
+    ("-$20.00", "minus twenty dollars"),
+    ("a refund of -$20.00 was applied", "a refund of minus twenty dollars was applied"),
+    ("−$20.00", "minus twenty dollars"),
+    ("$-20.00", "minus twenty dollars"),
+    ("balance -5", "balance minus five"),
+    # I3: ordinals
+    ("the 1st", "the first"),
+    ("2nd attempt", "second attempt"),
+    ("3rd time", "third time"),
+    ("the 21st", "the twenty-first"),
+    ("November 21st", "the twenty-first of November"),
+    ("21st Nov 2026", "the twenty-first of November twenty twenty-six"),
+    ("billed on the 1st of each month", "billed on the first of each month"),
+    # I4: multi-part ids, last four characters of the whole id
+    ("INV-2026-0412", "invoice ending zero four one two"),
+    ("invoice INV-2026-0412 is paid", "invoice ending zero four one two is paid"),
+    ("TCK-26118213", "ticket ending eight two one three"),
+    # M1: only real month names
+    ("3 Marketing seats", "three Marketing seats"),
+    ("Mark 2 as paid", "Mark two as paid"),
+    ("2 Separate charges", "two Separate charges"),
+])
+def test_speak_review_cases(raw: str, spoken: str) -> None:
+    assert speak(raw) == spoken
+
+
+def test_speak_never_raises_on_random_text(caplog: pytest.LogCaptureFixture) -> None:
+    """Review I1 fuzz: random strings built from the characters the rules look at must never raise, and the rules
+    themselves must handle them (the logged catch-all fallback is never needed)."""
+    import random
+    alphabet = "0123456789-$.,:%/ −stndrhNovMarDecINVTCK#*_`[]()\n"
+    tokens = ["2026-13-45", "2026-00-00", "99 Nov", "Nov 99", "0th", "$", "-$", "$-", "INV-", "TCK-0000-",
+              "1st", "31st", "Dec 0", "0 Jan 0000", "9" * 40, "$" + "9" * 40]
+    rng = random.Random(54)
+    for _ in range(3000):
+        parts = [rng.choice(tokens) if rng.random() < 0.3 else
+                 "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 12))) for _ in range(rng.randint(1, 6))]
+        text = " ".join(parts)
+        out = speak(text)
+        assert isinstance(out, str), text
+    assert [r for r in caplog.records if r.name == "agent.say"] == []
+
+
+def test_speak_falls_back_to_the_stripped_text_and_logs_on_an_unexpected_error(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    import agent.say as say
+
+    def broken(_: str) -> str:
+        """What: a rule that raises. Use when: this test. Inputs: text. Output: never. Side effects: raises.
+        Role: double."""
+        raise IndexError("rule bug")
+
+    monkeypatch.setattr(say, "_spoken", broken)
+    assert speak("**Your** total is $5") == "Your total is $5"
+    assert any(r.name == "agent.say" and r.exc_info for r in caplog.records)
