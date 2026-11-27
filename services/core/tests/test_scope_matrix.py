@@ -33,6 +33,7 @@ SLICE_ROUTES = [
     ("POST", "/v1/tickets", "tickets.create"),
 ]
 TOKEN_OF = {"agent_tools": "tok-agent", "agent_commit": "tok-commit", "ops": "tok-ops"}
+BUILT = {("POST", "/v1/tickets")}  # routes whose handler exists (CS-E-03.S3.T1)
 CASES = [(m, p, s, who) for (m, p, s) in SLICE_ROUTES for who in SCOPES]
 
 
@@ -65,7 +66,8 @@ def test_scope_gate(client, method, path, scope, who):
     headers = {"Authorization": f"Bearer {TOKEN_OF[who]}"}
     r = client.request(method, path, headers=headers, json={} if method == "POST" else None)
     if scope in SCOPES[who]:
-        assert r.status_code == 501, (r.status_code, r.text)
+        # built routes answer 422 to the empty body (proves the scope gate passed); stubs answer 501
+        assert r.status_code == (422 if (method, path) in BUILT else 501), (r.status_code, r.text)
     else:
         assert r.status_code == 403, (r.status_code, r.text)
         body = r.json()["error"]
