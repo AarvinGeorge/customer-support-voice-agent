@@ -1,0 +1,14 @@
+# Model registry (doc 07 s13.2). Read by agent, knowledge and evals.
+# This first cut holds only the voice role, verified by lane C on 2026-11-27
+# (CS-E-05.S3.T1, evidence in spikes/realtime/SPIKE_NOTE.md).
+# Lane B merges its roles (agent, agent_fallback, grounding_verifier,
+# scope_classifier, judge, embeddings) and all prices into this file.
+roles:
+  voice:
+    provider: openai
+    model: gpt-realtime-2.1          # GET /v1/models lists it; session.created echoed it
+    voice: marin                     # accepted by client_secrets; echoed in session.created
+    transcription_model: gpt-transcribe  # accepted with semantic_vad in a realtime session
+    # Price (lane B to copy into `price` with as_of): per 1M tokens, text in 4.00,
+    # cached in 0.40, text out 24.00, audio in 32.00, audio out 64.00
+    # (developers.openai.com/api/docs/models/gpt-realtime-2.1, read 2026-11-27).

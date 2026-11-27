@@ -1,0 +1,123 @@
+{"t": 5.957, "local": "sdp_answer", "status": 201, "location": "rtc_u1_E..."}
+{"t": 5.96, "local": "remote_track"}
+{"t": 6.553, "local": "datachannel_open"}
+{"t": 6.553, "event": {"type": "session.created", "event_id": "event_Eoijc2ud8CnsWZrWCeZGT", "session": {"type": "realtime", "object": "realtime.session", "id": "sess_EoijWm95Ee5a8Bu1sJLke", "model": "gpt-realtime-2.1", "output_modalities": ["audio"], "instructions": "You are the Quillstack voice front end. Call ask_support_agent for anything about Quillstack, the account, policies or actions. Read the tool's say field verbatim. Never state a policy, price, amount or date yourself. While waiting, say one short holding phrase.", "tools": [{"type": "function", "name": "ask_support_agent", "description": "Ask the Quillstack support agent. Use for anything about Quillstack, the customer's account, billing, policies, tickets or actions, and whenever the customer answers a question the agent asked (yes, no, account ID, PIN).", "parameters": {"type": "object", "additionalProperties": false, "required": ["question"], "properties": {"question": {"type": "string", "maxLength": 2000, "description": "What the customer said or asked, in their words"}}}}], "tool_choice": "auto", "max_output_tokens": "inf", "tracing": null, "truncation": "auto", "prompt": null, "expires_at": 1795760668, "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}, "transcription": {"model": "gpt-transcribe", "language": null, "languages": null, "prompt": null}, "noise_reduction": null, "turn_detection": {"type": "semantic_vad", "eagerness": "auto", "create_response": true, "interrupt_response": true}}, "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": "marin", "speed": 1.0}}, "include": null}}}
+{"t": 6.674, "event": {"type": "conversation.item.added", "event_id": "event_Eoijc6i354hKBJ2aZJJQ6", "previous_item_id": null, "item": {"id": "item_EoijcKcYIxvdY3j3hoMwe", "type": "message", "status": "completed", "role": "user", "content": [{"type": "input_text", "text": "What is your refund policy for annual plans?"}]}}}
+{"t": 6.674, "event": {"type": "conversation.item.done", "event_id": "event_EoijclY25WfgUJbcrzUYy", "previous_item_id": null, "item": {"id": "item_EoijcKcYIxvdY3j3hoMwe", "type": "message", "status": "completed", "role": "user", "content": [{"type": "input_text", "text": "What is your refund policy for annual plans?"}]}}}
+{"t": 6.674, "event": {"type": "response.created", "event_id": "event_Eoijcj5znidCpuBLyuMeI", "response": {"object": "realtime.response", "id": "resp_Eoijc50F3LeZlD2Ch6J17", "status": "in_progress", "status_details": null, "output": [], "conversation_id": "conv_EoijbAgSd6Zx5uAEEW7kS", "output_modalities": ["audio"], "max_output_tokens": "inf", "audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": "marin"}}, "usage": null, "metadata": null}}}
+{"t": 7.004, "event": {"type": "response.output_item.added", "event_id": "event_EoijdzHyllMMNLXpsPfL7", "response_id": "resp_Eoijc50F3LeZlD2Ch6J17", "output_index": 0, "item": {"id": "item_EoijcaM9rjznjN3FVZfY3", "type": "message", "status": "in_progress", "role": "assistant", "content": [], "phase": "commentary"}}}
+{"t": 7.004, "event": {"type": "conversation.item.added", "event_id": "event_EoijdIavhYEjARw9JL8v2", "previous_item_id": "item_EoijcKcYIxvdY3j3hoMwe", "item": {"id": "item_EoijcaM9rjznjN3FVZfY3", "type": "message", "status": "in_progress", "role": "assistant", "content": [], "phase": "commentary"}}}
+{"t": 7.007, "event": {"type": "response.content_part.added", "event_id": "event_EoijdupXTAtMGt77idq1x", "response_id": "resp_Eoijc50F3LeZlD2Ch6J17", "item_id": "item_EoijcaM9rjznjN3FVZfY3", "output_index": 0, "content_index": 0, "part": {"type": "audio", "transcript": ""}}}
+{"t": 7.007, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 7.013, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 7.109, "event": {"type": "output_audio_buffer.started", "event_id": "event_9df5f1a2e1704382", "response_id": "resp_Eoijc50F3LeZlD2Ch6J17"}}
+{"t": 7.11, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 7.114, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 7.196, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 7.279, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 7.279, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 7.279, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 7.414, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 7.425, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 7.434, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 7.529, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 7.749, "event": {"type": "response.output_item.added", "event_id": "event_EoijdhC0L9kSTD6KlWhqT", "response_id": "resp_Eoijc50F3LeZlD2Ch6J17", "output_index": 1, "item": {"id": "item_EoijdcTb1ReQMYVGdewkH", "type": "function_call", "status": "in_progress", "name": "ask_support_agent", "call_id": "call_6nuy8HzJP4ba9S6s", "arguments": ""}}}
+{"t": 7.749, "event": {"type": "conversation.item.added", "event_id": "event_Eoijd5fmkdLgEuwitNPM0", "previous_item_id": "item_EoijcaM9rjznjN3FVZfY3", "item": {"id": "item_EoijdcTb1ReQMYVGdewkH", "type": "function_call", "status": "in_progress", "name": "ask_support_agent", "call_id": "call_6nuy8HzJP4ba9S6s", "arguments": ""}}}
+{"t": 7.751, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.774, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.78, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.789, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.798, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.804, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.811, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.82, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.827, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.833, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.842, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.846, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.846, "event": {"type": "response.function_call_arguments.delta"}}
+{"t": 7.874, "event": {"type": "response.output_audio.done", "event_id": "event_EoijdUhi9S1eetYmCACI9", "response_id": "resp_Eoijc50F3LeZlD2Ch6J17", "item_id": "item_EoijcaM9rjznjN3FVZfY3", "output_index": 0, "content_index": 0}}
+{"t": 7.874, "event": {"type": "response.output_audio_transcript.done", "event_id": "event_EoijdtD21vfXRDlvaJ28I", "response_id": "resp_Eoijc50F3LeZlD2Ch6J17", "item_id": "item_EoijcaM9rjznjN3FVZfY3", "output_index": 0, "content_index": 0, "transcript": "One moment while I check the details with a support agent."}}
+{"t": 7.874, "event": {"type": "response.content_part.done", "event_id": "event_Eoijdz4Xmj7YdWL0GERn3", "response_id": "resp_Eoijc50F3LeZlD2Ch6J17", "item_id": "item_EoijcaM9rjznjN3FVZfY3", "output_index": 0, "content_index": 0, "part": {"type": "audio", "transcript": "One moment while I check the details with a support agent."}}}
+{"t": 7.874, "event": {"type": "conversation.item.done", "event_id": "event_Eoijd8IYddnztEWalLoIP", "previous_item_id": null, "item": {"id": "item_EoijcaM9rjznjN3FVZfY3", "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_audio", "transcript": "One moment while I check the details with a support agent."}], "phase": "commentary"}}}
+{"t": 7.874, "event": {"type": "response.output_item.done", "event_id": "event_EoijdhtzEKn11100pTXE3", "response_id": "resp_Eoijc50F3LeZlD2Ch6J17", "output_index": 0, "item": {"id": "item_EoijcaM9rjznjN3FVZfY3", "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_audio", "transcript": "One moment while I check the details with a support agent."}], "phase": "commentary"}}}
+{"t": 7.874, "event": {"type": "response.function_call_arguments.done", "event_id": "event_Eoijdsasvsrn7Jd8sn4ef", "response_id": "resp_Eoijc50F3LeZlD2Ch6J17", "item_id": "item_EoijdcTb1ReQMYVGdewkH", "output_index": 1, "call_id": "call_6nuy8HzJP4ba9S6s", "name": "ask_support_agent", "arguments": "{\"question\":\"What is your refund policy for annual plans?\"}"}}
+{"t": 7.875, "event": {"type": "conversation.item.done", "event_id": "event_EoijdUbDgBuCUIb9Y5Ha6", "previous_item_id": "item_EoijcaM9rjznjN3FVZfY3", "item": {"id": "item_EoijdcTb1ReQMYVGdewkH", "type": "function_call", "status": "completed", "name": "ask_support_agent", "call_id": "call_6nuy8HzJP4ba9S6s", "arguments": "{\"question\":\"What is your refund policy for annual plans?\"}"}}}
+{"t": 7.876, "event": {"type": "response.output_item.done", "event_id": "event_Eoijd09IEe089HjDdVDkh", "response_id": "resp_Eoijc50F3LeZlD2Ch6J17", "output_index": 1, "item": {"id": "item_EoijdcTb1ReQMYVGdewkH", "type": "function_call", "status": "completed", "name": "ask_support_agent", "call_id": "call_6nuy8HzJP4ba9S6s", "arguments": "{\"question\":\"What is your refund policy for annual plans?\"}"}}}
+{"t": 7.888, "event": {"type": "response.done", "event_id": "event_EoijdQlGbXlG0CYmpD3aM", "response": {"object": "realtime.response", "id": "resp_Eoijc50F3LeZlD2Ch6J17", "status": "completed", "status_details": null, "output": [{"id": "item_EoijcaM9rjznjN3FVZfY3", "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_audio", "transcript": "One moment while I check the details with a support agent."}], "phase": "commentary"}, {"id": "item_EoijdcTb1ReQMYVGdewkH", "type": "function_call", "status": "completed", "name": "ask_support_agent", "call_id": "call_6nuy8HzJP4ba9S6s", "arguments": "{\"question\":\"What is your refund policy for annual plans?\"}"}], "conversation_id": "conv_EoijbAgSd6Zx5uAEEW7kS", "output_modalities": ["audio"], "max_output_tokens": "inf", "audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": "marin"}}, "usage": {"total_tokens": 575, "input_tokens": 452, "output_tokens": 123, "input_token_details": {"text_tokens": 452, "audio_tokens": 0, "image_tokens": 0, "cached_tokens": 0, "cached_tokens_details": {"text_tokens": 0, "audio_tokens": 0, "image_tokens": 0}}, "output_token_details": {"text_tokens": 56, "audio_tokens": 67}}, "metadata": null}}}
+{"t": 7.889, "local": "sent_function_call_output_and_response_create"}
+{"t": 7.905, "event": {"type": "rate_limits.updated", "event_id": "event_EoijdYbQzybXxS35kBahE", "rate_limits": [{"name": "tokens", "limit": 200000, "remaining": 197690, "reset_seconds": 0.693}]}}
+{"t": 8.052, "event": {"type": "conversation.item.added", "event_id": "event_EoijedJu163D2RnIoaJaw", "previous_item_id": "item_EoijdcTb1ReQMYVGdewkH", "item": {"id": "item_EoijemZLx95lxPXK8VAK2", "type": "function_call_output", "call_id": "call_6nuy8HzJP4ba9S6s", "output": "{\"say\": \"Annual plans can be refunded in full within 30 days of purchase. After that, you keep access until the end of the term, and no further renewals are charged. If you paid by invoice, the credit goes back to the original payment method within five to ten business days.\", \"escalated\": false}"}}}
+{"t": 8.053, "event": {"type": "conversation.item.done", "event_id": "event_EoijeMo5td5l83e3sMAKJ", "previous_item_id": "item_EoijdcTb1ReQMYVGdewkH", "item": {"id": "item_EoijemZLx95lxPXK8VAK2", "type": "function_call_output", "call_id": "call_6nuy8HzJP4ba9S6s", "output": "{\"say\": \"Annual plans can be refunded in full within 30 days of purchase. After that, you keep access until the end of the term, and no further renewals are charged. If you paid by invoice, the credit goes back to the original payment method within five to ten business days.\", \"escalated\": false}"}}}
+{"t": 8.056, "event": {"type": "response.created", "event_id": "event_Eoije8IlLBolkWbMrGq4Z", "response": {"object": "realtime.response", "id": "resp_EoijeHVlYCtHQzVeWBxY2", "status": "in_progress", "status_details": null, "output": [], "conversation_id": "conv_EoijbAgSd6Zx5uAEEW7kS", "output_modalities": ["audio"], "max_output_tokens": "inf", "audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": "marin"}}, "usage": null, "metadata": null}}}
+{"t": 8.248, "event": {"type": "response.output_item.added", "event_id": "event_EoijeDrCHTb69zUNkDHnD", "response_id": "resp_EoijeHVlYCtHQzVeWBxY2", "output_index": 0, "item": {"id": "item_EoijerQL7K2N0ddMCzj9t", "type": "message", "status": "in_progress", "role": "assistant", "content": [], "phase": "final_answer"}}}
+{"t": 8.248, "event": {"type": "conversation.item.added", "event_id": "event_Eoije45beciTWKtaFlRfp", "previous_item_id": "item_EoijemZLx95lxPXK8VAK2", "item": {"id": "item_EoijerQL7K2N0ddMCzj9t", "type": "message", "status": "in_progress", "role": "assistant", "content": [], "phase": "final_answer"}}}
+{"t": 8.248, "event": {"type": "response.content_part.added", "event_id": "event_Eoije47Kk291pz85U0v5p", "response_id": "resp_EoijeHVlYCtHQzVeWBxY2", "item_id": "item_EoijerQL7K2N0ddMCzj9t", "output_index": 0, "content_index": 0, "part": {"type": "audio", "transcript": ""}}}
+{"t": 8.249, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.249, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.596, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.597, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.599, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.625, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.628, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.63, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.675, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.683, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.77, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.77, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.77, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.77, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.975, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.98, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.98, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 8.999, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.005, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.1, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.102, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.103, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.104, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.4, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.407, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.415, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.421, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.436, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.444, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.45, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.45, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.458, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.464, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.84, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.85, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.858, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.864, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.871, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.879, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.888, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 9.89, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.344, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.344, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.344, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.344, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.345, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.345, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.345, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.345, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.439, "event": {"type": "output_audio_buffer.started", "event_id": "event_2d04fb97e6634348", "response_id": "resp_EoijeHVlYCtHQzVeWBxY2"}}
+{"t": 10.683, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.695, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.697, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.706, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.713, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.721, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.727, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 10.733, "event": {"type": "response.output_audio_transcript.delta"}}
+{"t": 11.391, "event": {"type": "response.output_audio.done", "event_id": "event_EoijhiScvivhPEd5G8n9X", "response_id": "resp_EoijeHVlYCtHQzVeWBxY2", "item_id": "item_EoijerQL7K2N0ddMCzj9t", "output_index": 0, "content_index": 0}}
+{"t": 11.392, "event": {"type": "response.output_audio_transcript.done", "event_id": "event_Eoijhx0NfUQwO4nQnxg77", "response_id": "resp_EoijeHVlYCtHQzVeWBxY2", "item_id": "item_EoijerQL7K2N0ddMCzj9t", "output_index": 0, "content_index": 0, "transcript": "Annual plans can be refunded in full within 30 days of purchase. After that, you keep access until the end of the term, and no further renewals are charged. If you paid by invoice, the credit goes back to the original payment method within five to ten business days."}}
+{"t": 11.392, "event": {"type": "response.content_part.done", "event_id": "event_EoijhZkSFZiruOBVV7QOI", "response_id": "resp_EoijeHVlYCtHQzVeWBxY2", "item_id": "item_EoijerQL7K2N0ddMCzj9t", "output_index": 0, "content_index": 0, "part": {"type": "audio", "transcript": "Annual plans can be refunded in full within 30 days of purchase. After that, you keep access until the end of the term, and no further renewals are charged. If you paid by invoice, the credit goes back to the original payment method within five to ten business days."}}}
+{"t": 11.392, "event": {"type": "conversation.item.done", "event_id": "event_EoijhK4gpLN53FKLo24fZ", "previous_item_id": "item_EoijemZLx95lxPXK8VAK2", "item": {"id": "item_EoijerQL7K2N0ddMCzj9t", "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_audio", "transcript": "Annual plans can be refunded in full within 30 days of purchase. After that, you keep access until the end of the term, and no further renewals are charged. If you paid by invoice, the credit goes back to the original payment method within five to ten business days."}], "phase": "final_answer"}}}
+{"t": 11.392, "event": {"type": "response.output_item.done", "event_id": "event_EoijhElhGqXRDVgqUwqZ9", "response_id": "resp_EoijeHVlYCtHQzVeWBxY2", "output_index": 0, "item": {"id": "item_EoijerQL7K2N0ddMCzj9t", "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_audio", "transcript": "Annual plans can be refunded in full within 30 days of purchase. After that, you keep access until the end of the term, and no further renewals are charged. If you paid by invoice, the credit goes back to the original payment method within five to ten business days."}], "phase": "final_answer"}}}
+{"t": 11.392, "event": {"type": "response.done", "event_id": "event_EoijhXveI45pqv3YRu0jD", "response": {"object": "realtime.response", "id": "resp_EoijeHVlYCtHQzVeWBxY2", "status": "completed", "status_details": null, "output": [{"id": "item_EoijerQL7K2N0ddMCzj9t", "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_audio", "transcript": "Annual plans can be refunded in full within 30 days of purchase. After that, you keep access until the end of the term, and no further renewals are charged. If you paid by invoice, the credit goes back to the original payment method within five to ten business days."}], "phase": "final_answer"}], "conversation_id": "conv_EoijbAgSd6Zx5uAEEW7kS", "output_modalities": ["audio"], "max_output_tokens": "inf", "audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": "marin"}}, "usage": {"total_tokens": 979, "input_tokens": 574, "output_tokens": 405, "input_token_details": {"text_tokens": 574, "audio_tokens": 0, "image_tokens": 0, "cached_tokens": 384, "cached_tokens_details": {"text_tokens": 384, "audio_tokens": 0, "image_tokens": 0}}, "output_token_details": {"text_tokens": 83, "audio_tokens": 322}}, "metadata": null}}}
+{"t": 11.393, "event": {"type": "rate_limits.updated", "event_id": "event_Eoijh7ed2NJjkaUZraSHD", "rate_limits": [{"name": "tokens", "limit": 200000, "remaining": 197408, "reset_seconds": 0.777}]}}
+{"t": 11.94, "local": "sent_output_audio_buffer.clear"}
+{"t": 12.002, "event": {"type": "output_audio_buffer.cleared", "event_id": "event_b2c2e0bb9db745e0", "response_id": "resp_EoijeHVlYCtHQzVeWBxY2"}}
+{"t": 12.005, "event": {"type": "conversation.item.truncated", "event_id": "event_Eoijio7wL1rYJHcszqZaE", "item_id": "item_EoijerQL7K2N0ddMCzj9t", "content_index": 0, "audio_end_ms": 1560}}
