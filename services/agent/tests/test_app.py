@@ -4,6 +4,7 @@ Side effects: none. Role: test for agent.main and agent.web."""
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import httpx
 import pytest
@@ -18,13 +19,13 @@ from agent.settings import Settings
 def settings(**kw) -> Settings:
     """What: test settings. Use when: building an app. Inputs: overrides. Output: Settings.
     Side effects: none. Role: helper."""
-    base = dict(served_by="agent_a", agent_db_url="postgresql://x", redis_url="redis://x",
+    base: dict[str, Any] = dict(served_by="agent_a", agent_db_url="postgresql://x", redis_url="redis://x",
                 core_url="http://core:8000", knowledge_url="http://knowledge:8000", demo_faults_enabled=True)
     base.update(kw)
     return Settings(**base)
 
 
-def probes(**results):
+def probes(**results: Any) -> dict[str, Any]:
     """What: fake dependency probes returning fixed states. Use when: readyz tests.
     Inputs: name=state ("ok" or an error word). Output: dict of async callables. Side effects: none. Role: fake."""
     def make(v):
@@ -135,3 +136,36 @@ def test_settings_from_env_reads_compose_names(monkeypatch):
     s = Settings.from_env()
     assert (s.served_by, s.agent_db_url, s.redis_url, s.core_url, s.knowledge_url, s.demo_faults_enabled) == \
         ("agent_b", "postgresql://a", "redis://r", "http://c", "http://k", False)
+
+
+async def test_lifespan_owns_the_checkpointer_open_on_start_closed_on_stop():
+    from contextlib import asynccontextmanager
+
+    seen: list[str] = []
+
+    def factory():
+        """What: fake checkpointer factory. Use when: this test. Inputs: none. Output: async cm.
+        Side effects: records enter and exit. Role: fake."""
+        @asynccontextmanager
+        async def cm():
+            """What: yield a marker saver. Use when: lifespan. Inputs: none. Output: saver. Side effects: records.
+            Role: fake."""
+            seen.append("open")
+            try:
+                yield "SAVER"
+            finally:
+                seen.append("closed")
+        return cm()
+
+    app = create_app(settings(), probes=probes(), checkpointer_factory=factory)
+    async with app.router.lifespan_context(app):
+        assert app.state.checkpointer == "SAVER" and seen == ["open"]
+    assert seen == ["open", "closed"]
+
+
+def test_default_checkpointer_factory_is_the_postgres_pool(monkeypatch):
+    import agent.main as main
+    calls: list[str] = []
+    monkeypatch.setattr(main, "postgres_checkpointer_factory", lambda dsn: calls.append(dsn) or (lambda: None))
+    create_app(settings(agent_db_url="postgresql://agent_app@db/qs"))
+    assert calls == ["postgresql://agent_app@db/qs"]

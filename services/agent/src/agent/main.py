@@ -8,7 +8,7 @@ Role: composition root of the HTTP service. Turn, session and voice routes arriv
 """
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any, AsyncIterator
 
 import httpx
@@ -16,29 +16,46 @@ from contracts import limits
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from agent.assembly import CheckpointerFactory, postgres_checkpointer_factory
 from agent.readiness import Probe, build_probes, readiness
 from agent.settings import Settings
 from agent.web import install_http
 
 
-def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None = None,
+               checkpointer_factory: CheckpointerFactory | None = None) -> FastAPI:
     """What: build the app.
-    Use when: process start (no args) or tests (settings and fake probes).
+    Use when: process start (no args) or tests (settings, fake probes, fake checkpointer factory).
     Inputs: Settings (default from env); probes keyed redis, postgres, core, knowledge (default: real
-    probes built in the lifespan).
+    probes built in the lifespan); checkpointer factory (default: the agent_app Postgres pool; with
+    injected probes and no factory, no checkpointer is opened).
     Output: FastAPI app. Side effects: none until the lifespan runs.
     Role: app factory."""
     cfg = settings or Settings.from_env()
+    if checkpointer_factory is None and probes is None:
+        checkpointer_factory = postgres_checkpointer_factory(cfg.agent_db_url)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """What: open and close dependency clients when probes were not injected.
+        """What: open and close the checkpointer, and the dependency clients when probes were not injected.
         Use when: uvicorn startup and shutdown. Inputs: app. Output: none.
-        Side effects: pool, Redis and HTTP clients. Role: resource lifetime."""
-        if probes is not None:
-            app.state.probes = probes
+        Side effects: checkpointer pool, Redis and HTTP clients. Role: resource lifetime (the app owns the
+        checkpointer, so a later route builds the agent from app.state.checkpointer)."""
+        async with AsyncExitStack() as stack:
+            app.state.checkpointer = None
+            if checkpointer_factory is not None:
+                app.state.checkpointer = await stack.enter_async_context(checkpointer_factory())
+            if probes is None:
+                await stack.enter_async_context(_clients(app))
+            else:
+                app.state.probes = probes
             yield
-            return
+
+    @asynccontextmanager
+    async def _clients(app: FastAPI) -> AsyncIterator[None]:
+        """What: the agent_app pool, Redis and HTTP clients plus the real probes.
+        Use when: lifespan without injected probes. Inputs: app. Output: none.
+        Side effects: opens and closes the clients. Role: resource lifetime."""
         import redis.asyncio as aioredis
         from psycopg_pool import AsyncConnectionPool
 
