@@ -83,9 +83,11 @@ def _run_regex(sep: str, max_digits: int) -> re.Pattern[str]:
 
 
 # Strict runs: spaces, commas, dashes (a full stop ends a run). Loose runs, used only when a PIN word is present or a
-# verification is awaited: also full stops, slashes and newlines, and 3-digit numerals ("4,821", "4.8.2.1", "48\n21").
+# verification is awaited: also full stops, slashes and newlines, 3-digit numerals ("4,821", "4.8.2.1", "48\n21") and
+# filled pauses between items ("four eight, uh, two one", PR #57 follow-up).
+_LOOSE_SEP = rf"[ \t\r\n,./{_DASHES}-]+"
 _RUN_STRICT = _run_regex(rf"[ \t,{_DASHES}-]+", 2)
-_RUN_LOOSE = _run_regex(rf"[ \t\r\n,./{_DASHES}-]+", 3)
+_RUN_LOOSE = _run_regex(rf"{_LOOSE_SEP}(?:(?:uh+|um+|uhm|er+|erm|ah+|hmm+|like){_LOOSE_SEP})*", 3)
 _ITEM_STRICT = re.compile(_item_pattern(2), re.IGNORECASE)
 _ITEM_LOOSE = re.compile(_item_pattern(3), re.IGNORECASE)
 _LONG_OPEN, _LONG_CLOSE = "", ""  # marks a spoken or grouped run longer than 4 digits
@@ -107,12 +109,24 @@ _TOKEN_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?|\d+")
 # Strong credential words count anywhere in the message.
 _STRONG_WORDS = frozenset({"pin", "pins", "pin's", "pincode", "pincodes", "passcode", "passcodes", "passkey",
                            "password", "passwords", "passphrase"})
+# Misspelled or joined forms of "pin" (PR #57 follow-up): "pni", "pim", "pinn", "pn", "mypin", "mypinis", "pinnumber".
+# A whole-token match, so "pinning", "spinner" and "pinpoint" stay ordinary words.
+_PIN_TOKEN_RE = re.compile(r"(?:my|your|ur|our)?(?:pin|pni|pim|pinn|pn)(?:s|is|number|num|no|code|codes)?")
 _STRONG_BIGRAMS = frozenset({("secret", "number"), ("secret", "code"), ("security", "code"), ("support", "number")})
 # "code" counts only within _NEAR tokens of the number (or while awaiting), and never as "error code" and the like.
 _WEAK_WORDS = frozenset({"code", "codes"})
 _NOT_PIN_CODE = frozenset({"error", "promo", "discount", "coupon", "zip", "postal", "area", "country", "reference",
                            "tracking", "source", "status", "gift", "voucher", "embed", "verification", "sample"})
 _NEAR = 3
+# A verified customer has no reason to type a PIN: there "code" counts only when announced ("my code is 4821").
+_CODE_CUE_BEFORE = frozenset({"my", "our", "your"})
+# Between an account id and a number of an unverified customer: words that still read as "id then PIN"
+# ("QS-10423, 4821", "I'm QS-10423 and 4821"); any other word means the number is about something else.
+_ACCOUNT_GAP = frozenset({"and", "then", "um", "uh", "ok", "okay", "my", "is", "it's", "its", "here", "the", "number",
+                          "num", "no"})
+# Words that make a message ending in a PIN word a question about the PIN, not an announcement ("I forgot my PIN").
+_ABOUT_PIN = frozenset({"forgot", "forget", "forgotten", "lost", "lose", "reset", "change", "changing", "changed",
+                        "update", "recover", "remember", "where", "how", "enter", "find", "set", "locked", "wrong"})
 # A year next to one of these is a date, also when a PIN word is in the message ("I set my PIN back in 2023").
 _YEAR_BEFORE = frozenset({"in", "since", "from", "of", "during", "until", "till", "before", "after", "by", "back",
                           "year", "early", "late", "mid"})
@@ -262,15 +276,14 @@ def _scan(text: str, context: RedactContext) -> PinScan:
     Side effects: none. Role: helper."""
     strict = _normalize(text)
     words = [m.group().lower() for m in _TOKEN_RE.finditer(strict)]
-    strong = any(w in _STRONG_WORDS for w in words) or any(b in _STRONG_BIGRAMS for b in zip(words, words[1:]))
+    strong = any(_is_strong(w) for w in words) or any(b in _STRONG_BIGRAMS for b in zip(words, words[1:]))
     weak = any(w in _WEAK_WORDS and not (i and words[i - 1] in _NOT_PIN_CODE) for i, w in enumerate(words))
     awaiting = context.awaiting_verification or context.step_up_pending
     norm = _normalize(text, loose=True) if (strong or weak or awaiting) else strict
     tokens = [(m.start(), m.group().lower()) for m in _TOKEN_RE.finditer(norm)]
     account = [m.span() for m in _ACCOUNT_RE.finditer(norm)]
     cands = list(_CANDIDATE_RE.finditer(norm))
-    cred_idx = [i for i, (_, w) in enumerate(tokens) if w in _STRONG_WORDS or (w in _WEAK_WORDS and not (
-        i and tokens[i - 1][1] in _NOT_PIN_CODE))]
+    cred_idx = [i for i, (_, w) in enumerate(tokens) if _is_strong(w) or _is_code_word(tokens, i, context, norm)]
     filler_only = all(w in _FILLERS for w in _TOKEN_RE.findall(_CANDIDATE_RE.sub(" ", norm).lower()))
     if not cands:
         return PinScan(text, 0, False, _expects_pin(tokens, cred_idx, account, context),
@@ -285,13 +298,13 @@ def _scan(text: str, context: RedactContext) -> PinScan:
         near = [j for j in cred_idx if abs(j - i) <= _NEAR]
         strong_here = strong and not _is_far_year(m.group(), i, tokens, near)
         weak_here = any(tokens[j][1] in _WEAK_WORDS for j in near) or (weak and awaiting)
-        adjacent = any(_adjacent(norm, (a, b), span) for span in account)
+        adjacent = any(_adjacent(norm, (a, b), span, gap_words=not context.verified) for span in account)
         kept_shape = bool(_AMOUNT_BEFORE_RE.search(norm[:a])) or any(x <= a < y for x, y in dates)
         decimal = bool(re.search(r"\d[.,]$", norm[:a])) or bool(re.match(r"[.,]\d", norm[b:]))
         if strong_here or weak_here:
             hits.append(m)
             cred = True
-        elif account and (not context.verified or adjacent) and not kept_shape:
+        elif account and adjacent and not kept_shape:
             hits.append(m)
             cred = True
         elif (awaiting or filler_only) and not kept_shape and not (decimal and not account):
@@ -317,22 +330,49 @@ def _is_far_year(group: str, i: int, tokens: list[tuple[int, str]], near: list[i
     return before in _YEAR_BEFORE or after in _YEAR_AFTER
 
 
-def _adjacent(norm: str, cand: tuple[int, int], account: tuple[int, int]) -> bool:
-    """What: only separators between the number and the account id. Use when: verified sessions.
-    Inputs: text, candidate span, account span. Output: bool. Side effects: none. Role: helper."""
+def _adjacent(norm: str, cand: tuple[int, int], account: tuple[int, int], gap_words: bool = False) -> bool:
+    """What: only separators between the number and the account id (with gap_words, also "and", "my", "is" and the
+    like). Use when: the account id rule (s11.1 condition 3, narrowed by the PR #57 follow-up so "QS-20318 ... from
+    1200 to 1500 seats" is kept). Inputs: text, candidate span, account span, gap_words flag. Output: bool.
+    Side effects: none. Role: helper."""
     gap = norm[account[1]:cand[0]] if account[1] <= cand[0] else norm[cand[1]:account[0]]
-    return not re.search(r"[A-Za-z0-9]", gap)
+    if re.search(r"\d", gap):
+        return False
+    return all(w.lower() in _ACCOUNT_GAP for w in _TOKEN_RE.findall(gap)) if gap_words else not re.search(
+        r"[A-Za-z]", gap)
+
+
+def _is_strong(word: str) -> bool:
+    """What: a strong credential word: the listed words, or "pin" misspelled or joined ("pni", "mypin", "pinnumber").
+    Use when: _scan. Inputs: one lowercased token. Output: bool. Side effects: none.
+    Role: PR #57 follow-up (re-review r2 I1)."""
+    return word in _STRONG_WORDS or bool(_PIN_TOKEN_RE.fullmatch(word))
+
+
+def _is_code_word(tokens: list[tuple[int, str]], i: int, context: RedactContext, norm: str) -> bool:
+    """What: token i is "code" meaning a PIN: not "error code" and the like; on a verified session only when announced
+    ("my code", "code is", "code: 4821"). Use when: _scan. Inputs: tokens, index, context, normalized text. Output: bool. Side effects: none.
+    Role: weak credential word (re-review r2 m2: verified "The code 4012 keeps showing up" is kept)."""
+    if tokens[i][1] not in _WEAK_WORDS or (i and tokens[i - 1][1] in _NOT_PIN_CODE):
+        return False
+    if not context.verified:
+        return True
+    before = tokens[i - 1][1] if i else ""
+    after = tokens[i + 1][1] if i + 1 < len(tokens) else ""
+    end = tokens[i][0] + len(tokens[i][1])
+    return before in _CODE_CUE_BEFORE or after in _CUE_TAIL or bool(re.match(r"\s*[:#=]", norm[end:]))
 
 
 def _expects_pin(tokens: list[tuple[int, str]], cred_idx: list[int], account: list[tuple[int, int]],
                  context: RedactContext) -> bool:
-    """What: an unverified message that ends by announcing a PIN ("my PIN is") or is only an account id.
+    """What: an unverified message that ends by announcing a PIN ("my PIN is") or is only an account id; a question
+    about the PIN ("I forgot my PIN", "where do I enter my PIN") does not count.
     Use when: _scan, when nothing was redacted. Inputs: tokens, credential word indexes, account spans, context.
     Output: bool. Side effects: none. Role: review round 2 N18, N20 (a PIN split over two messages)."""
     if context.verified:
         return False
     if cred_idx and all(w in _CUE_TAIL for _, w in tokens[cred_idx[-1] + 1:]):
-        return True
+        return not any(w in _ABOUT_PIN for _, w in tokens[:cred_idx[-1]])
     if account:
         rest = [w for s, w in tokens if not any(a <= s < b for a, b in account)]
         return all(w in _ACCOUNT_ONLY for w in rest)
