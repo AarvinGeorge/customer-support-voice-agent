@@ -1,0 +1,185 @@
+/*
+ * What: global styles and the design tokens from development/DESIGN.md (D-044) as Tailwind v4 theme variables.
+ * Use when: imported once by src/app/layout.tsx.
+ * Inputs: DESIGN.md frontmatter (colors light and dark, typography, rounded, spacing).
+ * Output: CSS custom properties on :root and .dark, Tailwind utilities (bg-paper, text-ink,
+ *   text-body, font-mono, rounded-md and so on) and shadcn semantic aliases (background, primary, ring).
+ * Side effects: sets base element styles.
+ * Role: the single source of visual tokens in the web app; change DESIGN.md first, then here.
+ */
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Streamdown renders markdown with Tailwind classes from its dist files. */
+@source "../../node_modules/streamdown/dist/*.js";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Light (default theme). Hex values are the approved tokens; never #000 or #fff. */
+:root {
+  --paper: #fcfaf6;
+  --margin: #f5f2ed;
+  --raised: #fffdfb;
+  --rule: #e3dfda;
+  --ink: #241e1a;
+  --muted: #68625c;
+  --ember: #a74e32;
+  --ember-soft: #fae9e1;
+  --on-ember: #fcfaf6;
+  --success: #397247;
+  --warning: #9a6418;
+  --error: #af3d36;
+  --info: #406981;
+
+  /* DESIGN.md spacing scale 1..8; Tailwind's 4px grid covers it as 1, 2, 3, 4, 6, 8, 12, 16. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  color-scheme: light;
+}
+
+.dark {
+  --paper: #171310;
+  --margin: #1f1b18;
+  --raised: #26221f;
+  --rule: #36322e;
+  --ink: #ebe7e2;
+  --muted: #a39d98;
+  --ember: #da8564;
+  --ember-soft: #3a261d;
+  --on-ember: #171310;
+  --success: #81bb8d;
+  --warning: #e5b568;
+  --error: #e47c72;
+  --info: #86b2cc;
+
+  color-scheme: dark;
+}
+
+@theme inline {
+  /* Token names from DESIGN.md. */
+  --color-paper: var(--paper);
+  --color-margin: var(--margin);
+  --color-raised: var(--raised);
+  --color-rule: var(--rule);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-ember: var(--ember);
+  --color-ember-soft: var(--ember-soft);
+  --color-on-ember: var(--on-ember);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+  --color-info: var(--info);
+
+  /* shadcn semantic aliases, so registry components pick up the same tokens. */
+  --color-background: var(--paper);
+  --color-foreground: var(--ink);
+  --color-card: var(--raised);
+  --color-card-foreground: var(--ink);
+  --color-popover: var(--raised);
+  --color-popover-foreground: var(--ink);
+  --color-primary: var(--ember);
+  --color-primary-foreground: var(--on-ember);
+  --color-secondary: var(--margin);
+  --color-secondary-foreground: var(--ink);
+  --color-muted-foreground: var(--muted);
+  --color-accent: var(--ember-soft);
+  --color-accent-foreground: var(--ink);
+  --color-destructive: var(--error);
+  --color-border: var(--rule);
+  --color-input: var(--rule);
+  --color-ring: var(--ember);
+
+  /* Typography: Inter for everything, JetBrains Mono only for IDs, timings, tokens and cost. */
+  --font-sans: var(--font-inter), system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, monospace;
+
+  --text-title: 20px;
+  --text-title--line-height: 28px;
+  --text-title--font-weight: 600;
+  --text-heading: 16px;
+  --text-heading--line-height: 24px;
+  --text-heading--font-weight: 600;
+  --text-body: 15px;
+  --text-body--line-height: 24px;
+  --text-body--font-weight: 400;
+  --text-body-sm: 14px;
+  --text-body-sm--line-height: 20px;
+  --text-body-sm--font-weight: 400;
+  --text-label: 13px;
+  --text-label--line-height: 18px;
+  --text-label--font-weight: 500;
+  --text-label-sm: 12px;
+  --text-label-sm--line-height: 16px;
+  --text-label-sm--font-weight: 500;
+  --text-caption: 12px;
+  --text-caption--line-height: 16px;
+  --text-caption--font-weight: 400;
+  --text-mono: 13px;
+  --text-mono--line-height: 20px;
+  --text-mono--font-weight: 400;
+  --text-mono-sm: 12px;
+  --text-mono-sm--line-height: 16px;
+  --text-mono-sm--font-weight: 400;
+  --text-mono-lg: 20px;
+  --text-mono-lg--line-height: 28px;
+  --text-mono-lg--font-weight: 500;
+
+  /* Radii. Pill is Tailwind's rounded-full. */
+  --radius: 10px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* Motion: 150 to 250 ms, exponential ease-out, transform and opacity only. */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+  }
+
+  body {
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: var(--text-body--line-height);
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+  }
+
+  code,
+  kbd,
+  samp,
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  :focus-visible {
+    outline-color: var(--color-ring);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
