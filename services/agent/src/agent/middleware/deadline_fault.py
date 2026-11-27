@@ -185,6 +185,8 @@ class DeadlineAndFaultMiddleware(AgentMiddleware):
         if control is None:  # outside a turn (unit use): plain call with the listed timeout
             return await asyncio.wait_for(handler(request), self.attempt_timeout_s)
         control.attempt_role = "fallback" if fallback else "primary"
+        if not fallback:
+            control.primary_model = model_name_of(request.model)  # before the fault, so model.fallback names it
         if not fallback and control.demo_fault == "llm_429":
             control.fault_fired = True
             err = rate_limit_error_for(request.model)
@@ -199,8 +201,6 @@ class DeadlineAndFaultMiddleware(AgentMiddleware):
             if control.events is not None:
                 control.events.emit("model.fallback", from_model=control.primary_model or "unknown",
                                     to_model=model_name_of(request.model), reason=fallback_reason(control.primary_error))
-        else:
-            control.primary_model = model_name_of(request.model)
         control.model_attempts += 1
         try:
             return await asyncio.wait_for(handler(request), timeout)

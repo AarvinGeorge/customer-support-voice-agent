@@ -7,6 +7,7 @@ Role: registry adapter; the only place that knows provider kwargs (D-024).
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langchain.chat_models import init_chat_model
@@ -14,6 +15,8 @@ from langchain_core.messages import AIMessage
 
 from agent.models.config import CHAT_ROLES, ModelsConfig, RoleSpec
 from agent.models.usage import Usage, cost_usd_est, normalize_usage
+
+log = logging.getLogger("agent.models.registry")
 
 
 class ModelRegistry:
@@ -27,6 +30,7 @@ class ModelRegistry:
 
     def __init__(self, config: ModelsConfig) -> None:
         self.config = config
+        self._warned_models: set[str] = set()
 
     def spec(self, role: str) -> RoleSpec:
         """What: look up a role. Use when: reading timeouts or ids. Inputs: role name.
@@ -67,15 +71,20 @@ class ModelRegistry:
         append a dated suffix, for example gpt-5.4-mini-2026-03-17). Use when: costing a call by the name in
         response_metadata. Inputs: model name. Output: role or None. Side effects: none. Role: lookup."""
         hits = [(len(s.model), r) for r, s in self.config.roles.items()
-                if r in CHAT_ROLES and model_name and model_name.startswith(s.model)]
+                if r in CHAT_ROLES and model_name and (model_name == s.model or model_name.startswith(s.model + "-"))]
         return max(hits)[1] if hits else None
 
     def cost_for_model(self, model_name: str, usage: Usage) -> float:
         """What: USD estimate for usage of the model a response names. Use when: stream_agent_turn(cost_of=...).
         Inputs: provider model name, Usage. Output: float (0.0 for an unknown model, logged by the caller's
-        drawer as a zero cost rather than a crash). Side effects: none. Role: models.yaml price lookup."""
+        drawer as a zero cost rather than a crash; one warning per name). Side effects: none. Role: models.yaml price lookup."""
         role = self.role_for_model(model_name)
-        return self.cost(role, usage) if role is not None else 0.0
+        if role is None:
+            if model_name not in self._warned_models:  # one warning per name: a silent $0 hides an alias change
+                self._warned_models.add(model_name)
+                log.warning("unknown model cost=0 model=%s", model_name)
+            return 0.0
+        return self.cost(role, usage)
 
     def usage_of(self, message: AIMessage) -> Usage:
         """What: normalized usage of a model message. Use when: after each model call.

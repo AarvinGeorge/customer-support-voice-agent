@@ -411,6 +411,8 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
                 usage = usage.model_copy(update={"tool_calls": usage.tool_calls + _tool_messages(chunk["result"])})
     finally:
         stop_timer()
+    # Gate 2 note: verifier and classifier calls are LangSmith llm runs but are not in model_attempts; the Gate 2
+    # task decides the rule (recommended: count every provider call so this keeps matching LangSmith).
     if control.model_attempts:  # provider calls made (retries and fallback included), as LangSmith counts llm runs
         usage = usage.model_copy(update={"model_calls": control.model_attempts})
     usage = usage.model_copy(update={"fallback_used": usage.fallback_used or control.fallback_used})

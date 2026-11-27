@@ -161,6 +161,7 @@ async def test_flag_true_llm_429_fails_the_primary_only_and_shows_fault_llm_429(
     assert primary.calls == 0, "the injected 429 is raised before the provider is called"
     assert fallback.calls == 1 and out.final.text == "Answer."
     assert [e.reason for e in fallback_events(stream)] == ["fault_llm_429"]
+    assert [(e.from_model, e.to_model) for e in fallback_events(stream)] == [("claude-sonnet-5-5", "gpt-5.4-mini")]
     assert c.fault_fired and out.usage.model_calls == 1 and out.usage.fallback_used
 
 
