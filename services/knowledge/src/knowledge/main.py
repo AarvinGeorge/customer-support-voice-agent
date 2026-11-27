@@ -1,8 +1,8 @@
 """What: the knowledge service app: bearer auth, scopes, envelope errors, trace ids, /healthz, /readyz, /v1/corpus.
 Use when: uvicorn imports `knowledge.main:app` (Compose command and dev reload).
-Inputs: env KNOWLEDGE_TOKEN_AGENT, KNOWLEDGE_DB_URL. Output: ASGI app.
+Inputs: env KNOWLEDGE_TOKEN_AGENT, KNOWLEDGE_DB_URL, optional CALIBRATION_PATH (Gate 1 file, doc 07 s13.3). Output: ASGI app.
 Side effects: lifespan checks the token is set (fails loudly) and creates the Database handle.
-Role: doc 07 s4 skeleton from CS-E-02.S1.T1; search (S2.T2), chunks and ingest arrive in later tasks."""
+Role: doc 07 s4: skeleton, hybrid search and Gate 1; chunk lookup arrives in a later task."""
 from __future__ import annotations
 
 import logging
@@ -52,7 +52,15 @@ async def lifespan(app: FastAPI):
     if not os.environ.get("KNOWLEDGE_DB_URL"):
         raise RuntimeError("KNOWLEDGE_DB_URL is not set")
     app.state.db = db.Database(os.environ.get("KNOWLEDGE_DB_URL", ""))
-    app.state.calibration = gate.load_calibration(gate.calibration_path())
+    cal_path = gate.calibration_path()
+    app.state.calibration = gate.load_calibration(cal_path)
+    cal = app.state.calibration
+    if cal is None:
+        log.error("calibration file %s is missing: every search verdict will be 'uncalibrated' (the agent treats it as "
+                  "weak) and /readyz reports calibration_status none", cal_path)
+    else:
+        log.info("calibration %s status=%s tau_low=%s tau_high=%s corpus_version=%s", cal.calibration_id, cal.status,
+                 cal.tau_low, cal.tau_high, cal.corpus_version[:12])
     try:
         app.state.embedder = OpenAIEmbedder()
     except EmbeddingError as exc:  # no key: search runs keyword-only instead of the service refusing to start

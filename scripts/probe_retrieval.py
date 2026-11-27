@@ -1,11 +1,13 @@
 """What: run the Gate 1 probe set through POST /v1/search with calibration=true and print each query's top cosine, then
 the suggested tau_low and tau_high by the doc 07 s4.1 method. Use when: setting or re-checking provisional thresholds
 (spike 14). Inputs: env KNOWLEDGE_URL (default http://127.0.0.1:8000) and KNOWLEDGE_TOKEN_AGENT; run it inside the
-knowledge container: `docker compose exec -T knowledge python - < scripts/probe_retrieval.py`. Output: JSON on stdout.
+knowledge container: `docker compose exec -T knowledge python - < scripts/probe_retrieval.py`. Output: JSON on stdout, with corpus_version (from /readyz, never from a cached search response), embedding
+model and a UTC timestamp. Run the ingest first: the probe records the version that is stored now.
 Side effects: 20 search calls, each one real embedding call. Role: replaced by evals/calibrate_retrieval.py (golden set)."""
 import json
 import os
 import statistics
+import datetime
 import urllib.request
 
 URL = os.environ.get("KNOWLEDGE_URL", "http://127.0.0.1:8000")
@@ -59,7 +61,13 @@ def main() -> None:
     off = [r["top_cosine"] for r in rows if r["label"] == "off_topic"]
     low = (max(off) + min(ans)) / 2 if max(off) < min(ans) else max(off) + 0.01
     high = max(statistics.quantiles(ans, n=4, method="inclusive")[0], low)
-    print(json.dumps({"rows": rows, "overlap": max(off) >= min(ans), "tau_low": round(low, 3), "tau_high": round(high, 3)}, indent=1))
+    with urllib.request.urlopen(URL + "/readyz", timeout=10) as r:
+        ready = json.load(r)
+    print(json.dumps({"corpus_version": ready["corpus_version"], "embedding_model": ready["embedding_model"],
+                      "chunks": ready["chunks"], "k": 5, "run_at": datetime.datetime.now(datetime.UTC).isoformat(),
+                      "rows": rows, "overlap": max(off) >= min(ans), "tau_low": round(low, 3), "tau_high": round(high, 3)}, indent=1))
 
 
-main()
+
+if __name__ == "__main__":
+    main()

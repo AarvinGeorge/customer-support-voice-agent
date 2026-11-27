@@ -31,13 +31,15 @@ def call(**kw: Any):
     (dict(vector="failed", top_cosine=None), ("error", "embedding_unavailable")),
     (dict(calibration=None), ("uncalibrated", "no_calibration")),
     (dict(calibration_mode=True), ("uncalibrated", "no_calibration")),
+    (dict(calibration_mode=True, code_match=True), ("uncalibrated", "no_calibration")),
+    (dict(calibration_mode=True, has_unknown_code=True), ("uncalibrated", "no_calibration")),
     (dict(chunk_count=0, top_cosine=None, vector="empty", keyword="empty"), ("none", "below_threshold")),
     (dict(top_cosine=0.29), ("none", "below_threshold")),
     (dict(top_cosine=0.30), ("weak", "weak_match")),
     (dict(top_cosine=0.449), ("weak", "weak_match")),
     (dict(top_cosine=0.45), ("pass", "above_threshold")),
     (dict(top_cosine=0.9), ("pass", "above_threshold")),
-], ids=["both_failed", "unknown_code", "code_match", "embedding_outage", "no_file", "calibration_flag",
+], ids=["both_failed", "unknown_code", "code_match", "embedding_outage", "no_file", "calibration_flag", "flag_beats_code", "flag_beats_unknown",
         "no_chunks", "below_low", "at_low", "below_high", "at_high", "high"])
 def test_verdict_branches(kw, expected):
     """What: each branch of the verdict order returns its verdict and reason. Use when: CI. Inputs: one case per
@@ -76,10 +78,11 @@ def test_loader_reads_a_valid_file_and_missing_is_none(tmp_path):
 
 
 @pytest.mark.parametrize("over", [dict(status="guess"), dict(tau_low=0.5, tau_high=0.4), dict(tau_low=-0.1),
-                                  dict(tau_high=1.5), dict(k_default=9), dict(embedding_model=""), dict(tau_low="x")])
+                                  dict(tau_high=1.5), dict(k_default=9), dict(embedding_model=""), dict(tau_low="x"),
+                                  dict(corpus_version=""), dict(corpus_version=None), dict(k_default=5.9)])
 def test_loader_fails_loudly_on_a_bad_file(tmp_path, over):
     """What: an invalid value raises CalibrationError instead of silently gating wrongly. Use when: CI.
-    Inputs: seven bad files. Output: assertion. Side effects: none. Role: fail loudly."""
+    Inputs: ten bad files. Output: assertion. Side effects: none. Role: fail loudly."""
     with pytest.raises(CalibrationError):
         load_calibration(write(tmp_path, **over))
 
@@ -165,15 +168,43 @@ def test_readyz_fails_on_model_mismatch_and_reports_status(client):
 
 
 def test_committed_calibration_file_is_provisional_with_probe_notes():
-    """What: data/retrieval_calibration.json loads, is provisional, matches the thresholds and the configured
+    """What: services/knowledge/config/retrieval_calibration.json loads, is provisional, matches the thresholds and the configured
     embedding model, holds a corpus_version and carries the probe notes. Use when: CI. Inputs: the committed file.
     Output: assertion. Side effects: none. Role: CS-E-02.S3.T3 Done-when (provisional status and probe notes)."""
     from tests.conftest import ROOT
     from knowledge import config
 
-    cal = load_calibration(ROOT / "data" / "retrieval_calibration.json")
+    cal = load_calibration(ROOT / "services" / "knowledge" / "config" / "retrieval_calibration.json")
     assert cal is not None
     assert cal.status == "provisional" and 0.0 < cal.tau_low < cal.tau_high < 1.0
     assert cal.embedding_model == config.DEFAULT_EMBEDDING_MODEL and len(cal.corpus_version) == 64
     for word in ("answerable", "off_topic", "not_in_docs", "tau_low", "tau_high", "0.4534"):
         assert word in cal.notes
+
+
+def test_missing_calibration_file_is_loud(tmp_path, monkeypatch, caplog):
+    """What: starting with no calibration file logs an ERROR naming the path, serves verdict uncalibrated and
+    /readyz says calibration_status none; a loaded file logs one INFO line with id, status and both thresholds.
+    Use when: CI. Inputs: a missing path, then a valid one. Output: assertion. Side effects: env, logs.
+    Role: review PR26 M1: a missing file must never be silent (every verdict would become weak)."""
+    import logging
+
+    from fastapi.testclient import TestClient
+
+    from knowledge.main import create_app
+
+    monkeypatch.setenv("KNOWLEDGE_TOKEN_AGENT", "t" * 40)
+    monkeypatch.setenv("KNOWLEDGE_DB_URL", "postgresql://unused")
+    monkeypatch.setenv("CALIBRATION_PATH", str(tmp_path / "missing.json"))
+    with caplog.at_level(logging.INFO, logger="knowledge"):
+        with TestClient(create_app()) as c:
+            assert c.app.state.calibration is None  # type: ignore[attr-defined]
+    errs = [r for r in caplog.records if r.levelno == logging.ERROR and "missing.json" in r.getMessage()]
+    assert errs and "uncalibrated" in errs[0].getMessage()
+    caplog.clear()
+    monkeypatch.setenv("CALIBRATION_PATH", str(write(tmp_path)))
+    with caplog.at_level(logging.INFO, logger="knowledge"):
+        with TestClient(create_app()):
+            pass
+    info = [r.getMessage() for r in caplog.records if "cal-2026-11-27-01" in r.getMessage()]
+    assert info and "provisional" in info[0] and "0.3" in info[0] and "0.45" in info[0]
