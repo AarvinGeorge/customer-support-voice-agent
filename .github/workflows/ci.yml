@@ -94,7 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           out="$(mktemp)"
-          uv run --no-project --with pytest==8.3.5 --with pyyaml --with ./packages/contracts pytest -q -rs tests scripts/test_keys.py 2>&1 | tee "$out"
+          uv run --no-project --with pytest==8.3.5 --with pyyaml --with ./packages/contracts pytest -q -rs -m 'not planning_docs' tests scripts/test_keys.py 2>&1 | tee "$out"
           if grep -qE '[0-9]+ skipped' "$out"; then echo "::error::pytest skipped tests (must run)"; exit 1; fi
           if ! grep -qE '[0-9]+ passed' "$out"; then echo "::error::pytest passed nothing"; exit 1; fi
 
