@@ -10,7 +10,8 @@ open_ticket hook (the escalation module, CS-E-03.S4.T1; until then the line give
 Output: GroundingMiddleware.
 The code rules (agent.gates.enforce_code_rules) run on every verifier reply: a claim backed only by an
 injection_suspect chunk or by no known source is unsupported; zero claims passes (D-059: the verifier prompt
-decides what a claim is); a verifier error, timeout or unreadable reply fails closed.
+decides what a claim is); a verifier error, timeout, reply cut at max_tokens or unreadable reply fails closed, and
+the step detail and summary.reason say which, so the drawer never shows it as an unsupported claim.
 Side effects: one verifier call per checked draft; events; thread updates (RemoveMessage, fixed line,
 grounding_failures); TurnControl.grounding, citations, gate_message_id, route.
 Role: nothing streams before this decides (the adapter buffers every model message), so a failed draft is never
@@ -28,6 +29,7 @@ from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 from agent.gates import (
     CHECKING_POLICY_LINE,
     CLARIFY_LINE,
+    ERROR_DETAILS,
     GroundingVerifier,
     citations_for,
     enforce_code_rules,
@@ -98,8 +100,10 @@ class GroundingMiddleware(AgentMiddleware):
             reason = None
         decision = "clarify" if reason is None else "escalate"
         verdict = "fail" if result.verdict == "pass" else result.verdict  # a commitment is never a pass (M7)
+        error = result.verdict == "error"
         step.finish(gate="grounding", verdict=verdict, decision=decision, title=_TITLES[decision],
-                    status="error" if result.verdict == "error" else "ok", **counts)
+                    status="error" if error else "ok", reason=result.reason if error else None,
+                    detail=ERROR_DETAILS.get(result.reason or "") if error else None, **counts)
         removal = RemoveMessage(id=str(draft.id))
         if reason is None:
             line = AIMessage(CLARIFY_LINE, id=f"gate2-{control.turn_id}")

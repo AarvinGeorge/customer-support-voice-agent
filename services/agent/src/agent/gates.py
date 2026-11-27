@@ -11,7 +11,7 @@ the scope_classifier role (data/models.yaml).
 Output: retrieval_decision, apply_retrieval_gate, retrieval_unavailable, run_scope_check, next_weak_streak,
 ScopeClassifier, GateStep, start_gate_step, last_user_text, GATE_TAGS; matches_policy, needs_grounding,
 turn_messages, evidence_text, grounded_evidence, record_gate_call, verifier_input, enforce_code_rules, GroundingVerifier, GroundingResult,
-parse_verifier_reply, citations_for, CLARIFY_LINE, CHECKING_POLICY_LINE.
+parse_verifier_reply, reply_truncated, citations_for, CLARIFY_LINE, CHECKING_POLICY_LINE, ERROR_DETAILS.
 Side effects: emits step.started, gate and step.completed on the turn stream; sets TurnControl.route; the scope
 classifier (2 s) and the verifier (5 s in chat, 3 s in voice, D-061) each make one model call, 0 retries, tagged internal:gate and nostream.
 Role: Gate 1 lives in code, never in the prompt. An error (or any verdict this code does not know) routes to
@@ -51,6 +51,22 @@ def record_gate_call(control: TurnControl, model: Any, reply: Any = None) -> Non
     # The configured id first, so a success and a timeout of one model share one spelling (review PR #66 M-2).
     name = getattr(model, "model", None) or getattr(model, "model_name", None) or meta.get("model_name") or "unknown"
     control.gate_calls.append((str(name), getattr(reply, "usage_metadata", None)))
+
+
+def reply_truncated(reply: Any) -> bool:
+    """What: true when the provider stopped the reply at max_tokens (ChatAnthropic puts it in response_metadata as
+    stop_reason, or as the shared finish_reason). Use when: the gates, right after their model call.
+    Inputs: the reply. Output: bool. Side effects: none.
+    Role: a cut reply holds no complete verdict (with thinking on, a cap can be spent before any text,
+    platform.claude.com/docs/en/build-with-claude/thinking), so it is never read as an answer."""
+    meta = getattr(reply, "response_metadata", None) or {}
+    return "max_tokens" in (meta.get("stop_reason"), meta.get("finish_reason"))
+
+
+def _output_tokens(reply: Any) -> Any:
+    """What: output tokens of a reply, for the log line. Use when: a truncated gate reply. Inputs: reply.
+    Output: int or None. Side effects: none. Role: helper."""
+    return (getattr(reply, "usage_metadata", None) or {}).get("output_tokens")
 WEAK_VERDICTS = frozenset({"weak", "uncalibrated"})
 
 SCOPE_PROMPT = (
@@ -91,18 +107,21 @@ class GateStep:
     t0: int
 
     def finish(self, *, gate: str, verdict: str, decision: str, title: str, status: str = "ok",
-               detail: str | None = None, **fields: Any) -> None:
+               detail: str | None = None, reason: str | None = None, **fields: Any) -> None:
         """What: emit the gate event and step.completed. Use when: the gate decided. Inputs: gate, verdict,
-        decision, past-tense title, step status, detail, other GateEvent fields (chunk_ids defaults to []).
+        decision, past-tense title, step status, detail, error reason (added to the step summary), other GateEvent
+        fields (chunk_ids defaults to []).
         Output: none. Side effects: two events (none without a sink). Role: doc 07 s6.2 gate."""
         ev = self.control.events
         if ev is None or self.step_id is None:
             return
         fields.setdefault("chunk_ids", [])
         ev.emit("gate", step_id=self.step_id, gate=gate, verdict=verdict, decision=decision, **fields)
+        summary: dict[str, Any] = {"verdict": verdict, "decision": decision}
+        if reason:
+            summary["reason"] = reason
         ev.emit("step.completed", step_id=self.step_id, status=status, ms=max(ev.ms() - self.t0, 0), title=title,
-                detail=(detail or None) and detail[:80], summary={"verdict": verdict, "decision": decision},
-                attempt=1)
+                detail=(detail or None) and detail[:80], summary=summary, attempt=1)
 
 
 def start_gate_step(control: TurnControl, name: str, label: str) -> GateStep:
@@ -206,6 +225,10 @@ class ScopeClassifier:
             _log.warning("scope classifier failed (%s); treated as on-topic", type(exc).__name__)
             return True
         record_gate_call(control, self.model, reply)
+        if reply_truncated(reply):
+            _log.warning("scope classifier reply truncated (stop_reason max_tokens, output_tokens=%s); treated as "
+                         "on-topic", _output_tokens(reply))
+            return True
         answer = reply.text if isinstance(getattr(reply, "text", None), str) else str(getattr(reply, "content", ""))
         return answer.strip().upper().rstrip(".") != "OFF"
 
@@ -245,6 +268,12 @@ def next_weak_streak(control: TurnControl) -> int:
 CHECKING_POLICY_LINE = "Checking the answer against policy..."
 CLARIFY_LINE = ("I want to be sure I give you the right answer. Could you tell me a little more about what you "
                 "need?")
+# The drawer detail for a verifier error, by GroundingResult.reason (at most 80 characters, StepCompletedEvent).
+ERROR_DETAILS = {"truncated": "Verifier hit its token cap before a verdict; failed closed",
+                 "timeout": "Verifier timed out; failed closed",
+                 "exception": "Verifier call failed; failed closed",
+                 "unparseable": "Verifier reply was not a readable verdict; failed closed",
+                 "no_time": "No time left for the verifier; failed closed"}
 EVIDENCE_MAX_CHARS = 48000  # far below the verifier's context; a longer turn keeps its first (best) results
 EXCERPT_MAX_CHARS = 240
 
@@ -384,13 +413,15 @@ def grounded_evidence(values: dict[str, Any], messages: list[BaseMessage]) -> tu
 @dataclass(frozen=True)
 class GroundingResult:
     """What: one verifier outcome. Use when: GroundingMiddleware decides.
-    Inputs: verdict ("pass", "fail", or "error" for a timeout, an exception or an unreadable reply: fail
-    closed), claims [{text, supported, source_id}], commitment. Output: value. Side effects: none.
+    Inputs: verdict ("pass", "fail", or "error" for a timeout, an exception, a reply cut at max_tokens or an
+    unreadable reply: fail closed), claims [{text, supported, source_id}], commitment, and for an error its reason
+    (ERROR_DETAILS keys). Output: value. Side effects: none.
     Role: Gate 2 result."""
 
     verdict: str
     claims: list[dict[str, Any]] = field(default_factory=list)
     commitment: bool = False
+    reason: str | None = None  # why an "error": truncated, timeout, exception, unparseable or no_time
 
     @property
     def passed(self) -> bool:
@@ -421,7 +452,7 @@ def parse_verifier_reply(text: str) -> GroundingResult:
             claims.append({"text": str(c.get("text") or "")[:300], "supported": c["supported"],
                            "source_id": str(src) if src else None})
     except (ValueError, KeyError, TypeError):
-        return GroundingResult("error")
+        return GroundingResult("error", reason="unparseable")
     verdict = "pass" if all(c["supported"] for c in claims) else "fail"
     return GroundingResult(verdict, claims, commitment)
 
@@ -453,19 +484,25 @@ class GroundingVerifier:
 
     async def verify(self, control: TurnControl, draft: str, evidence: str) -> GroundingResult:
         """What: check one draft. Use when: Gate 2 runs. Inputs: control (deadline, mode), draft, evidence text.
-        Output: GroundingResult ("error" on timeout, exception, no time left or an unreadable reply).
-        Side effects: one model call. Role: fail closed."""
+        Output: GroundingResult ("error" on timeout, exception, no time left, a reply cut at max_tokens or an
+        unreadable reply, with that reason). Side effects: one model call; a warning log line on a truncated reply.
+        Role: fail closed."""
         timeout = clamp_timeout(self.timeout_for(control.mode), control.remaining_s(), minimum_s=self.min_s)
         if timeout is None:
-            return GroundingResult("error")
+            return GroundingResult("error", reason="no_time")
         msgs = [SystemMessage(VERIFIER_PROMPT), HumanMessage(verifier_input(evidence, draft))]
         try:
             reply = await asyncio.wait_for(self.model.ainvoke(msgs, config={"tags": list(GATE_TAGS)}), timeout)
         except Exception as exc:  # noqa: BLE001 - doc 07 s8.1: fail closed
             record_gate_call(control, self.model)
-            _log.warning("grounding verifier failed (%s); counted as a fail", type(exc).__name__)
-            return GroundingResult("error")
+            reason = "timeout" if isinstance(exc, TimeoutError) else "exception"
+            _log.warning("grounding verifier failed (%s, reason=%s); counted as a fail", type(exc).__name__, reason)
+            return GroundingResult("error", reason=reason)
         record_gate_call(control, self.model, reply)
+        if reply_truncated(reply):
+            _log.warning("grounding verifier reply truncated (stop_reason max_tokens, output_tokens=%s); failed "
+                         "closed", _output_tokens(reply))
+            return GroundingResult("error", reason="truncated")
         text = reply.text if isinstance(getattr(reply, "text", None), str) else str(getattr(reply, "content", ""))
         return parse_verifier_reply(text)
 
