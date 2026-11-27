@@ -5,21 +5,21 @@
  * Use when: the /console route and the dev-only fixture replay route.
  * Inputs: { sessionId, store?, onNewConversation? }.
  * Output: the full-height console frame.
- * Side effects: sending a message calls store.sendTurn (one network request); an in-flight turn
- *   is aborted on unmount (its turn ends in the failed state, review PR #16 I1).
+ * Side effects: sending a message or pressing a card calls store.sendTurn (one network request);
+ *   an in-flight turn is aborted on unmount (its turn ends in the failed state, review PR #16 I1).
  * Role: CS-E-04.S5.T1 shell, laid out from the Figma page "Console, chat (S1)".
  */
 import { MotionConfig } from "motion/react";
 import { PanelRight, Plus, Shield, ShieldCheck } from "lucide-react";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useStore, type StoreApi } from "zustand";
-import type { VerifiedPerson } from "@contracts/contracts";
+import type { ConfirmInput, TurnRequest, VerificationInput, VerifiedPerson } from "@contracts/contracts";
 
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { turnStore, type TurnStoreState } from "@/lib/turns/store";
 
-import { ConversationLog } from "./conversation-log";
+import { ConversationLog, type CardActions } from "./conversation-log";
 import { InputBar } from "./input-bar";
 
 /**
@@ -103,7 +103,7 @@ export interface ConsoleShellProps {
  */
 export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }: ConsoleShellProps) {
   const thread = useStore(store, (s) => s.thread);
-  const turns = useStore(store, (s) => s.conversation.turns);
+  const conversation = useStore(store, (s) => s.conversation);
   const person = useStore(store, (s) => s.conversation.verified);
   const busy = useStore(store, (s) => s.connection.phase === "streaming");
   const inflight = useRef<AbortController | null>(null);
@@ -111,28 +111,50 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
   useEffect(() => () => inflight.current?.abort(), []);
 
   /**
-   * What: sends one chat message as a turn.
-   * Use when: the input bar submits.
-   * Inputs: the text.
-   * Output: none.
-   * Side effects: one streamed request; failures land on the turn (failed phase) or in
-   *   connection.error (shown by CS-E-04.S5.T3), so the rejection is swallowed here.
-   * Role: handler.
+   * What: sends one turn: a chat message, or a card's verification or confirm body.
+   * Use when: the input bar submits, or a card is pressed.
+   * Inputs: the TurnRequest without client_turn_id (exactly one of text, verification, confirm).
+   * Output: a promise that settles when the turn ends (resolves on success and on failure).
+   * Side effects: one streamed request with a fresh client_turn_id; failures land on the turn
+   *   (failed phase) or in connection.error (shown by CS-E-04.S5.T3), so the rejection is
+   *   swallowed here. Without a session nothing is sent.
+   * Role: handler. The request object is not kept anywhere after the call, so a card PIN lives
+   *   only for the request (doc 07 s11).
    */
-  const send = useCallback(
-    (text: string) => {
-      if (sessionId === null) return;
+  const run = useCallback(
+    (part: Omit<TurnRequest, "client_turn_id">): Promise<void> => {
+      if (sessionId === null) return Promise.resolve();
       const ctrl = new AbortController();
       inflight.current = ctrl;
-      store
+      return store
         .getState()
-        .sendTurn(sessionId, { client_turn_id: crypto.randomUUID(), text }, { signal: ctrl.signal })
+        .sendTurn(sessionId, { client_turn_id: crypto.randomUUID(), ...part }, { signal: ctrl.signal })
+        .then(() => undefined)
         .catch(() => undefined)
         .finally(() => {
           if (inflight.current === ctrl) inflight.current = null;
         });
     },
     [sessionId, store],
+  );
+
+  /**
+   * What: sends one chat message.
+   * Use when: the input bar submits.
+   * Inputs: the text.
+   * Output: none.
+   * Side effects: see run.
+   * Role: handler.
+   */
+  const send = useCallback((text: string) => void run({ text }), [run]);
+
+  const cards: CardActions = useMemo(
+    () => ({
+      disabled: busy,
+      verify: (verification: VerificationInput) => run({ verification }),
+      decide: (confirm: ConfirmInput) => run({ confirm }),
+    }),
+    [busy, run],
   );
 
   return (
@@ -158,7 +180,7 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
         </header>
         <main className="mx-auto flex w-full max-w-[45rem] flex-1 flex-col px-4 pt-10 pb-6 sm:px-0">
           <div className="flex flex-1 flex-col">
-            <ConversationLog thread={thread} turns={turns} />
+            <ConversationLog thread={thread} conversation={conversation} cards={cards} />
           </div>
           <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
             <InputBar onSend={send} busy={busy} disabled={sessionId === null} />

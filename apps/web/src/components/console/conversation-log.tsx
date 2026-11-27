@@ -3,18 +3,51 @@
  * What: the conversation log: one thread of user items and agent turns, chat and voice together,
  *   each agent turn with its StepTrajectory, answer text, failure row and footer.
  * Use when: the console renders the store's thread.
- * Inputs: { thread, turns }.
+ * Inputs: { thread, conversation, cards? }.
  * Output: a role="log" region of <article> items, or the empty state.
- * Side effects: none.
- * Role: CS-E-04.S5.T1 unified thread (doc 06 s16, D-002). Cards, citations, tickets and
- *   markdown arrive with CS-E-04.S5.T3 and CS-E-04.S6.T1.
+ * Side effects: none (card presses go to the `cards` callbacks).
+ * Role: CS-E-04.S5.T1 unified thread (doc 06 s16, D-002); CS-E-04.S6.T1 adds the verification
+ *   result line, receipts and the two cards. Citations, tickets and markdown arrive with
+ *   CS-E-04.S5.T3.
  */
 import { CircleAlert, Mic } from "lucide-react";
+import type { ConfirmInput, VerificationInput } from "@contracts/contracts";
 
-import type { TurnView } from "@/lib/turns/reducer";
+import { cardIndex, receiptFor, ruleTitle, verificationCardState, type CardIndex } from "@/lib/turns/cards";
+import type { ConversationState, TurnView } from "@/lib/turns/reducer";
 import type { ThreadItem } from "@/lib/turns/store";
 
+import { ConfirmationCard, ReceiptLine, VerificationCard, VerificationResultLine } from "./cards";
 import { StepTrajectory } from "./step-trajectory";
+
+/**
+ * What: what the log needs to make the cards live.
+ * Use when: the console shell renders the log.
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: `disabled` while a turn streams; the callbacks send one TurnRequest each and resolve
+ *   when the turn settles. Without it the cards render but presses do nothing.
+ */
+export interface CardActions {
+  disabled: boolean;
+  verify: (body: VerificationInput) => Promise<unknown>;
+  decide: (body: ConfirmInput) => Promise<unknown>;
+}
+
+/**
+ * What: card actions that do nothing.
+ * Use when: the log renders without a shell (no session).
+ * Inputs: none.
+ * Output: a frozen CardActions.
+ * Side effects: none.
+ * Role: default.
+ */
+const NO_ACTIONS: CardActions = Object.freeze({
+  disabled: false,
+  verify: async () => undefined,
+  decide: async () => undefined,
+});
 
 /**
  * What: the words for a turn's mode.
@@ -49,19 +82,36 @@ function UserMessage({ text, mode }: { text: string; mode: "chat" | "voice" }) {
 }
 
 /**
- * What: one agent turn: trail, answer text, the terminal failure row, footer.
+ * What: one agent turn: trail, verification result and receipt lines, answer text, the cards,
+ *   the terminal failure row, footer.
  * Use when: a turn thread item.
- * Inputs: { turn }.
+ * Inputs: { turn, conversation, index, cards }.
  * Output: an <article>.
  * Side effects: none.
- * Role: assistant message (plain text paragraphs until Streamdown lands in CS-E-04.S5.T3).
+ * Role: assistant message (plain text paragraphs until Streamdown lands in CS-E-04.S5.T3); the
+ *   order follows Figma S1 (receipt above the text, cards below it).
  */
-function AssistantMessage({ turn }: { turn: TurnView }) {
+function AssistantMessage({
+  turn,
+  conversation,
+  index,
+  cards,
+}: {
+  turn: TurnView;
+  conversation: ConversationState;
+  index: CardIndex;
+  cards: CardActions;
+}) {
   const paragraphs = turn.text.split(/\n{2,}/).filter((p) => p.trim() !== "");
   const latency = turn.completed ? `${(turn.completed.usage.latency_ms / 1000).toFixed(2)} s` : null;
+  const verifyState = turn.verificationRequired ? verificationCardState(conversation, turn.turnId, index) : "hidden";
   return (
     <article aria-label="Assistant" className="flex flex-col items-start gap-3.5">
       <StepTrajectory turn={turn} />
+      {turn.verificationResult && <VerificationResultLine result={turn.verificationResult} />}
+      {turn.actionResults.map((r) => (
+        <ReceiptLine key={r.seq} receipt={receiptFor(r, (r.pending_action_id && index.pendings[r.pending_action_id]) || null)} />
+      ))}
       {paragraphs.length > 0 && (
         <div className="flex max-w-[70ch] flex-col gap-3 text-body text-ink">
           {paragraphs.map((p, i) => (
@@ -70,6 +120,19 @@ function AssistantMessage({ turn }: { turn: TurnView }) {
             </p>
           ))}
         </div>
+      )}
+      {verifyState !== "hidden" && turn.verificationRequired && (
+        <VerificationCard request={turn.verificationRequired} state={verifyState} disabled={cards.disabled} onSubmit={cards.verify} />
+      )}
+      {turn.confirmation && (
+        <ConfirmationCard
+          confirmation={turn.confirmation}
+          turnId={turn.turnId}
+          index={index}
+          ruleTitle={ruleTitle(turn, turn.confirmation.pending.reason_code)}
+          disabled={cards.disabled}
+          onDecide={cards.decide}
+        />
       )}
       {turn.failure && (
         <p className="inline-flex items-start gap-2 text-body-sm text-ink">
@@ -94,12 +157,22 @@ function AssistantMessage({ turn }: { turn: TurnView }) {
 /**
  * What: the conversation log component.
  * Use when: see module.
- * Inputs: { thread, turns } from the turn store.
+ * Inputs: { thread, conversation } from the turn store, and the card actions.
  * Output: JSX.
  * Side effects: none.
  * Role: see module.
  */
-export function ConversationLog({ thread, turns }: { thread: readonly ThreadItem[]; turns: Readonly<Record<string, TurnView>> }) {
+export function ConversationLog({
+  thread,
+  conversation,
+  cards = NO_ACTIONS,
+}: {
+  thread: readonly ThreadItem[];
+  conversation: ConversationState;
+  cards?: CardActions;
+}) {
+  const turns = conversation.turns;
+  const index = cardIndex(conversation);
   if (thread.length === 0) {
     return (
       <div className="flex flex-1 flex-col justify-center gap-2 py-12">
@@ -116,7 +189,7 @@ export function ConversationLog({ thread, turns }: { thread: readonly ThreadItem
       {thread.map((item) => {
         if (item.kind === "user") return <UserMessage key={item.id} text={item.text} mode={item.mode} />;
         const turn = turns[item.turnId];
-        return turn ? <AssistantMessage key={item.id} turn={turn} /> : null;
+        return turn ? <AssistantMessage key={item.id} turn={turn} conversation={conversation} index={index} cards={cards} /> : null;
       })}
     </div>
   );
