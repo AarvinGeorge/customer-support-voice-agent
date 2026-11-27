@@ -2,7 +2,7 @@
 Use when: read tools, prepare_refund and create_ticket call core (doc 07 s3.2 to s3.4); ingress memory refresh
 and card verification (s3.1, scopes context.read and identity.verify on the same token).
 Inputs: base URL, the agent token, an httpx.AsyncClient, whether demo faults are enabled.
-Output: CoreAgentClient with get_context, verify, get_profile, list_charges, list_tickets, prepare_refund,
+Output: CoreAgentClient with get_context, verify, get_profile (the Profile in MeContext), list_charges, list_tickets, prepare_refund,
 create_ticket.
 Side effects: HTTP requests to core.
 Role: least privilege per module (doc 07 s1.4): this client cannot commit, submit, cancel or step up because its
@@ -59,9 +59,12 @@ class CoreAgentClient:
                                       self._headers(control), body={"account_id": account_id, "pin": pin})
 
     async def get_profile(self, control: TurnControl) -> Any:
-        """What: GET /v1/me/profile. Use when: get_account_summary. Inputs: control. Output: Profile JSON.
-        Side effects: HTTP. Role: s3.2."""
-        return await call_json(self._http, "GET", f"{self._base}/v1/me/profile", self._headers(control))
+        """What: the Profile part of GET /v1/me/context (scope context.read). Use when: get_account_summary.
+        Inputs: control. Output: Profile JSON (MeContext.profile). Side effects: HTTP.
+        Role: s3.2 Profile. Core builds no separate profile route (doc 09 s1.2, profile reads are designed only);
+        MeContext embeds the same Profile, so the tool reads it from the built route."""
+        ctx = await call_json(self._http, "GET", f"{self._base}/v1/me/context", self._headers(control))
+        return ctx["profile"]
 
     async def list_charges(self, control: TurnControl, params: dict[str, Any]) -> Any:
         """What: GET /v1/me/charges with ending, on, since_days, limit. Use when: list_charges.

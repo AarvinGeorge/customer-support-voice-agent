@@ -139,7 +139,7 @@ def _base_headers_ok(headers: dict[str, str]) -> None:
 
 EXPECTED = {
     # tool: (args, method, path, sends X-Turn-Id, sends Idempotency-Key)
-    "get_account_summary": ({}, "GET", "/v1/me/profile", False, False),
+    "get_account_summary": ({}, "GET", "/v1/me/context", False, False),
     "list_charges": ({"on": "2026-11-21", "since_days": None, "ending": None}, "GET", "/v1/me/charges", False, False),
     "list_tickets": ({"status": "open"}, "GET", "/v1/me/tickets", False, False),
     "prepare_refund": ({"charge_id": "CH-26112102", "reason": "duplicate", "note": "Charged twice"}, "POST",
@@ -161,6 +161,15 @@ async def test_core_tools_send_the_agent_token_and_the_right_headers(name: str):
     assert ("x-turn-id" in call.headers) is turn_hdr and (call.headers.get("x-turn-id") in (None, TID))
     assert call.headers.get("idempotency-key") == (f"{SID}:c1" if idem else None)
     assert "x-demo-fault" not in call.headers
+
+
+async def test_get_account_summary_returns_the_profile_part_of_the_context():
+    """What: the tool's result is the Profile only (not claims, tickets or actions) read from GET /v1/me/context.
+    Use when: always. Inputs: none. Output: assertions. Side effects: none. Role: the profile route is designed only."""
+    h = Harness()
+    _, _, tool_msgs = await h.turn("get_account_summary", {})
+    body = json.loads(str(tool_msgs[0].content).split('untrusted="true">', 1)[1][:-len("</tool_result>")])
+    assert body == ex.PROFILE.model_dump(mode="json")
 
 
 async def test_prepare_refund_builds_charge_ref_and_sets_the_readback_route():
