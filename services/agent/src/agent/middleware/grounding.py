@@ -9,7 +9,8 @@ Inputs: the agent state (messages, grounding_failures), the bound TurnControl, a
 open_ticket hook (the escalation module, CS-E-03.S4.T1; until then the line gives the turn reference).
 Output: GroundingMiddleware.
 The code rules (agent.gates.enforce_code_rules) run on every verifier reply: a claim backed only by an
-injection_suspect chunk or by no known source is unsupported, and zero claims on a policy draft fails closed.
+injection_suspect chunk or by no known source is unsupported; zero claims passes (D-059: the verifier prompt
+decides what a claim is); a verifier error, timeout or unreadable reply fails closed.
 Side effects: one verifier call per checked draft; events; thread updates (RemoveMessage, fixed line,
 grounding_failures); TurnControl.grounding, citations, gate_message_id, route.
 Role: nothing streams before this decides (the adapter buffers every model message), so a failed draft is never
