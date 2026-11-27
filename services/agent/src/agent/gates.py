@@ -12,7 +12,7 @@ the scope_classifier role (data/models.yaml).
 Output: retrieval_decision, apply_retrieval_gate, retrieval_unavailable, run_scope_check, next_weak_streak,
 ScopeClassifier, GateStep, start_gate_step, last_user_text, GATE_TAGS; is_code_line, NO_CLAIMS_DETAIL,
 NO_CLAIMS_REASONS, turn_messages, evidence_window, identity_key, evidence_tokens, EVIDENCE_MAX_TOKENS,
-session_evidence, session_state_text, SessionEvidence, grounded_evidence, answered_with_support, verdict_schema,
+session_evidence, session_state_text, SessionEvidence, grounded_evidence, answered_with_support, verdict_schema, SID_PATTERN,
 GATE2_EVIDENCE_USER_TURNS, record_gate_call, verifier_input, enforce_code_rules, GroundingVerifier, GroundingResult,
 parse_verifier_reply, reply_truncated, citations_for, CLARIFY_LINE, CHECKING_POLICY_LINE, ERROR_DETAILS.
 Side effects: emits step.started, gate and step.completed on the turn stream; sets TurnControl.route; the scope
@@ -659,7 +659,7 @@ class GroundingVerifier:
         return self.timeouts.get(mode, self.timeouts["voice"])
 
     async def verify(self, control: TurnControl, draft: str, evidence: SessionEvidence) -> GroundingResult:
-        """What: check one draft, with the reply constrained to verdict_schema(evidence.citable) (review PR #71 I1).
+        """What: check one draft, with the reply constrained to verdict_schema() (review PR #71 I1).
         Use when: Gate 2 runs. Inputs: control (deadline, mode), draft, the session evidence.
         Output: GroundingResult ("error" on timeout, exception, no time left, a reply cut at max_tokens or an
         unreadable reply, with that reason). Side effects: one model call; a warning log line on a truncated reply.
@@ -669,7 +669,7 @@ class GroundingVerifier:
             return GroundingResult("error", reason="no_time")
         citable = evidence.citable
         msgs = [SystemMessage(VERIFIER_PROMPT), HumanMessage(verifier_input(evidence.text, draft, citable))]
-        kwargs = self.output_kwargs(self.model, verdict_schema(citable))
+        kwargs = self.output_kwargs(self.model, verdict_schema())
         try:
             reply = await asyncio.wait_for(self.model.ainvoke(msgs, config={"tags": list(GATE_TAGS)}, **kwargs),
                                            timeout)
@@ -701,14 +701,21 @@ def verifier_input(evidence: str, draft: str, citable: list[str] | None = None) 
     return f"<evidence>\n{ev}\n</evidence>\n<citable_ids>\n{ids}\n</citable_ids>\n<draft>\n{dr}\n</draft>"
 
 
-def verdict_schema(citable: list[str]) -> dict[str, Any]:
-    """What: the JSON schema of the verifier's reply for one call: source_id is one of the citable sids or null
-    (an enum built per call), no_claims_reason one of NO_CLAIMS_REASONS or null; no other keys.
-    Use when: GroundingVerifier.verify (structured output, agent.models.structured). Inputs: citable sids.
+# Every sid session_evidence writes: the code sources, "<tool>@<n>" (tool results and fixed_line@n), and chunk ids
+# "<article>#<section path>". Anything else (a wrapper prefix, a bare tool name, free text) cannot be produced.
+SID_PATTERN = r"^(agent_capabilities|account_context|session_state|[a-z_]+@[0-9]+|[a-z0-9-]+#[a-z0-9/_-]+)$"
+
+
+def verdict_schema() -> dict[str, Any]:
+    """What: the JSON schema of every verifier reply: source_id matches SID_PATTERN or is null, no_claims_reason is
+    one of NO_CLAIMS_REASONS or null; no other keys. The schema is the same on every call.
+    Use when: GroundingVerifier.verify (structured output, agent.models.structured). Inputs: none.
     Output: JSON schema dict. Side effects: none.
-    Role: review PR #71 I1: a prefixed or invented id cannot be produced, so no tolerance parsing is needed."""
-    source: dict[str, Any] = ({"anyOf": [{"type": "string", "enum": list(citable)}, {"type": "null"}]}
-                              if citable else {"type": "null"})
+    Role: review PR #71 I1 (a prefixed or invented id form cannot be produced, so no tolerance parsing). One stable
+    schema, because the provider compiles a grammar per new schema: a per-call enum measured p50 2.58 s with 1 of 5
+    over the 3 s voice limit (no structured output: p50 1.04 s). Which sids a given call may cite is the code-written
+    <citable_ids> list plus the code rule (enforce_code_rules), not the schema."""
+    source: dict[str, Any] = {"anyOf": [{"type": "string", "pattern": SID_PATTERN}, {"type": "null"}]}
     claim = {"type": "object", "additionalProperties": False, "required": ["text", "supported", "source_id"],
              "properties": {"text": {"type": "string"}, "supported": {"type": "boolean"}, "source_id": source}}
     return {"type": "object", "additionalProperties": False,
@@ -729,8 +736,8 @@ def enforce_code_rules(result: GroundingResult, draft: str, chunks: dict[str, di
     """What: the Gate 2 rules that live in code, applied to the verifier's reply.
     1. A supported claim counts only when its source_id is a relevant chunk in the session evidence (D-065) that
        is not flagged injection_suspect, or a non-chunk source id in it (a tool name, account_context, a fixed
-       line, agent_capabilities, a "<tool>@<n>" result); the verifier's output is constrained to those sids
-       (verdict_schema), and this rule still checks. Any other source (null, unknown id, "search_kb", a suspect
+       line, agent_capabilities, a "<tool>@<n>" result); the verifier's output is constrained to the sid forms
+       (verdict_schema), and this rule limits it to this call's sids. Any other source (null, unknown id, "search_kb", a suspect
        chunk) makes the claim unsupported, so it is never cited.
     2. Zero claims passes only with a stated reason (D-069, amends D-059 and D-067): what counts as a claim, and
        why a draft has none, is the verifier's judgement; an empty list without a NO_CLAIMS_REASONS value fails

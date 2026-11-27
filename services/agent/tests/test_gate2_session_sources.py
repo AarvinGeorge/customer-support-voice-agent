@@ -10,6 +10,7 @@ Role: browser pass 2b bugs 2 to 4 and the review of PR #71.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from gate2_fakes import CitingVerifierModel
@@ -121,30 +122,45 @@ async def test_a_claim_with_no_source_anywhere_in_the_session_is_still_blocked()
 # --- I1: one code-written sid per block, the citable list and the per-call enum -------------------------------------
 
 
-async def test_the_verifier_gets_the_citable_ids_and_a_schema_whose_source_id_enum_is_exactly_those_ids():
+async def test_the_verifier_gets_the_citable_ids_and_one_stable_schema_whose_sid_pattern_fits_them():
+    # Voice blocker (fix round 1 measurement): a per-call enum is a new grammar on every call (p50 2.58 s, 1 of 5
+    # over the 3 s voice limit against 1.04 s without). One schema for every call is compiled once; the sid
+    # pattern forbids prefixed or free-text ids, and the code rule keeps each call to its own citable list.
     ver = citing(CLAIM)
     h = Harness(ver)
     await h.run()
+    h.script(AIMessage(DRAFT))
+    await h.run(turn_id="t-2")
     model: Any = ver.model
-    human = model.seen[0]
-    listed = human.split("<citable_ids>\n")[1].split("\n</citable_ids>")[0].splitlines()
+    listed = model.seen[0].split("<citable_ids>\n")[1].split("\n</citable_ids>")[0].splitlines()
     assert listed == ["account_context", "agent_capabilities", "refund-policy#2", "session_state"]
-    schema = model.kwargs[0]["schema"]
-    source = schema["properties"]["claims"]["items"]["properties"]["source_id"]
-    assert source == {"anyOf": [{"type": "string", "enum": listed}, {"type": "null"}]}
-    assert schema["additionalProperties"] is False
+    first, second = model.kwargs[0]["schema"], model.kwargs[1]["schema"]
+    assert first == second == verdict_schema() and first["additionalProperties"] is False
+    pattern = first["properties"]["claims"]["items"]["properties"]["source_id"]["anyOf"][0]["pattern"]
+    assert all(re.fullmatch(pattern, sid) for sid in listed)
+
+
+def test_the_sid_pattern_accepts_every_sid_kind_and_rejects_prefixed_or_free_text_ids():
+    pattern = verdict_schema()["properties"]["claims"]["items"]["properties"]["source_id"]["anyOf"][0]["pattern"]
+    good = ["agent_capabilities", "account_context", "session_state", "fixed_line@1", "list_tickets@12",
+            "prepare_refund@1", "refund-policy#2", "refund-policy#pro-plan-refunds/refunds-we-can-issue-right-away",
+            "roles-and-permissions#billing-permissions"]
+    bad = ["tool_result:prepare_refund@1", "doc:refund-policy#2", "prepare_refund", "list_tickets",
+           "the refund policy", "<source sid=\"x\">", "refund-policy#2 and more", ""]
+    assert all(re.fullmatch(pattern, s) for s in good)
+    assert not any(re.fullmatch(pattern, s) for s in bad)
 
 
 def test_structured_output_kwargs_reach_the_anthropic_request_payload():
     from langchain_anthropic import ChatAnthropic
 
     model = ChatAnthropic(model="claude-haiku-5-5", api_key="test-key", max_tokens=64)  # type: ignore[call-arg]
-    kwargs = structured_output_kwargs(model, verdict_schema(["agent_capabilities", "list_tickets@1"]))
+    kwargs = structured_output_kwargs(model, verdict_schema())
     payload = model._get_request_payload([HumanMessage("x")], **kwargs)
     fmt = payload["output_config"]["format"]
     assert fmt["type"] == "json_schema"
-    enum = fmt["schema"]["properties"]["claims"]["items"]["properties"]["source_id"]["anyOf"][0]["enum"]
-    assert enum == ["agent_capabilities", "list_tickets@1"]
+    source = fmt["schema"]["properties"]["claims"]["items"]["properties"]["source_id"]
+    assert "pattern" in str(source)
     assert structured_output_kwargs(object(), {}) == {}  # an unknown model (a fake) gets no kwargs
 
 
