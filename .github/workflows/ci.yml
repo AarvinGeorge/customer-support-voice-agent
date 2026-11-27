@@ -238,7 +238,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.8.22"
-      - name: Postgres-backed tests (pytest -m pg) for core and knowledge
+      - name: Postgres-backed tests (pytest -m pg) for core, knowledge and agent
         run: |
           set -euo pipefail
           # Starts the Compose pgvector Postgres with dummy random passwords (generated inside the script, no secrets),
