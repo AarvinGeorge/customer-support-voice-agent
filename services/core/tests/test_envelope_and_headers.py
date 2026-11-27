@@ -6,6 +6,7 @@ import uuid
 import pytest
 
 from contracts.errors import CORE_ERROR_CODES, ErrorEnvelope
+from tests.pin_probe import leaks
 
 ROUTE = "/v1/me/context"
 AGENT = {"Authorization": "Bearer tok-agent"}
@@ -92,7 +93,7 @@ def test_validation_error_is_envelope_and_never_echoes_input(client):
     client.app.add_api_route("/__probe", probe, methods=["POST"])
     r = client.post("/__probe", json={"pin": "4821 secret"}, headers=AGENT)
     assert r.status_code == 422 and r.json()["error"]["code"] == "VALIDATION_ERROR"
-    assert "4821" not in r.text
+    assert not leaks(r.text, "4821")
     assert r.json()["error"]["details"]["errors"][0]["loc"] == ["body", "pin"]
 
 

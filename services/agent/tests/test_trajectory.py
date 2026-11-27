@@ -23,6 +23,7 @@ from agent.models.usage import token_usage
 from agent.sse import TurnMeta, TurnOutcome, TurnStream, stream_agent_turn
 from agent.trajectory import INSERT_SQL, TrajectoryWriter, event_row
 from ingress_fakes import MemoryTurnLock, MemoryTurnStore
+from pin_probe import leaks
 
 ROOT = Path(__file__).resolve().parents[3]
 SID, VISITOR = "019a7c2e-5b10-7000-8000-00000000a001", "visitor-1"
@@ -104,7 +105,7 @@ def test_event_row_maps_columns_and_redacts_the_payload():
     assert ts == raw["ts"]
     body = payload.obj  # psycopg Jsonb wrapper
     assert body["args_redacted"] == {"email": "p***@acme.com", "pin": "[PIN]"}
-    assert "pat.lee" not in str(body) and "4821" not in str(body)
+    assert "pat.lee" not in str(body) and not leaks(str(body), "4821")
 
 
 async def test_events_reach_the_writer_in_one_batch_and_tokens_never_do():
