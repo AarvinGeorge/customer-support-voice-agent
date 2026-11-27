@@ -113,6 +113,7 @@ export function ticketChip(ticket: TicketRef): TicketChipView {
  */
 export function turnTickets(turn: TurnView): TicketRef[] {
   const found = new Map<string, TicketRef>();
+  /** What: records a ticket. Use when: collecting. Inputs: a TicketRef or nothing. Output: none. Side effects: sets `found`. Role: helper. */
   const add = (t: TicketRef | null | undefined) => {
     if (t) found.set(t.ticket_id, t);
   };
