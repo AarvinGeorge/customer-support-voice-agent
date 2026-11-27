@@ -297,3 +297,14 @@ def test_the_commit_token_is_not_reachable_from_tool_modules():
     assert any(p.name == "catalog.py" for p in reached) and any(p.name == "core_agent.py" for p in reached)
     offenders = [str(p) for p in reached if "CORE_TOKEN_" + "COMMIT" in p.read_text()]
     assert offenders == []
+
+
+async def test_a_2xx_body_that_is_not_json_is_an_unavailable_tool_call_error():
+    """I2 (review of PR #35): a malformed 200 from core maps to a retryable failure, not a raw exception."""
+    from agent.clients.http import ToolCallError, call_json
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b"<html>oops</html>"))
+    async with httpx.AsyncClient(transport=transport) as http:
+        with pytest.raises(ToolCallError) as info:
+            await call_json(http, "GET", "http://core/v1/x", {})
+    assert info.value.kind == "unavailable" and info.value.retryable

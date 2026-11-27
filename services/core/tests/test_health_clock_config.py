@@ -73,8 +73,12 @@ def test_settings_from_env_requires_everything(monkeypatch):
     monkeypatch.setenv("CORE_TOKEN_OPS", "c")
     monkeypatch.setenv("CORE_DB_URL", "postgresql://x")
     monkeypatch.setenv("DEMO_FAULTS_ENABLED", "false")
+    monkeypatch.delenv("PIN_PEPPER", raising=False)
+    with pytest.raises(ConfigError, match="PIN_PEPPER"):
+        Settings.from_env()
+    monkeypatch.setenv("PIN_PEPPER", "pep")
     s = Settings.from_env()
-    assert (s.token_agent, s.demo_faults, s.db_url) == ("a", False, "postgresql://x")
+    assert (s.token_agent, s.demo_faults, s.db_url, s.pin_pepper) == ("a", False, "postgresql://x", "pep")
 
 
 def test_startup_logs_contract_and_policy_version(settings, clock, caplog):

@@ -1,5 +1,5 @@
-# What: publishes the Compose Postgres on a loopback port so the knowledge pg tests can reach it from the host.
-# Use when: scripts/knowledge_pg_test.sh layers it over compose.yaml (never on the VM).
+# What: publishes the Compose Postgres on a loopback port so the core and knowledge pg tests can reach it from the host.
+# Use when: scripts/pg_tests.sh layers it over compose.yaml (never on the VM).
 # Inputs: PG_TEST_PORT (default 55432). Output: postgres reachable at 127.0.0.1:PG_TEST_PORT.
 # Side effects: one published port on 127.0.0.1 only, and a second (non-internal) network for that port, because
 # `backend` is internal and Docker does not publish ports of containers that are only on an internal network.
