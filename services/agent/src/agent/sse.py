@@ -24,7 +24,9 @@ from contracts.errors import ErrorBody
 from contracts.events import KEEPALIVE, Envelope, FinalAnswer, FinalConfidence, Usage, format_sse, parse_event
 from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 
+from agent.middleware.router import route_reply
 from agent.models.usage import add_usage, normalize_usage, token_usage
+from agent.turn_control import TURN_CONTROL, TurnControl, bind_turn_control
 
 log = logging.getLogger("agent.sse")
 
@@ -248,18 +250,37 @@ def _tool_messages(result: Any) -> int:
     return 0
 
 
+def route_outcome(stream: TurnStream, control: TurnControl, usage: Usage, model_used: str | None) -> TurnOutcome:
+    """What: the outcome of a turn the router ended: its fixed line, say and end_reason; a verify route also
+    emits verification.required (doc 07 s6.3 step 3).
+    Use when: classify_final sees the router's line as the last message. Inputs: stream, control, usage,
+    model id. Output: TurnOutcome. Side effects: one verification.required event for verify. Role: helper."""
+    reply = route_reply(control)
+    if reply.end_reason == "verification_requested" and reply.verification_reason in (
+            "account_lookup", "action", "ticket_status"):
+        stream.emit("verification.required", reason=reply.verification_reason, prompt_text=reply.text,
+                    attempts_left=control.verify_attempts_left, fields=["account_id", "pin"])
+    final = FinalAnswer(text=reply.text, say=reply.say, citations=[], escalated=reply.escalated,
+                        ticket=reply.ticket)  # type: ignore[arg-type]  # dict validated into TicketRef
+    return TurnOutcome(final=final, usage=usage, end_reason=reply.end_reason, model_used=model_used)
+
+
 def classify_final(stream: TurnStream, messages: list[Any], model_ids: set[str],
-                   usage: Usage | None = None, model_used: str | None = None) -> TurnOutcome:
+                   usage: Usage | None = None, model_used: str | None = None,
+                   control: TurnControl | None = None) -> TurnOutcome:
     """What: decide the turn's final from the thread after the run, and flush a passed draft as tokens.
     Use when: end of stream_agent_turn. Inputs: stream, final messages, ids of messages written by node
-    `model`, accumulated usage, last model id. Output: TurnOutcome.
+    `model`, accumulated usage, last model id, the turn's control (router lines).
+    Output: TurnOutcome.
     Side effects: token events for a model draft only. Role: doc 07 s6.4 flush rule and s2.4 step 15
-    (the model-call limit line is never an answer)."""
+    (the model-call limit line is never an answer); a router line ends with its route's end_reason."""
     usage = usage or token_usage()
     last = messages[-1] if messages else None
     if not isinstance(last, AIMessage):
         return replace(TurnOutcome.fixed("", end_reason="error", status="failed", error=_internal_error()),
                        usage=usage)
+    if control is not None and control.route is not None and last.id == control.route_message_id:
+        return route_outcome(stream, control, usage, model_used)
     text = last.text if isinstance(last.text, str) else str(last.content)
     if text.startswith(LIMIT_PREFIX):
         return replace(TurnOutcome.fixed(LIMIT_LINE, end_reason="limit_reached"), usage=usage, model_used=model_used)
@@ -269,18 +290,37 @@ def classify_final(stream: TurnStream, messages: list[Any], model_ids: set[str],
         final = FinalAnswer(text=text, say=text, citations=[], escalated=False,
                             confidence=FinalConfidence(grounding="not_run"))
         return TurnOutcome(final=final, usage=usage, end_reason="answered", model_used=model_used)
-    # A hook-written line (router, Gate 2): deterministic, no tokens; route end reasons arrive with T4.
+    # Another hook-written line (Gate 2): deterministic, no tokens.
     return replace(TurnOutcome.fixed(text, end_reason="answered"), usage=usage, model_used=model_used)
 
 
 async def stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[str, Any], config: dict[str, Any], *,
-                            slow_after_s: float = limits.SLOW_STATUS_AFTER_S) -> TurnOutcome:
+                            slow_after_s: float = limits.SLOW_STATUS_AFTER_S,
+                            control: TurnControl | None = None) -> TurnOutcome:
     """What: run the agent loop and translate it into step, status and token events.
     Use when: ingress step 14 for a turn that goes to the model. Inputs: stream, compiled agent, input,
-    run config (thread_id = session_id), slow threshold.
+    run config (thread_id = session_id), slow threshold, the turn's TurnControl (default: the bound one, else a
+    new one for this stream; it is bound here, once, before astream, when not already bound).
     Output: TurnOutcome with usage (tokens, model_calls, tool_calls, models_used).
-    Side effects: model and tool calls through the agent; a limit line is replaced in the thread.
+    Side effects: model and tool calls through the agent; a limit line is replaced in the thread; binds
+    TURN_CONTROL for the run and resets it afterwards.
     Role: adapter between LangGraph streams (messages, tasks, values) and doc 07 s6.2 events."""
+    control = control or TURN_CONTROL.get() or TurnControl(session_id=stream.meta.session_id,
+                                                           turn_id=stream.meta.turn_id, mode=stream.meta.mode)
+    if control.events is None:
+        control.events = stream
+    token = bind_turn_control(control) if TURN_CONTROL.get() is not control else None
+    try:
+        return await _stream_agent_turn(stream, agent, agent_input, config, slow_after_s, control)
+    finally:
+        if token is not None:
+            TURN_CONTROL.reset(token)
+
+
+async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[str, Any], config: dict[str, Any],
+                             slow_after_s: float, control: TurnControl) -> TurnOutcome:
+    """What: the body of stream_agent_turn with the control already bound. Use when: stream_agent_turn.
+    Inputs: as stream_agent_turn. Output: TurnOutcome. Side effects: as stream_agent_turn. Role: helper."""
     usage = token_usage()
     model_ids: set[str] = set()
     model_used: str | None = None
@@ -340,7 +380,7 @@ async def stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[st
     finally:
         stop_timer()
     messages = list(values.get("messages") or [])
-    outcome = classify_final(stream, messages, model_ids, usage, model_used)
+    outcome = classify_final(stream, messages, model_ids, usage, model_used, control)
     if outcome.end_reason == "limit_reached" and messages:
         # doc 07 s2.4 step 15 / spike 17a: replace the framework line in the thread with ours.
         await agent.aupdate_state(config, {"messages": [RemoveMessage(id=messages[-1].id), AIMessage(LIMIT_LINE)]})

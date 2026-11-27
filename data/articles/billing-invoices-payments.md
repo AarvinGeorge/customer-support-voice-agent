@@ -2,7 +2,7 @@
 article_id: billing-invoices-payments
 title: "Billing, invoices and payments"
 source_url: https://app.notion.com/p/4257c83d58968150a5cdd622c7b365c2
-last_edited_time: 2026-11-27T05:25:09.594Z
+last_edited_time: 2026-11-27T07:03:04.394Z
 tiers: [all]
 ---
 
@@ -29,6 +29,10 @@ Each charge in our billing record shows:
 - whether it has been refunded
 
 You can ask support about a specific invoice or charge by its ID, for example INV-2026-0412. In a voice conversation you can say the last four digits, such as "the invoice ending 0412". We only look up IDs within your own account.
+
+## Asking about an invoice by its last four digits
+
+You can ask support about an invoice by its last four digits, for example "the invoice ending 0412". Support looks it up in your own account and tells you its date, amount and status. Only owners and billing admins can see billing amounts.
 
 ## Invoices
 

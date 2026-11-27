@@ -33,6 +33,7 @@ from psycopg.types.json import Jsonb
 from core.audit import AuditEvent, write_audit
 from core.clock import Clock
 from core.errors import CoreError
+from core.identity import load_claims
 from core.reads import charge_label, find_charges, money
 from core.rules.refund import ChargeFacts, Outcome, PriorRefund, RefundEvaluation, evaluate
 from core.tickets import REF_COLUMNS, insert_ticket, ticket_ref
@@ -108,13 +109,13 @@ def gate(*, state: str, expected: str, expires_at: datetime | None, now: datetim
     Use when: commit (expected prepared) and submit (expected awaiting_customer) hold the row lock.
     Inputs: stored state, the expected state, expiry, now, the prepare turn id, this request's turn id, the step-up
     flag and time. Output: the error code (PENDING_EXPIRED, PENDING_NOT_ACTIVE, CONFIRMATION_REQUIRED,
-    STEP_UP_REQUIRED) or None when the action may proceed. Side effects: none.
+    STEP_UP_REQUIRED) or None when the action may proceed; the turn compare ignores case. Side effects: none.
     Role: doc 07 s3.3; pure so the table is unit-tested. Step-up is designed only (A2): no refund code requires it."""
     if state == "expired" or is_expired(state, expires_at, now):
         return "PENDING_EXPIRED"
     if state != expected:
         return "PENDING_NOT_ACTIVE"
-    if turn_id == prepare_turn_id:
+    if turn_id.lower() == prepare_turn_id.lower():  # turn ids are uuid text: compare case-insensitively (review M1)
         return "CONFIRMATION_REQUIRED"
     if requires_step_up and step_up_at is None:
         return "STEP_UP_REQUIRED"
@@ -180,14 +181,18 @@ def _evaluate_live(conn: Any, *, policy: PolicyConfig, now: datetime, account_id
                    charge_id: str) -> Live:
     """What: run the refund rules on locked live rows (account FOR SHARE, charge FOR UPDATE, completed refunds).
     Use when: prepare after the charge is resolved, and the commit or submit re-check. Inputs: connection, policy, now,
-    account, user, charge. Output: Live. Side effects: row locks until the transaction ends.
+    account, user, charge. Output: Live. Side effects: row locks until the transaction ends; raises CoreError NOT_FOUND
+    when the account, the user (in that account) or the charge is gone.
     Role: the same function and the same reads at prepare and at commit, so they cannot disagree."""
-    tier, status = conn.execute("SELECT tier, contract_status FROM accounts WHERE id = %s FOR SHARE",
-                                (account_id,)).fetchone()
-    role = conn.execute("SELECT role FROM users WHERE id = %s", (user_id,)).fetchone()[0]
-    cid, invoice, charged_at, cents, cstatus = conn.execute(
+    account = conn.execute("SELECT tier, contract_status FROM accounts WHERE id = %s FOR SHARE", (account_id,)).fetchone()
+    user = conn.execute("SELECT role FROM users WHERE id = %s AND account_id = %s", (user_id, account_id)).fetchone()
+    charge = conn.execute(
         "SELECT id, invoice_number, charged_at, amount_cents, status FROM charges WHERE id = %s AND account_id = %s "
         "FOR UPDATE", (charge_id, account_id)).fetchone()
+    if account is None or user is None or charge is None:  # review M5: an honest 404, never a 500 on a missing row
+        raise CoreError("NOT_FOUND", "That charge or account is no longer on record.")
+    (tier, status), role = account, user[0]
+    cid, invoice, charged_at, cents, cstatus = charge
     prior = tuple(PriorRefund(charge_id=r[0].split(":", 1)[1], effective_date=r[1]) for r in conn.execute(
         "SELECT target_key, effective_date FROM action_history WHERE account_id = %s AND action_type = 'refund'",
         (account_id,)).fetchall())
@@ -313,7 +318,7 @@ def prepare_refund(conn: Any, *, policy: PolicyConfig, clock: Clock, claims: Cla
     codes = [str(c) for c in ev.reason_codes]
     common = {"decision": ev.policy_decision, "reason_codes": codes, "policy_refs": policy_refs(policy, codes),
               "policy_version": policy.policy_version, "changed": False}
-    audit_args = {"charge_id": charge_id, "reason": body.reason}
+    audit_args = {"charge_id": charge_id, "reason": body.reason, "superseded": old[0] if old else None}
     if ev.outcome is Outcome.DECLINED:
         ticket = None
         if ev.followup_ticket_queue:
@@ -396,6 +401,19 @@ def _locked_row(conn: Any, pending_id: str, session_id: str, *, lock: bool = Tru
     return row
 
 
+def _require_verified(conn: Any, row: dict[str, Any], *, policy: PolicyConfig, now: datetime) -> None:
+    """What: the session's verification must be current for the row's person: unexpired claims for the same user and
+    no session lock. Use when: commit and submit, after the replay check and before any other check.
+    Inputs: connection, the locked row, policy, now. Output: none. Side effects: two SELECTs; raises CoreError
+    SESSION_NOT_VERIFIED (401). The route rolls back (the row keeps its state) and audits the refusal.
+    Role: D-055 (review PR #37 I1): authority must hold at the irreversible step, not only at prepare."""
+    sid = str(row["session_id"])
+    claims = load_claims(conn, sid, now, policy)
+    locked = conn.execute("SELECT verify_locked FROM session_claims WHERE session_id = %s", (sid,)).fetchone()
+    if claims is None or claims.user_id != row["user_id"] or (locked is not None and locked[0]):
+        raise CoreError("SESSION_NOT_VERIFIED", "This chat needs to be verified again before I can do that.")
+
+
 def _set_state(conn: Any, pending_id: str, state: str, now: datetime) -> None:
     """What: move a row to a terminal state. Use when: expired, rules_changed or cancelled. Inputs: connection, id,
     state, now. Output: none. Side effects: one UPDATE. Role: doc 07 s7.1 transitions."""
@@ -448,10 +466,13 @@ def commit_pending(conn: Any, *, policy: PolicyConfig, clock: Clock, pending_id:
     session, this turn's id, trace id, mode. Output: CommitResult (replayed true on a repeat) or a CoreError to raise
     after the transaction commits. Side effects: FOR UPDATE lock, UPDATE charges and pending_actions, INSERT
     action_history and audit. Role: doc 07 s3.3 commit, s7.1 rows 3, 7, 8; a second concurrent commit waits on the
-    lock, then sees committed and replays, so there is one history row (ah_refund_once also forbids a second)."""
+    lock, then sees committed and replays, so there is one history row (ah_refund_once also forbids a second).
+    A repeat of a committed row replays even if verification has since lapsed (it changes nothing and tells the agent
+    the truth); any new commit needs current verification (D-055, raises SESSION_NOT_VERIFIED)."""
     row = _locked_row(conn, pending_id, session_id)
     if row["state"] == "committed" and row["pending_kind"] == "commit" and row["result"]:
         return CommitResult.model_validate({**row["result"], "replayed": True})
+    _require_verified(conn, row, policy=policy, now=clock.now())
     settled = _settle(conn, row, expected="prepared", turn_id=turn_id, policy=policy, clock=clock, trace_id=trace_id,
                       mode=mode, event="action_commit")
     if isinstance(settled, CoreError):
@@ -487,16 +508,18 @@ def submit_pending(conn: Any, *, policy: PolicyConfig, clock: Clock, pending_id:
     Output: SubmitResult (replayed true on a repeat) or a CoreError to raise after the transaction commits.
     Side effects: FOR UPDATE lock, one ticket (core.tickets.insert_ticket), UPDATE pending_actions, audit.
     Role: doc 07 s3.3 submit, s7.1 row 4, s3.4 owners row 3, R-3 (no ticket before the yes). tickets.pending_action_id
-    is UNIQUE, so one action can never own two approval tickets."""
+    is UNIQUE, so one action can never own two approval tickets. Needs current verification (D-055). The ticket and
+    the audit row carry the reason codes of the fresh re-check (review M4), not the stored ones."""
     row = _locked_row(conn, pending_id, session_id)
     if row["state"] == "awaiting_approval" and row["pending_kind"] == "submit_for_approval" and row["result"]:
         return SubmitResult.model_validate({**row["result"], "replayed": True})
+    _require_verified(conn, row, policy=policy, now=clock.now())
     settled = _settle(conn, row, expected="awaiting_customer", turn_id=turn_id, policy=policy, clock=clock,
                       trace_id=trace_id, mode=mode, event="action_submit")
     if isinstance(settled, CoreError):
         return settled
     charge, params = settled.charge, row["params"]
-    codes = list(row["reason_codes"])
+    codes = [str(c) for c in settled.evaluation.reason_codes]
     summary_text = (f"Refund approval: {money(charge.amount_cents)} for {charge.label} (reason: {params.get('reason')}). "
                     f"Rule: {', '.join(codes)}.")
     ticket = insert_ticket(conn, policy=policy, clock=clock, session_id=session_id, account_id=row["account_id"],

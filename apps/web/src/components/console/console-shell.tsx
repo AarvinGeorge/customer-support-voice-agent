@@ -1,28 +1,34 @@
 "use client";
 /**
  * What: the console shell: top bar (brand, verified identity chip, New conversation, Inspector
- *   placeholder, theme toggle), the conversation log and the input bar, bound to a turn store.
+ *   toggle, theme toggle), the conversation log, the input bar and the observability drawer,
+ *   bound to a turn store.
  * Use when: the /console route and the dev-only fixture replay route.
  * Inputs: { sessionId, store?, onNewConversation? }.
  * Output: the full-height console frame.
  * Side effects: sending a message or pressing a card calls store.sendTurn (one network request);
  *   an in-flight turn is aborted on unmount (its turn ends in the failed state, review PR #16 I1).
- * Role: CS-E-04.S5.T1 shell, laid out from the Figma page "Console, chat (S1)".
+ *   Closing the drawer returns focus to the Inspector button.
+ * Role: CS-E-04.S5.T1 shell, laid out from the Figma page "Console, chat (S1)"; the drawer is
+ *   CS-E-06.S3.T1 (Figma "Observability drawer").
  */
 import { MotionConfig } from "motion/react";
 import { PanelRight, Plus, Shield, ShieldCheck } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { useStore, type StoreApi } from "zustand";
 import type { ConfirmInput, TurnRequest, VerificationInput, VerifiedPerson } from "@contracts/contracts";
 
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
+import { publicConfig } from "@/lib/config/public";
 import type { TurnView } from "@/lib/turns/reducer";
 import { turnStore, type ThreadItem, type TurnStoreState } from "@/lib/turns/store";
+import { inputPlaceholder } from "@/lib/turns/furniture";
 import { trailSummary } from "@/lib/turns/trail";
 
 import { ConversationLog, type CardActions } from "./conversation-log";
 import { InputBar } from "./input-bar";
+import { InspectorDrawer } from "./inspector-drawer";
 
 /**
  * What: words for a verified person's role.
@@ -109,11 +115,15 @@ export function announcement(thread: readonly ThreadItem[], turns: Readonly<Reco
  * Output: none (type).
  * Side effects: none.
  * Role: `store` defaults to the app singleton; tests and the replay route pass their own.
+ *   `langsmithProjectUrl` defaults to the public config value; `demoControls` fills the drawer's
+ *   Demo controls slot (CS-E-07.S1.T4).
  */
 export interface ConsoleShellProps {
   sessionId: string | null;
   store?: StoreApi<TurnStoreState>;
   onNewConversation?: () => void;
+  langsmithProjectUrl?: string;
+  demoControls?: ReactNode;
 }
 
 /**
@@ -124,7 +134,13 @@ export interface ConsoleShellProps {
  * Side effects: see module.
  * Role: see module.
  */
-export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }: ConsoleShellProps) {
+export function ConsoleShell({
+  sessionId,
+  store = turnStore,
+  onNewConversation,
+  langsmithProjectUrl = publicConfig.langsmithProjectUrl,
+  demoControls,
+}: ConsoleShellProps) {
   const thread = useStore(store, (s) => s.thread);
   const conversation = useStore(store, (s) => s.conversation);
   const person = useStore(store, (s) => s.conversation.verified);
@@ -133,10 +149,48 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
   const messageRef = useRef<HTMLTextAreaElement | null>(null);
   const pinRef = useRef<HTMLInputElement | null>(null);
   const [account, setAccount] = useState("");
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [pickedTurnId, setPickedTurnId] = useState<string | null>(null);
+  const inspectorRef = useRef<HTMLButtonElement | null>(null);
+  const returnFocus = useRef(false);
+  const drawerId = useId();
 
   useEffect(() => () => inflight.current?.abort(), []);
   useEffect(() => () => inflight.current?.abort(), [sessionId]);
   useEffect(() => setAccount(""), [sessionId]);
+  useEffect(() => setPickedTurnId(null), [sessionId]);
+
+  /**
+   * What: closes the drawer and returns focus to the Inspector button.
+   * Use when: the close button or Escape inside the drawer.
+   * Inputs: none.
+   * Output: none.
+   * Side effects: state change; an effect then focuses the Inspector button (after the drawer
+   *   unmounts, so focus never falls to the page body).
+   * Role: handler (focus management).
+   */
+  const closeInspector = useCallback(() => {
+    returnFocus.current = true;
+    setInspectorOpen(false);
+  }, []);
+  useEffect(() => {
+    if (inspectorOpen || !returnFocus.current) return;
+    returnFocus.current = false;
+    inspectorRef.current?.focus();
+  }, [inspectorOpen]);
+
+  /**
+   * What: opens the drawer on one turn.
+   * Use when: a reply's Inspect button.
+   * Inputs: the turn id.
+   * Output: none.
+   * Side effects: state change (the drawer focuses its heading when it mounts).
+   * Role: handler (per-turn selection).
+   */
+  const inspect = useCallback((turnId: string) => {
+    setPickedTurnId(turnId);
+    setInspectorOpen(true);
+  }, []);
 
   /**
    * What: moves keyboard focus after a card press settles, so it never falls to the page body
@@ -245,23 +299,57 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
             <Plus aria-hidden className="size-3.5" />
             <span className="max-sm:hidden">New conversation</span>
           </Button>
-          <Button variant="quiet" disabled title="The Inspector arrives with the observability drawer" className="max-sm:hidden">
+          <Button
+            ref={inspectorRef}
+            variant="quiet"
+            aria-expanded={inspectorOpen}
+            aria-controls={inspectorOpen ? drawerId : undefined}
+            onClick={() => (inspectorOpen ? closeInspector() : setInspectorOpen(true))}
+            className="max-sm:hidden"
+          >
             <PanelRight aria-hidden className="size-3.5" />
-            Inspector
+            {inspectorOpen ? "Hide inspector" : "Inspector"}
           </Button>
           <ThemeToggle className="size-[34px] rounded-full border-rule bg-raised text-ink" />
         </header>
-        <main className="mx-auto flex w-full max-w-[45rem] flex-1 flex-col px-4 pt-10 pb-6 sm:px-0">
+        <div className="flex flex-1">
+        <main className="mx-auto flex w-full min-w-0 max-w-[45rem] flex-1 flex-col px-4 pt-10 pb-6 sm:px-0">
           <div className="flex flex-1 flex-col">
-            <ConversationLog thread={thread} conversation={conversation} cards={cards} onRetry={retry} />
+            <ConversationLog
+              thread={thread}
+              conversation={conversation}
+              cards={cards}
+              onRetry={retry}
+              onResend={send}
+              inspect={{ onInspect: inspect, selected: inspectorOpen ? (pickedTurnId ?? conversation.turnOrder.at(-1) ?? null) : null }}
+            />
             <div role="status" aria-live="polite" className="sr-only">
               {announcement(thread, conversation.turns)}
             </div>
           </div>
           <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
-            <InputBar onSend={send} busy={busy} disabled={sessionId === null} inputRef={messageRef} />
+            <InputBar
+              onSend={send}
+              busy={busy}
+              disabled={sessionId === null}
+              placeholder={inputPlaceholder(conversation, sessionId === null)}
+              inputRef={messageRef}
+            />
           </div>
         </main>
+        {inspectorOpen && (
+          <InspectorDrawer
+            id={drawerId}
+            conversation={conversation}
+            pickedTurnId={pickedTurnId}
+            onPick={setPickedTurnId}
+            onClose={closeInspector}
+            langsmithProjectUrl={langsmithProjectUrl}
+            langsmithProject={publicConfig.langsmithProject}
+            demoControls={demoControls}
+          />
+        )}
+        </div>
       </div>
     </MotionConfig>
   );

@@ -353,8 +353,9 @@ def test_only_the_commit_token_may_commit_submit_or_cancel(world):
 
 
 def test_two_concurrent_commits_give_one_history_row_engine_level(world):
-    """What: commit A holds the row lock in an open transaction; commit B on a second connection blocks on
-    FOR UPDATE; after A commits, B returns the stored result with replayed true. One action_history row.
+    """What: commit A holds the row lock in an open transaction; commit B on a second connection blocks on the pending
+    row's FOR UPDATE (checked in pg_stat_activity, not only by B being alive: B would also block later on the charge
+    lock); after A commits, B returns the stored result with replayed true. One action_history row.
     Use when: always. Inputs: world. Output: assertions. Side effects: rows. Role: T5 Done-when part 1 (real lock)."""
     pid = world.prepare(world.s_owner, {"id": world.c1}).json()["pending_action_id"]
     policy = load_policy(POLICY_PATH)
@@ -376,6 +377,9 @@ def test_two_concurrent_commits_give_one_history_row_engine_level(world):
         t.start()
         time.sleep(0.5)
         assert t.is_alive(), "commit B did not wait for the row lock"
+        waiting = q(world, "SELECT query FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                           "AND query LIKE %s", "%FROM pending_actions WHERE id = %")
+        assert len(waiting) == 1 and "FOR UPDATE" in waiting[0][0], f"commit B is not waiting on the pending row: {waiting}"
         a.commit()
     t.join(timeout=10)
     res = out["b"]
@@ -386,8 +390,8 @@ def test_two_concurrent_commits_give_one_history_row_engine_level(world):
 def test_repeated_commits_over_http_replay(world):
     """What: eight commits of one pending action fired from eight threads over HTTP: all answer 200, exactly one is not
     a replay, one action_history row. Use when: always. Inputs: world. Output: assertions. Side effects: rows.
-    Role: the replay path through the real route and pool. Not a lock proof: with the row lock removed this test still
-    passed (the TestClient does not overlap the requests), so the engine-level test above is the concurrency proof."""
+    Role: the replay path through the real route and pool. It overlaps only by timing, so it is not the lock proof:
+    the engine-level test above is (see the fix round 1 mutation runs in the lane A report)."""
     pid = world.prepare(world.s_owner, {"id": world.c1}).json()["pending_action_id"]
     barrier = threading.Barrier(8)
 
@@ -546,3 +550,66 @@ def test_flag_off_ignores_the_header_on_commit(world):
     r = world.act("commit", pid, world.s_owner, turn="turn-2", fault="tool_error")
     assert r.status_code == 200 and r.json()["status"] == "committed"
     assert _fault_audit(world, world.s_owner) == 0
+
+
+# ---------------------------------------------------------------- fix round 1 (review PR #37, D-055)
+
+def audit_rows(w, pid: str | None, event: str, session=None):
+    """What: the args of audit rows of one event for a pending id (or a session). Use when: refusal checks.
+    Inputs: world, pending id or None, event name, optional session. Output: list of args dicts. Side effects: none.
+    Role: assertions on the audit trail."""
+    if pid is not None:
+        return [r[0] for r in q(w, "SELECT args_redacted FROM audit_events WHERE pending_action_id = %s AND event = %s "
+                                   "ORDER BY ts", pid, event)]
+    return [r[0] for r in q(w, "SELECT args_redacted FROM audit_events WHERE session_id = %s AND event = %s ORDER BY ts",
+                            session, event)]
+
+
+def _set_claims(w, session, sql: LiteralString) -> None:
+    """What: change the session's claims row. Use when: lapsing or locking a session. Inputs: world, session, an
+    UPDATE with one %s for the session id. Output: none. Side effects: one committed UPDATE. Role: test control."""
+    with psycopg.connect(w.app_url, autocommit=True) as c:
+        c.execute(sql, (session,))
+
+
+def test_commit_after_verification_lapsed_is_401_and_the_row_stays_prepared(world):
+    """What: verification lapses between prepare and commit: commit is 401 SESSION_NOT_VERIFIED, the row stays
+    prepared, nothing is refunded, and a refusal audit row names the code; after re-verification the same row
+    commits. Use when: always. Inputs: world. Output: assertions. Side effects: rows. Role: D-055, review I1."""
+    pid = world.prepare(world.s_owner, {"id": world.c1}).json()["pending_action_id"]
+    _set_claims(world, world.s_owner, "UPDATE session_claims SET expires_at = '2026-11-27 09:00-05' WHERE session_id = %s")
+    r = world.act("commit", pid, world.s_owner)
+    assert r.status_code == 401 and err(r) == "SESSION_NOT_VERIFIED", r.text
+    assert r.json()["error"]["changed"] is False
+    assert q(world, "SELECT state FROM pending_actions WHERE id = %s", pid)[0][0] == "prepared"
+    assert q(world, "SELECT status FROM charges WHERE id = %s", world.c1)[0][0] == "paid"
+    assert [a["code"] for a in audit_rows(world, pid, "action_commit_refused")] == ["SESSION_NOT_VERIFIED"]
+    _set_claims(world, world.s_owner, "UPDATE session_claims SET expires_at = '2026-11-27 11:30-05' WHERE session_id = %s")
+    assert world.act("commit", pid, world.s_owner, turn="turn-3").status_code == 200
+
+
+def test_submit_on_a_locked_session_is_401_and_opens_no_ticket(world):
+    """What: a session locked after prepare cannot submit: 401 SESSION_NOT_VERIFIED, row awaiting_customer, no
+    ticket, refusal audited. Use when: always. Inputs: world. Output: assertions. Side effects: rows. Role: D-055."""
+    pid = world.prepare(world.s_biz, {"id": world.cbiz}).json()["pending_action_id"]
+    _set_claims(world, world.s_biz, "UPDATE session_claims SET verify_locked = true WHERE session_id = %s")
+    r = world.act("submit", pid, world.s_biz)
+    assert r.status_code == 401 and err(r) == "SESSION_NOT_VERIFIED", r.text
+    assert q(world, "SELECT state FROM pending_actions WHERE id = %s", pid)[0][0] == "awaiting_customer"
+    assert q(world, "SELECT count(*) FROM tickets WHERE account_id = %s", world.biz)[0][0] == 0
+    assert [a["code"] for a in audit_rows(world, pid, "action_submit_refused")] == ["SESSION_NOT_VERIFIED"]
+
+
+def test_refused_commits_and_prepares_are_audited(world):
+    """What: a same-turn commit (409), a commit with the prepare turn in upper case (409) and an ambiguous prepare
+    (409) each leave one refusal audit row with the code; the row stays prepared. Use when: always. Inputs: world.
+    Output: assertions. Side effects: rows. Role: review M1 and M2 (L1 s5: an audit row for every prepare and commit)."""
+    turn = "0197b5a4-7c3e-7f00-8000-00000000000a"
+    pid = world.prepare(world.s_owner, {"id": world.c1}, turn=turn).json()["pending_action_id"]
+    assert err(world.act("commit", pid, world.s_owner, turn=turn)) == "CONFIRMATION_REQUIRED"
+    assert err(world.act("commit", pid, world.s_owner, turn=turn.upper())) == "CONFIRMATION_REQUIRED"
+    assert [a["code"] for a in audit_rows(world, pid, "action_commit_refused")] == ["CONFIRMATION_REQUIRED"] * 2
+    assert q(world, "SELECT state FROM pending_actions WHERE id = %s", pid)[0][0] == "prepared"
+    r = world.prepare(world.s_owner2, {"ending": "7771"})
+    assert err(r) == "AMBIGUOUS_REFERENCE"
+    assert [a["code"] for a in audit_rows(world, None, "action_prepare_refused", world.s_owner2)] == ["AMBIGUOUS_REFERENCE"]
