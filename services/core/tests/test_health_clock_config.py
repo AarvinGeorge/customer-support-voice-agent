@@ -75,3 +75,51 @@ def test_settings_from_env_requires_everything(monkeypatch):
     monkeypatch.setenv("DEMO_FAULTS_ENABLED", "false")
     s = Settings.from_env()
     assert (s.token_agent, s.demo_faults, s.db_url) == ("a", False, "postgresql://x")
+
+
+def test_startup_logs_contract_and_policy_version(settings, clock, caplog):
+    """What: the lifespan logs the contract version, the policy version and the fault flag at startup.
+    Use when: always. Inputs: settings, clock, caplog. Output: assertions. Side effects: loads policy.yaml.
+    Role: doc 07 s1.1 (core logs the contract version at startup)."""
+    import logging
+
+    from fastapi.testclient import TestClient
+
+    from core.app import create_app
+
+    with caplog.at_level(logging.INFO, logger="core"), TestClient(create_app(settings, clock=clock)):
+        pass
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert f"contract_version={VERSION}" in text and f"policy_version={policy_version(POLICY)}" in text
+
+
+def test_readyz_reports_seed_date_and_503_when_the_database_fails(client):
+    """What: /readyz returns the seed date a database handle reports, and a 503 db_unavailable envelope when the
+    handle raises. Use when: always. Inputs: client. Output: assertions. Side effects: swaps app.state.db.
+    Role: doc 07 s3.6; a not-ready core must not report healthy."""
+    class Fake:
+        """What: stand-in database. Use when: this test. Inputs: none. Output: seed_date or raises.
+        Side effects: none. Role: fake."""
+
+        ok = True
+
+        def seed_date(self) -> str:
+            """What: return a date or fail. Use when: readyz calls it. Inputs: none. Output: str.
+            Side effects: raises when ok is False. Role: fake."""
+            if not self.ok:
+                raise RuntimeError("down")
+            return "2026-11-27"
+
+        def close(self) -> None:
+            """What: lifespan shutdown hook. Use when: the client fixture exits. Inputs: none. Output: none.
+            Side effects: none. Role: fake."""
+
+    fake = Fake()
+    client.app.state.db = fake
+    assert client.get("/readyz").json()["seed_date"] == "2026-11-27"
+    fake.ok = False
+    r = client.get("/readyz")
+    assert r.status_code == 503
+    err = r.json()["error"]
+    assert (err["code"], err["class"], err["retryable"]) == ("TOOL_ERROR", "db_unavailable", True)
+    assert r.headers["Retry-After"] == "5"

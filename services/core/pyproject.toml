@@ -28,6 +28,9 @@ packages = ["src/core"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-# pg tests need the cs-a Postgres (see tests/README in the lane A report); run them with `-m pg`.
+# pg tests need the Compose Postgres. From the repo root:
+#   docker compose -f compose.yaml -f compose.pgtest.yaml up -d --wait postgres   (COMPOSE_PROJECT_NAME=cs-a)
+#   cd services/core && uv run --env-file ../../.env pytest -m pg
+# They fail (never skip) when the stack or the env is missing. A CI compose job runs the same two commands.
 addopts = "-q -m 'not pg'"
 markers = ["pg: needs the Compose Postgres (core_owner and core_app roles); deselected by default"]
