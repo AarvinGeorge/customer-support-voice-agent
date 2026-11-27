@@ -1,39 +1,54 @@
 """What: provider-neutral token usage and price math.
 Use when: turning a model response's usage into one shape and a USD estimate.
 Inputs: LangChain usage_metadata or raw provider usage dicts.
-Output: Usage and cost_usd_est floats.
+Output: contracts Usage values (token_usage, add_usage, normalize_usage) and cost_usd_est floats.
 Side effects: none.
 Role: single normalizer for both providers' cached-token fields.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Mapping
+
+from contracts.events import Usage
 
 from agent.models.config import Price
 
 
-@dataclass(frozen=True)
-class Usage:
-    """What: normalized usage. input_tokens is the TOTAL prompt size including cache read and write.
-    Use when: accumulating per-turn usage and costing it.
-    Inputs: four ints.
-    Output: immutable value; supports +.
+def token_usage(input_tokens: int = 0, output_tokens: int = 0, cache_read_tokens: int = 0,
+                cache_write_tokens: int = 0) -> Usage:
+    """What: a contracts Usage holding only token counts (cost, latency and counts zero, no models).
+    Use when: one model call's usage before the turn adds timings, counts and cost.
+    Inputs: four ints; input_tokens is the TOTAL prompt size including cache read and write.
+    Output: contracts.events.Usage.
     Side effects: none.
-    Role: shape of one model call's usage.
-    TODO: swap for contracts.Usage once packages/contracts (PR #4) is on main; that model also
-    carries latency fields, so this stays the per-call part.
+    Role: per-call shape of the one Usage model (doc 07 s6.2).
     """
+    return Usage(input_tokens=input_tokens, output_tokens=output_tokens,
+                 cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+                 cost_usd_est=0.0, latency_ms=0, model_calls=0, tool_calls=0, models_used=[],
+                 fallback_used=False)
 
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
 
-    def __add__(self, other: "Usage") -> "Usage":
-        return Usage(self.input_tokens + other.input_tokens, self.output_tokens + other.output_tokens,
-                     self.cache_read_tokens + other.cache_read_tokens,
-                     self.cache_write_tokens + other.cache_write_tokens)
+def add_usage(a: Usage, b: Usage) -> Usage:
+    """What: sum two Usage values.
+    Use when: accumulating per-call usage into the turn total.
+    Inputs: two contracts Usage values.
+    Output: new Usage: tokens, cost, latency and counts summed; models_used merged in first-seen
+    order; fallback_used OR-ed; first_status_ms and ttft_ms keep the first non-None value.
+    Side effects: none.
+    Role: turn accumulator.
+    """
+    models = list(dict.fromkeys([*a.models_used, *b.models_used]))
+    return Usage(input_tokens=a.input_tokens + b.input_tokens,
+                 output_tokens=a.output_tokens + b.output_tokens,
+                 cache_read_tokens=a.cache_read_tokens + b.cache_read_tokens,
+                 cache_write_tokens=a.cache_write_tokens + b.cache_write_tokens,
+                 cost_usd_est=a.cost_usd_est + b.cost_usd_est,
+                 first_status_ms=a.first_status_ms if a.first_status_ms is not None else b.first_status_ms,
+                 ttft_ms=a.ttft_ms if a.ttft_ms is not None else b.ttft_ms,
+                 latency_ms=a.latency_ms + b.latency_ms, model_calls=a.model_calls + b.model_calls,
+                 tool_calls=a.tool_calls + b.tool_calls, models_used=models,
+                 fallback_used=a.fallback_used or b.fallback_used)
 
 
 def _i(v: Any) -> int:
@@ -44,25 +59,28 @@ def normalize_usage(raw: Mapping[str, Any] | None, provider: str | None = None) 
     """What: map any supported usage dict to Usage.
     Use when: reading AIMessage.usage_metadata (default) or a raw provider usage object (pass provider).
     Inputs: dict or None; provider "anthropic" or "openai" only for raw shapes.
-    Output: Usage; unknown or empty input gives all zeros.
+    Output: contracts Usage (token fields only); unknown or empty input gives all zeros.
     Side effects: none.
     Role: adapter for Anthropic (cache_read_input_tokens, cache_creation_input_tokens; raw input excludes
-    cache) and OpenAI (prompt_tokens_details.cached_tokens; prompt_tokens includes cache).
+    cache; LangChain shape may carry writes as ephemeral_5m/1h_input_tokens with cache_creation 0) and OpenAI (prompt_tokens_details.cached_tokens; prompt_tokens includes cache).
     """
     if not raw:
-        return Usage()
+        return token_usage()
     if "input_token_details" in raw or (provider is None and "input_tokens" in raw):
         d = raw.get("input_token_details") or {}
-        return Usage(_i(raw.get("input_tokens")), _i(raw.get("output_tokens")),
-                     _i(d.get("cache_read")), _i(d.get("cache_creation")))
+        # langchain-anthropic zeroes cache_creation and reports the TTL split instead when present.
+        write = _i(d.get("cache_creation")) + _i(d.get("ephemeral_5m_input_tokens")) \
+            + _i(d.get("ephemeral_1h_input_tokens"))
+        return token_usage(_i(raw.get("input_tokens")), _i(raw.get("output_tokens")),
+                           _i(d.get("cache_read")), write)
     if provider == "anthropic":
         read, write = _i(raw.get("cache_read_input_tokens")), _i(raw.get("cache_creation_input_tokens"))
-        return Usage(_i(raw.get("input_tokens")) + read + write, _i(raw.get("output_tokens")), read, write)
+        return token_usage(_i(raw.get("input_tokens")) + read + write, _i(raw.get("output_tokens")), read, write)
     if provider == "openai" or "prompt_tokens" in raw:
         d = raw.get("prompt_tokens_details") or {}
-        return Usage(_i(raw.get("prompt_tokens")), _i(raw.get("completion_tokens")),
-                     _i(d.get("cached_tokens")), 0)
-    return Usage()
+        return token_usage(_i(raw.get("prompt_tokens")), _i(raw.get("completion_tokens")),
+                           _i(d.get("cached_tokens")), 0)
+    return token_usage()
 
 
 def cost_usd_est(usage: Usage, price: Price) -> float:

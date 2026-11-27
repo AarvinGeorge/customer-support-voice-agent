@@ -6,7 +6,7 @@ import pytest
 from agent.models import registry as reg
 from agent.models.config import load_models_config
 from agent.models.registry import ModelRegistry
-from agent.models.usage import Usage
+from agent.models.usage import token_usage
 
 REPO_YAML = Path(__file__).resolve().parents[3] / "data" / "models.yaml"
 
@@ -66,7 +66,7 @@ def test_unknown_role_and_non_chat_role_fail(registry):
 
 def test_cost_for_role_uses_role_price(registry):
     price = registry.config.roles["agent"].price
-    u = Usage(input_tokens=1_000_000, output_tokens=1_000_000, cache_read_tokens=0, cache_write_tokens=0)
+    u = token_usage(input_tokens=1_000_000, output_tokens=1_000_000, cache_read_tokens=0, cache_write_tokens=0)
     assert registry.cost("agent", u) == pytest.approx(price.input_per_mtok + price.output_per_mtok)
 
 
@@ -74,4 +74,4 @@ def test_usage_from_message_reads_usage_metadata(registry):
     from langchain_core.messages import AIMessage
     m = AIMessage(content="x", usage_metadata={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12,
                                                "input_token_details": {"cache_read": 4}})
-    assert registry.usage_of(m) == Usage(10, 2, 4, 0)
+    assert registry.usage_of(m) == token_usage(10, 2, 4, 0)

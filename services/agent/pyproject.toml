@@ -11,6 +11,11 @@ dependencies = [
     "langchain-core==1.8.5",
     "langchain-anthropic==1.7.13",
     "langchain-openai==1.8.5",
+    "langgraph==1.2.24",
+    "langgraph-checkpoint==4.3.2",
+    "langgraph-checkpoint-postgres==3.2.1",
+    "psycopg[binary,pool]>=3.2",
+    "quillstack-contracts",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "psycopg[binary]>=3.2",
@@ -19,7 +24,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest==9.2.0", "pytest-asyncio==1.5.0"]
+dev = ["pytest==9.2.0", "pytest-asyncio==1.5.0", "python-dotenv>=1.2.4"]
+
+[tool.uv.sources]
+# Non-editable: macOS hides .pth files in .venv and Python 3.13 skips them (BRIEF known trap).
+quillstack-contracts = { path = "../../packages/contracts", editable = false }
 
 [build-system]
 requires = ["hatchling"]
@@ -33,4 +42,5 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "-q"
+addopts = "-q -m 'not real'"
+markers = ["real: makes real provider calls (deselect with -m 'not real')"]
