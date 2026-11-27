@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { EVENT_TYPES, type SseEvent, type TurnCompletedEvent } from "@contracts/contracts";
 import { FIXTURES, loadFixture } from "@/test-support/fixtures";
-import { initialConversationState, reduceEvent, replayEvents, type ConversationState } from "./reducer";
+import { failTurn, initialConversationState, reduceEvent, replayEvents, type ConversationState } from "./reducer";
 
 const s1 = loadFixture("s1_chat.jsonl");
 const edge = loadFixture("edge_turns.jsonl");
@@ -246,5 +246,36 @@ describe("ordering, idempotence and the single turn.completed", () => {
     expect(locked.verifyLocked).toBe(true);
     expect(locked.awaitingVerification).toBeNull();
     expect(locked.verified).toBeNull();
+  });
+});
+
+describe("failTurn: a turn that never completed reaches a terminal state (review PR #16, I1)", () => {
+  const c1 = tid(s1, "c1");
+  const partial = replayEvents(s1.filter((e) => e.turn_id === c1).slice(0, 4));
+
+  it("moves a streaming turn to failed with a retryable failure and clears the live status", () => {
+    const next = failTurn(partial, c1, "turn_timeout");
+    expect(turn(next, c1).phase).toBe("failed");
+    expect(turn(next, c1).failure).toEqual({ reason: "turn_timeout", retryable: true, message: "This reply took too long." });
+    expect(turn(next, c1).status).toBeNull();
+  });
+
+  it("ignores later events for a failed turn", () => {
+    const failed = failTurn(partial, c1, "dropped");
+    const later = s1.filter((e) => e.turn_id === c1).slice(4);
+    expect(replayEvents(later, failed)).toBe(failed);
+  });
+
+  it("leaves a completed turn and an unknown turn unchanged", () => {
+    expect(failTurn(S1, c1, "dropped")).toBe(S1);
+    expect(failTurn(partial, "no-such-turn", "dropped")).toBe(partial);
+  });
+
+  it("names every failure reason in plain words", () => {
+    const words = (["network", "dropped", "no_bytes_timeout", "turn_timeout", "aborted", "contract"] as const).map(
+      (r) => turn(failTurn(partial, c1, r), c1).failure?.message,
+    );
+    expect(new Set(words).size).toBe(6);
+    expect(words.every((w) => typeof w === "string" && w.length > 0)).toBe(true);
   });
 });

@@ -115,6 +115,32 @@ services:
       DEMO_FAULTS_ENABLED: ${DEMO_FAULTS_ENABLED:-true}
       FEATURE_A4: ${FEATURE_A4:-false}
       DEMO_RESEED: ${DEMO_RESEED:-false}
+      POLICY_PATH: /app/data/policy.yaml
+    volumes:
+      - ./data/policy.yaml:/app/data/policy.yaml:ro   # the one config file core reads (doc 07 s13.1)
+
+  # One-shot seeding job (profile "seed", not part of `up`): `docker compose run --rm seed_core` seeds an empty
+  # schema, `... seed_core python -m core.seeds --reseed` wipes and reseeds (needs DEMO_RESEED=true). Runs as
+  # core_owner because the runtime role may not TRUNCATE or delete append-only history (doc 07 s3.6, s12).
+  seed_core:
+    <<: *python
+    profiles: [seed]
+    build:
+      context: .
+      dockerfile: infra/python.Dockerfile
+      args: {SERVICE: core}
+    restart: "no"
+    command: ["python", "-m", "core.seeds"]
+    networks: [backend]
+    depends_on:
+      migrate_core: {condition: service_completed_successfully}
+    volumes:
+      - ./data/seeds:/app/data/seeds:ro
+    environment:
+      CORE_DB_OWNER_URL: ${CORE_DB_OWNER_URL}
+      PIN_PEPPER: ${PIN_PEPPER}
+      DEMO_RESEED: ${DEMO_RESEED:-false}
+      SEEDS_DIR: /app/data/seeds
 
   knowledge:
     <<: *python
@@ -127,11 +153,31 @@ services:
       migrate_knowledge: {condition: service_completed_successfully}
     healthcheck:
       <<: *py-health
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3).status == 200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status == 200 else 1)"]
+    volumes: ["./data:/data:ro"]   # models.yaml (embedding model id) when present
     environment:
       KNOWLEDGE_TOKEN_AGENT: ${KNOWLEDGE_TOKEN_AGENT}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       KNOWLEDGE_DB_URL: ${KNOWLEDGE_DB_URL}
+
+  # One-shot ingest job (profile "jobs": never part of a plain `up`). Reads the article snapshot and policy from ./data.
+  # Run: docker compose run --rm ingest_knowledge   (after the migrate jobs; safe to re-run, unchanged articles cost nothing)
+  ingest_knowledge:
+    <<: *python
+    profiles: [jobs]
+    build:
+      context: .
+      dockerfile: infra/python.Dockerfile
+      args: {SERVICE: knowledge}
+    restart: "no"
+    command: ["python", "-m", "knowledge.ingest.job", "--articles", "/data/articles", "--policy", "/data/policy.yaml"]
+    networks: [backend, egress]
+    depends_on:
+      migrate_knowledge: {condition: service_completed_successfully}
+    volumes: ["./data:/data:ro"]
+    environment:
+      KNOWLEDGE_DB_URL: ${KNOWLEDGE_DB_URL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
 
   # One migrate job per service, run as that service's owner role. Order core, knowledge, agent (chained for readable logs).
   migrate_core:
