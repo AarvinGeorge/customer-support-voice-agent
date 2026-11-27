@@ -156,8 +156,8 @@ def live_checks(case: dict[str, Any], turns: list[TurnResult], required: frozens
     """What: the live checks per turn and per case. Per turn: stop (turn.completed, no error event, end_reason not in
     BAD_ENDS and equal to the turn's expect), truncation (no model step cut at max_tokens, no gate reply truncated),
     gate1 (a turn that searched shows a retrieval gate event), gate2 (a turn with a model draft, final.confidence set,
-    shows a grounding gate event, and no grounding gate errored), clarify (no clarify decision, end_reason or line
-    unless the turn expects clarify). Per case: the required gates (retrieval; grounding_pass: a grounding gate passed).
+    shows a grounding gate event, and no grounding gate errored), clarify (no Gate 2 clarify decision, end_reason clarify or
+    clarify line unless the turn expects clarify). Per case: the required gates (retrieval; grounding_pass: a grounding gate passed).
     Use when: after a case ran. Inputs: case, its turns, required gates. Output: Checks named live.<kind>[.N].
     Side effects: none. Role: what the browser pass used to catch after merge."""
     out: list[Check] = []
@@ -194,7 +194,9 @@ def live_checks(case: dict[str, Any], turns: list[TurnResult], required: frozens
                    ([f"verifier gave no verdict: {g2_err}"] if g2_err else [])
             out.append(Check(f"live.gate2.{i}", "fail" if bad2 else "pass", "; ".join(bad2) or
                              f"grounding {[e['verdict'] for e in g2]}"))
-        clar = [f"{e['gate']} decision clarify" for e in t.events if e.get("type") == "gate" and e.get("decision") == "clarify"]
+        # The clarify line is Gate 2's (or a turn ending clarify). A Gate 1 weak verdict's decision "clarify" is an
+        # instruction to the model, not the line, so it is not counted here (it shows in the gate1 events).
+        clar = ["grounding decision clarify" for e in _gates(t, "grounding") if e.get("decision") == "clarify"]
         clar += ["end_reason clarify"] if end == "clarify" else []
         clar += ["clarify line in the reply"] if CLARIFY_LINE in str((t.final or {}).get("text") or "") else []
         if exp != "clarify":

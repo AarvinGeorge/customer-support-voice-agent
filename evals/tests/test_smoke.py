@@ -166,6 +166,16 @@ def test_required_case_gates_fail_when_absent() -> None:
     assert {"live.gate1.case", "live.gate2.case"} <= set(failing(checks))
 
 
+def test_a_gate1_clarify_decision_on_a_readback_turn_is_not_the_clarify_line() -> None:
+    """What: G-05 live run 1: a weak search (Gate 1 decision clarify) then a readback is not a clarify-line failure.
+    Use when: CI. Inputs: none. Output: none. Side effects: none. Role: false positive found by the first live run."""
+    case = {"id": "X", "turns": [{"kind": "verification", "expect": {"end_reason": "readback"}}]}
+    parts = [*step("search_kb"), *gate_step("retrieval_gate", "weak", "clarify", kind="retrieval"), *model_step(),
+             *step("prepare_refund")]
+    t = turn(0, "verification", parts, end_reason="readback", text="Shall I send this to our team for approval?")[0]
+    assert failing(smoke.live_checks(case, [t], frozenset())) == []
+
+
 def test_clarify_is_allowed_where_the_turn_expects_it() -> None:
     case = {"id": "X", "turns": [{"kind": "text", "text": "q", "expect": {"end_reason": "clarify"}}]}
     t = answered(parts=[*model_step(), *gate_step("grounding_gate", "fail", "clarify")], end_reason="clarify")
