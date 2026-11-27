@@ -54,7 +54,8 @@ class TurnControl:
     Inputs: session_id, turn_id, mode, deadline (time.monotonic() value; None means no deadline),
     demo_fault (already gated by DEMO_FAULTS_ENABLED at ingress), events (the turn stream or None).
     Output: the object. Side effects: none.
-    Gate fields (retrieval, retrieval_chunks, scope_check) are written by agent.gates and read by the router,
+    Gate fields (retrieval, retrieval_chunks, scope_check, grounding, citations, gate_message_id) are written by
+    agent.gates and GroundingMiddleware and read by the router,
     GroundingMiddleware and the SSE adapter.
     Role: D-048 counters live here (executed tool calls only; incremented before the first await); the model
     attempt fields (attempt_role, model_attempts, fallback_used, primary_error, primary_model, fault_fired) are written by
@@ -86,6 +87,11 @@ class TurnControl:
     retrieval: dict[str, Any] | None = None
     retrieval_chunks: dict[str, dict[str, Any]] = field(default_factory=dict)
     scope_check: bool = False
+    # Gate 2 (agent.middleware.grounding, doc 07 s6.4): result for FinalConfidence.grounding, the citations of a
+    # passed draft, and the id of the fixed clarifying line written after a fail.
+    grounding: str = "not_run"
+    citations: list[dict[str, Any]] = field(default_factory=list)
+    gate_message_id: str | None = None
 
     def remaining_s(self) -> float:
         """What: seconds left before the turn deadline. Use when: clamping a call. Inputs: none.
