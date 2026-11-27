@@ -10,6 +10,7 @@ session.act_as and must be a uuid, a {session_id} path value must be a uuid, X-M
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import re
 import time
@@ -33,7 +34,9 @@ CALLER_SCOPES: dict[str, frozenset[str]] = {
 }
 # (METHOD, path template) -> required scope, filled by scoped_route.
 ROUTE_SCOPES: dict[tuple[str, str], str] = {}
+log = logging.getLogger("core.auth")
 _DEMO_FAULTS = {"tool_error", "llm_429"}
+_FAULT_CALLERS = {"agent_tools", "agent_commit"}  # doc 07 s10: core accepts the fault only from the agent
 _ID_OK = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
@@ -151,7 +154,12 @@ def scoped(scope: str) -> Callable[[Request], RequestContext]:
             raise CoreError("VALIDATION_ERROR", details={"errors": [{"loc": ["header", "x-mode"],
                                                                      "type": "enum", "msg": "must be chat or voice"}]})
         fault = h.get("x-demo-fault")
-        demo_fault = fault if request.app.state.settings.demo_faults and fault in _DEMO_FAULTS else None
+        demo_fault = (fault if request.app.state.settings.demo_faults and fault in _DEMO_FAULTS
+                      and caller in _FAULT_CALLERS else None)
+        if fault is not None and demo_fault is None:
+            # doc 07 s10: not honoured (flag off, unknown value or a caller other than the agent); logged, never echoed raw
+            log.info("fault_header_ignored value=%s caller=%s flag=%s trace=%s", fault if fault in _DEMO_FAULTS else "unknown",
+                     caller, request.app.state.settings.demo_faults, request.state.trace_id)
         ctx = RequestContext(
             caller=caller, scopes=scopes, request_id=request.state.request_id, trace_id=request.state.trace_id,
             session_id=session_id, mode=mode, turn_id=clean_id(h.get("x-turn-id")),
@@ -171,11 +179,13 @@ def get_ctx(request: Request) -> RequestContext:
 
 
 def scoped_route(router: FastAPI | APIRouter, method: str, path: str, scope: str, handler: Callable[..., Any],
-                 **kwargs: Any) -> None:
+                 extra_dependencies: list[Callable[..., Any]] | None = None, **kwargs: Any) -> None:
     """What: register a route whose scope is recorded in ROUTE_SCOPES and enforced by `scoped`.
     Use when: adding any core route. Inputs: router, HTTP method, full path template, scope,
-    handler (it receives `ctx: RequestContext = Depends(scoped(scope))` through the route), extra route kwargs.
+    handler (it receives `ctx: RequestContext = Depends(scoped(scope))` through the route), extra dependencies (run
+    after the scope check, before the handler; the demo fault), extra route kwargs.
     Output: none. Side effects: mutates router and ROUTE_SCOPES.
     Role: makes an unscoped route impossible to add by accident and lets tests enumerate every route."""
     ROUTE_SCOPES[(method.upper(), path)] = scope
-    router.add_api_route(path, handler, methods=[method.upper()], dependencies=[Depends(scoped(scope))], **kwargs)
+    router.add_api_route(path, handler, methods=[method.upper()], dependencies=[Depends(scoped(scope)), *(Depends(d) for d in extra_dependencies or [])],
+                         **kwargs)
