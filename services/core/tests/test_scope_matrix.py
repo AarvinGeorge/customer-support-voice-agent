@@ -34,8 +34,9 @@ SLICE_ROUTES = [
 ]
 TOKEN_OF = {"agent_tools": "tok-agent", "agent_commit": "tok-commit", "ops": "tok-ops"}
 # routes whose handler exists, with the status the allowed caller gets here (no session header, no database, empty body):
-# POST routes reject the empty body (422); GET claims reaches the missing database (503).
-BUILT = {("POST", "/v1/tickets"): 422, ("POST", "/v1/identity/verify"): 422, ("GET", f"/v1/sessions/{SID}/claims"): 503}  # S3.T1, S1.T1
+# POST routes reject the empty body (422); GET claims reaches the missing database (503); the /me reads need X-Session-Id (422).
+BUILT = {("POST", "/v1/tickets"): 422, ("POST", "/v1/identity/verify"): 422, ("GET", f"/v1/sessions/{SID}/claims"): 503,
+         ("GET", "/v1/me/context"): 422, ("GET", "/v1/me/charges"): 422, ("GET", "/v1/me/tickets"): 422}  # S3.T1, S1.T1
 CASES = [(m, p, s, who) for (m, p, s) in SLICE_ROUTES for who in SCOPES]
 
 
