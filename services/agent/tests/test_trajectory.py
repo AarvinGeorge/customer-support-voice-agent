@@ -284,3 +284,57 @@ async def test_an_unreachable_database_drops_the_batch_without_per_turn_retries(
         "status", kind="slow", message="b")
     await w.flush()
     assert calls["n"] == 1 and w.dropped == 2 and len(marks.turn_ids) == 2
+
+
+class FlakyMark(Incomplete):
+    """What: on_incomplete that fails the first N calls (a database blip on the mark). Use when: retry tests.
+    Inputs: failures before success. Output: callable. Side effects: records. Role: fake."""
+
+    def __init__(self, failures: int) -> None:
+        """What: set the failure count. Use when: tests. Inputs: int. Output: none. Side effects: none. Role: fake."""
+        super().__init__()
+        self.failures, self.calls = failures, 0
+
+    async def __call__(self, turn_ids: set[str]) -> None:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise OSError("database blip")
+        await super().__call__(turn_ids)
+
+
+async def test_a_failed_events_incomplete_mark_is_retried_on_the_next_flush():
+    marks = FlakyMark(failures=1)
+    w = TrajectoryWriter(pool=FakePool(fail=OSError("connection refused")), on_incomplete=marks)
+    TurnStream(meta(), sink=w.add).emit("status", kind="slow", message="slow")
+    await w.flush()
+    assert marks.turn_ids == set()  # the mark failed once, not yet recorded
+    await w.flush()
+    assert marks.turn_ids == {TID}  # retried, not lost
+
+
+async def test_close_retries_a_failed_mark_before_giving_up():
+    marks = FlakyMark(failures=1)
+    w = TrajectoryWriter(pool=FakePool(fail=OSError("connection refused")), on_incomplete=marks)
+    TurnStream(meta(), sink=w.add).emit("status", kind="slow", message="slow")
+    await w.aclose()
+    assert marks.turn_ids == {TID}
+
+
+async def test_pending_incomplete_marks_are_capped():
+    marks = FlakyMark(failures=10 ** 6)
+    w = TrajectoryWriter(pool=FakePool(), on_incomplete=marks)
+    from agent import trajectory as t
+    w._incomplete = {str(i + 1) for i in range(t.INCOMPLETE_CAP + 50)}
+    await w.flush()
+    assert len(w._incomplete) <= t.INCOMPLETE_CAP
+
+
+def test_role_match_is_exact_or_dated_suffix_and_an_unknown_model_warns_once(caplog):
+    reg = ModelRegistry(load_models_config(ROOT / "data" / "models.yaml"))
+    assert reg.role_for_model("claude-sonnet-5-55") is None
+    assert reg.role_for_model("claude-sonnet-5-5") == "agent"
+    u = token_usage(10, 10)
+    with caplog.at_level("WARNING"):
+        reg.cost_for_model("mystery-model", u)
+        reg.cost_for_model("mystery-model", u)
+    assert [r.getMessage() for r in caplog.records].count("unknown model cost=0 model=mystery-model") == 1

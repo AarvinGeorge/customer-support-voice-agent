@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quillstack.example/evals/golden/retrieval.schema.json",
+  "title": "Golden retrieval query",
+  "description": "What: one labelled query for Gate 1 (doc 07 s4.1). Use when: the golden runner prints Gate 1 confusion counts and recall@k, and when calibration replaces the provisional thresholds. Role: the dataset contract; tests/test_golden_set.py validates every query.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "split", "label", "query", "tier", "verified"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^R-[0-9]{2}$"},
+    "split": {"enum": ["train", "test"]},
+    "label": {"enum": ["answerable", "not_in_docs", "off_topic"]},
+    "query": {"type": "string", "minLength": 3, "maxLength": 300},
+    "tier": {"enum": ["public", "free", "pro", "business", "enterprise"], "description": "as in SearchRequest: public when unverified"},
+    "verified": {"type": "boolean"},
+    "error_code": {"type": "string", "pattern": "^E-[A-Z]+-[0-9]{3}$"},
+    "gold_chunk_ids": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9-]+#[a-z0-9-]+(/[a-z0-9-]+)?(~[0-9]+)?$"}, "uniqueItems": true, "description": "any one in the fused top k counts as a hit; empty unless answerable"},
+    "forbidden_chunk_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[a-z0-9-]+#[a-z0-9-]+(/[a-z0-9-]+)?(~[0-9]+)?$"}, "description": "chunks that must not be returned for this tier"},
+    "near_miss": {"type": "boolean", "description": "shares vocabulary or topic with the docs (D-052: such queries can score near tau_high and so test the threshold; unmeasured)"},
+    "absent_terms": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 2}, "description": "words that prove the label: none may appear in data/articles"},
+    "note": {"type": "string"}
+  },
+  "allOf": [
+    {"if": {"properties": {"label": {"const": "answerable"}}}, "then": {"required": ["gold_chunk_ids"], "properties": {"gold_chunk_ids": {"minItems": 1}}}},
+    {"if": {"properties": {"label": {"enum": ["not_in_docs", "off_topic"]}}}, "then": {"properties": {"gold_chunk_ids": {"maxItems": 0}}}},
+    {"if": {"properties": {"verified": {"const": false}}}, "then": {"properties": {"tier": {"const": "public"}}}},
+    {"if": {"properties": {"verified": {"const": true}}}, "then": {"properties": {"tier": {"not": {"const": "public"}}}}}
+  ]
+}
