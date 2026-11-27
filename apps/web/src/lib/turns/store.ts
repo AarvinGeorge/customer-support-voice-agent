@@ -10,9 +10,9 @@
  */
 import { createStore, useStore, type StoreApi } from "zustand";
 import type { SseEvent, TurnRequest } from "@contracts/contracts";
-import { NetworkError, type ApiError, type ApiDeps, type ContractViolationError } from "@/lib/api/client";
+import { ApiError, NetworkError, type ApiDeps, type ContractViolationError } from "@/lib/api/client";
 import { streamTurn, type DemoFault, type StreamResult } from "@/lib/api/stream";
-import { failTurn, initialConversationState, reduceEvent, type ConversationState } from "./reducer";
+import { failTurn, failureMessage, initialConversationState, reduceEvent, type ConversationState } from "./reducer";
 
 /**
  * What: the typed failure of the last sendTurn.
@@ -35,7 +35,36 @@ export type TurnError = ApiError | ContractViolationError | NetworkError;
  */
 export type ThreadItem =
   | { kind: "user"; id: string; text: string; mode: "chat" | "voice" }
-  | { kind: "turn"; id: string; turnId: string };
+  | { kind: "turn"; id: string; turnId: string }
+  | {
+      kind: "error";
+      id: string;
+      /** The typed text to send again on Retry (null for card inputs, which are never kept: PIN). */
+      text: string | null;
+      /** The user item this send added, removed on Retry so the bubble is not repeated. */
+      userItemId: string | null;
+      message: string;
+      retryable: boolean;
+    };
+
+/**
+ * What: the error row words for a send that failed before its first event.
+ * Use when: sendTurn's catch saw no event.
+ * Inputs: the rejection.
+ * Output: { message, retryable }.
+ * Side effects: none.
+ * Role: ApiError uses the server's envelope message and retryable flag (doc 07 s1.3) plus the
+ *   wait in seconds; network and stream failures use the same words as a failed turn (doc 07 s8.1:
+ *   the browser never retries by itself, the customer may).
+ */
+function preTurnError(err: unknown): { message: string; retryable: boolean } {
+  if (err instanceof ApiError) {
+    const wait = err.retryAfterS !== null && err.retryAfterS > 0 ? ` Try again in ${err.retryAfterS} s.` : "";
+    return { message: `${err.body.message}${wait}`, retryable: err.body.retryable };
+  }
+  if (err instanceof NetworkError) return { message: failureMessage(err.reason), retryable: true };
+  return { message: failureMessage("contract"), retryable: true };
+}
 
 /**
  * What: per-call options for sendTurn.
@@ -70,6 +99,7 @@ export interface TurnStoreState {
   apply: (event: SseEvent) => void;
   addUserMessage: (text: string, mode: "chat" | "voice") => void;
   reset: () => void;
+  retry: (errorId: string, sessionId: string, opts?: SendTurnOptions) => Promise<StreamResult | null>;
   armFault: (fault: DemoFault | null) => void;
   takeFault: () => DemoFault | null;
   sendTurn: (sessionId: string, request: TurnRequest, opts?: SendTurnOptions) => Promise<StreamResult>;
@@ -83,11 +113,16 @@ export interface TurnStoreState {
  * Side effects: none until sendTurn is called.
  * Role: store factory. sendTurn takes the armed fault before the request (so it goes on exactly
  *   one request, even one that fails), adds the typed text to the thread, streams events into
- *   apply, and on a rejection fails every turn it saw that did not complete (failTurn), records
- *   the typed error and rethrows it; it never retries (doc 07 s9).
+ *   apply (only events of its own session), and on a rejection fails every turn it saw that did
+ *   not complete (failTurn) or, when no event arrived, adds an error item; it records the typed
+ *   error and rethrows it; it never retries by itself (doc 07 s9). reset() aborts every in-flight
+ *   send and bumps an epoch, so a late event or rejection from before the reset changes nothing
+ *   (review PR #20, I1).
  */
 export function createTurnStore(): StoreApi<TurnStoreState> {
   let userSeq = 0;
+  let epoch = 0;
+  const inflight = new Set<AbortController>();
   /**
    * What: a new user thread item with a per-store unique id.
    * Use when: addUserMessage or sendTurn with text.
@@ -113,8 +148,18 @@ export function createTurnStore(): StoreApi<TurnStoreState> {
       set(added.length > 0 ? { conversation: next, thread: [...get().thread, ...added] } : { conversation: next });
     },
     addUserMessage: (text, mode) => set({ thread: [...get().thread, userItem(text, mode)] }),
-    reset: () =>
-      set({ conversation: initialConversationState, thread: [], connection: { phase: "idle", error: null }, armedFault: null }),
+    reset: () => {
+      epoch += 1;
+      for (const ctrl of inflight) ctrl.abort();
+      inflight.clear();
+      set({ conversation: initialConversationState, thread: [], connection: { phase: "idle", error: null }, armedFault: null });
+    },
+    retry: async (errorId, sessionId, opts = {}) => {
+      const item = get().thread.find((i) => i.id === errorId);
+      if (item?.kind !== "error" || item.text === null || !item.retryable) return null;
+      set({ thread: get().thread.filter((i) => i.id !== errorId && i.id !== item.userItemId) });
+      return get().sendTurn(sessionId, { client_turn_id: crypto.randomUUID(), text: item.text }, opts);
+    },
     armFault: (fault) => set({ armedFault: fault }),
     takeFault: () => {
       const fault = get().armedFault;
@@ -123,27 +168,44 @@ export function createTurnStore(): StoreApi<TurnStoreState> {
     },
     sendTurn: async (sessionId, request, opts = {}) => {
       const fault = get().takeFault();
-      const thread = request.text ? [...get().thread, userItem(request.text, "chat")] : get().thread;
-      set({ thread, connection: { phase: "streaming", error: null } });
+      const mine = epoch;
+      const ctrl = new AbortController();
+      const outer = opts.signal;
+      if (outer?.aborted) ctrl.abort();
+      else outer?.addEventListener("abort", () => ctrl.abort(), { once: true });
+      inflight.add(ctrl);
+      const user = request.text ? userItem(request.text, "chat") : null;
+      set({ thread: user ? [...get().thread, user] : get().thread, connection: { phase: "streaming", error: null } });
       const seen = new Set<string>();
       try {
         const result = await streamTurn(sessionId, request, {
           ...opts,
+          signal: ctrl.signal,
           fault,
           onEvent: (e) => {
+            if (epoch !== mine || e.session_id !== sessionId) return;
             seen.add(e.turn_id);
             get().apply(e);
           },
         });
-        set({ connection: { phase: "idle", error: null } });
+        if (epoch === mine) set({ connection: { phase: "idle", error: null } });
         return result;
       } catch (err) {
-        if (err instanceof NetworkError && err.turnId !== null) seen.add(err.turnId);
+        if (epoch !== mine) throw err;
+        if (err instanceof NetworkError && err.turnId !== null && get().conversation.turns[err.turnId]) seen.add(err.turnId);
         const reason = err instanceof NetworkError ? err.reason : "contract";
         let conversation = get().conversation;
         for (const turnId of seen) conversation = failTurn(conversation, turnId, reason);
-        set({ conversation, connection: { phase: "idle", error: err as TurnError } });
+        let thread = get().thread;
+        if (seen.size === 0 && reason !== "aborted") {
+          const { message, retryable } = preTurnError(err);
+          userSeq += 1;
+          thread = [...thread, { kind: "error", id: `error-${userSeq}`, text: request.text ?? null, userItemId: user?.id ?? null, message, retryable }];
+        }
+        set({ conversation, thread, connection: { phase: "idle", error: err as TurnError } });
         throw err;
+      } finally {
+        inflight.delete(ctrl);
       }
     },
   }));

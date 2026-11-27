@@ -107,7 +107,7 @@ export function gateWords(g: GateEvent): GateWords {
   const low = g.tau_low ?? null;
   const high = g.tau_high ?? null;
   const threshold = low !== null && top < low ? low : (high ?? low);
-  const text = threshold === null ? `${score(top)}, ${g.decision}` : `${score(top)} / ${score(threshold)}, ${g.decision}`;
+  const text = threshold === null ? `${score(top)}, ${g.verdict}, ${g.decision}` : `${score(top)} / ${score(threshold)}, ${g.decision}`;
   const parts = [`Retrieval score ${score(top)}`];
   if (high !== null) parts.push(`answer threshold ${score(high)}`);
   if (low !== null) parts.push(`floor ${score(low)}`);

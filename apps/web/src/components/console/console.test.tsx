@@ -107,13 +107,14 @@ describe("S4: gate rows in words", () => {
     render(<ConsoleShell sessionId="s" store={replayed(s4, ["Weather?", "HIPAA?", "We need a BAA."])} />);
     fireEvent.click(screen.getByRole("button", { name: /3 steps, 1\.9 s · Escalated/ }));
     const words = screen.getByText("0.41 / 0.45, escalate");
-    expect(words.getAttribute("aria-label")).toBe("Retrieval score 0.41, answer threshold 0.45, floor 0.30: weak, escalate");
+    expect(words.getAttribute("aria-hidden")).toBe("true");
+    expect(screen.getByText("Retrieval score 0.41, answer threshold 0.45, floor 0.30: weak, escalate").className).toContain("sr-only");
     expect(screen.getByRole("button", { name: /2 steps, 1\.7 s · Declined, off topic/ })).toBeTruthy();
   });
 });
 
 describe("live line, live region and failed turns", () => {
-  it("while running, the summary is the running step's label, announced politely", () => {
+  it("while running, the summary is the running step's label, announced politely by one region", () => {
     const store = createTurnStore();
     render(<ConsoleShell sessionId="s" store={store} />);
     const c2 = s1.filter((e) => e.turn_id.endsWith("c2"));
@@ -124,7 +125,9 @@ describe("live line, live region and failed turns", () => {
     act(() => c2.slice(2, 9).forEach((e) => store.getState().apply(e)));
     expect(status.textContent).toBe("Checking your billing history...");
     act(() => c2.slice(9).forEach((e) => store.getState().apply(e)));
-    expect(status.textContent).toBe("6 steps, 4.2 s · Refund ready to confirm");
+    expect(status.textContent).toBe("6 steps, 4.2 s · Refund ready to confirm. I can refund $96.00 for the duplicate charge on 21 November (invoice ending 0413). Shall I go ahead?");
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+    expect(screen.getByRole("log").getAttribute("aria-live")).toBe("off");
   });
 
   it("a dropped turn renders Couldn't finish and its message, with no live row", () => {
@@ -175,5 +178,69 @@ describe("input bar", () => {
     fireEvent.keyDown(box, { key: "Enter" });
     expect(onSend).not.toHaveBeenCalled();
     expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).getAttribute("aria-disabled")).toBe("true");
+  });
+});
+
+describe("review PR #20 fixes", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("I2: a send that fails before any event shows an error row; Retry sends the text again", async () => {
+    const calls: string[] = [];
+    let fail = true;
+    const c4 = s1.filter((e) => e.turn_id.endsWith("c4"));
+    vi.stubGlobal("fetch", vi.fn(async (_u: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(JSON.parse(init?.body as string).text);
+      if (fail) throw new TypeError("Failed to fetch");
+      const wire = c4.map((e) => `event: ${e.type}\nid: ${e.seq}\ndata: ${JSON.stringify(e)}\n\n`).join("");
+      return new Response(wire, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }));
+    const store = createTurnStore();
+    render(<ConsoleShell sessionId={c4[0]?.session_id as string} store={store} />);
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "How long until it arrives?" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(await screen.findByText("The connection was lost before this reply finished.")).toBeTruthy();
+    expect(screen.getAllByText(/Couldn.t send/).length).toBeGreaterThan(0);
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText(/Refunds reach your card in 5 to 10 business days/, { selector: "p" })).toBeTruthy();
+    expect(calls).toEqual(["How long until it arrives?", "How long until it arrives?"]);
+    expect(screen.getAllByText("How long until it arrives?")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("I2: a non-retryable failure has no Retry button", () => {
+    const store = createTurnStore();
+    store.setState({ thread: [{ kind: "error", id: "e1", text: "hi", userItemId: null, message: "Not allowed.", retryable: false }] });
+    render(<ConsoleShell sessionId="s" store={store} />);
+    expect(screen.getByText("Not allowed.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("M2: a turn that ends with end_reason error shows the alert icon, not a check", () => {
+    const c4 = s1.filter((e) => e.turn_id.endsWith("c4"));
+    const last = c4.at(-1) as Extract<SseEvent, { type: "turn.completed" }>;
+    const store = replayed([...c4.slice(0, -1), { ...last, end_reason: "error" }]);
+    render(<ConsoleShell sessionId="s" store={store} />);
+    const btn = screen.getByRole("button", { name: /Couldn't finish/ });
+    expect(btn.querySelector("[data-icon='alert']")).not.toBeNull();
+  });
+
+  it("M6: a failed turn with no steps shows no trail, only the failure row", () => {
+    const store = createTurnStore();
+    const c4 = s1.filter((e) => e.turn_id.endsWith("c4"));
+    store.getState().apply(c4[0] as SseEvent);
+    store.setState({ conversation: failTurn(store.getState().conversation, c4[0]?.turn_id as string, "dropped") });
+    render(<ConsoleShell sessionId="s" store={store} />);
+    expect(screen.queryByRole("button", { name: /0 steps/ })).toBeNull();
+    expect(screen.getByText("The connection dropped before this reply finished.")).toBeTruthy();
+  });
+
+  it("M9: aria-controls is set only while the panel exists", () => {
+    render(<ConsoleShell sessionId="s" store={replayed(s1)} />);
+    const btn = screen.getByRole("button", { name: /6 steps/ });
+    expect(btn.getAttribute("aria-controls")).toBeNull();
+    fireEvent.click(btn);
+    expect(document.getElementById(btn.getAttribute("aria-controls") as string)).not.toBeNull();
   });
 });
