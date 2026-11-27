@@ -214,7 +214,7 @@ class ModelFallbackEvent(Envelope):
     reason: Literal["rate_limit", "timeout", "5xx", "spend_cap", "auth", "fault_llm_429"]
 
 
-class ErrorEvent(Envelope, ErrorBody):
+class ErrorEvent(Envelope, ErrorBody):  # pyright: ignore[reportIncompatibleVariableOverride]  # trace_id is a str in both bases; wire shape is frozen (doc 07 s6.2)
     """What: an error inside the stream (always followed by turn.completed).
     Use when: a turn fails after the stream opened. Inputs: ErrorBody fields ("class" key).
     Output: model. Side effects: none. Role: doc 07 s6.2 error."""
@@ -301,7 +301,7 @@ _EVENT_CLASSES = (TurnStartedEvent, StepStartedEvent, StepCompletedEvent, GateEv
 SseEvent = Annotated[Union[_EVENT_CLASSES], Field(discriminator="type")]  # type: ignore[valid-type]
 EVENT_TYPES: tuple[str, ...] = tuple(get_args(c.model_fields["type"].annotation)[0] for c in _EVENT_CLASSES)
 
-_ADAPTER: TypeAdapter[Any] = TypeAdapter(SseEvent)
+_ADAPTER: TypeAdapter[Any] = TypeAdapter(SseEvent)  # pyright: ignore[reportArgumentType]  # runtime Union of the event classes, not expressible as a static TypeForm
 
 
 def parse_event(data: dict[str, Any] | str) -> Envelope:
