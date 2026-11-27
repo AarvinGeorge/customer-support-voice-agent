@@ -1,6 +1,6 @@
 # What: shared image for the three Python services and their migrate jobs (build arg SERVICE = agent | core | knowledge).
 # Use when: Compose builds agent_a, agent_b, core, knowledge and the migrate_* jobs (context = repo root).
-# Inputs: packages/contracts, services/<SERVICE>/pyproject.toml, uv.lock, src/, migrations/; infra/migrate.py.
+# Inputs: packages/contracts, services/<SERVICE>/pyproject.toml, uv.lock, src/, migrations/; infra/migrate.py; services/knowledge/config.
 # Output: image with deps in /app/.venv, source in /app/src, runner at /app/migrate.py.
 # Side effects: none at build beyond layers. Role: one Dockerfile so the three services build the same way (D-029).
 FROM python:3.12-slim
@@ -18,6 +18,8 @@ WORKDIR /app
 COPY services/${SERVICE}/src ./src
 COPY services/${SERVICE}/migrations ./migrations
 COPY infra/migrate.py ./migrate.py
+# knowledge's Gate 1 calibration file (doc 07 s13.3) travels with the code that was probed; copied for every SERVICE, only knowledge reads it
+COPY services/knowledge/config ./config
 # knowledge only: bake the cl100k_base vocabulary so the chunker never needs the network at run time
 ENV TIKTOKEN_CACHE_DIR=/app/tiktoken_cache
 RUN if [ "$SERVICE" = knowledge ]; then python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"; fi
