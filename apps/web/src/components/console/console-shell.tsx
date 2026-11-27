@@ -287,7 +287,8 @@ export function ConsoleShell({
    * What: sends one turn: a chat message, or a card's verification or confirm body.
    * Use when: the input bar submits, or a card is pressed.
    * Inputs: the TurnRequest without client_turn_id (exactly one of text, verification, confirm).
-   * Output: a promise that settles when the turn ends (resolves on success and on failure).
+   * Output: a promise that settles when the turn ends: true when the server completed the turn
+   *   (turn.completed arrived), false on any failure or without a session (it never rejects).
    * Side effects: one streamed request with a fresh client_turn_id; failures land on the turn
    *   (failed phase) or in connection.error (shown by CS-E-04.S5.T3), so the rejection is
    *   swallowed here. Without a session nothing is sent.
@@ -295,15 +296,15 @@ export function ConsoleShell({
    *   only for the request (doc 07 s11).
    */
   const run = useCallback(
-    (part: Omit<TurnRequest, "client_turn_id">): Promise<void> => {
-      if (sessionId === null) return Promise.resolve();
+    (part: Omit<TurnRequest, "client_turn_id">): Promise<boolean> => {
+      if (sessionId === null) return Promise.resolve(false);
       const ctrl = new AbortController();
       inflight.current = ctrl;
       return store
         .getState()
         .sendTurn(sessionId, { client_turn_id: crypto.randomUUID(), ...part }, { signal: ctrl.signal })
-        .then(() => undefined)
-        .catch(() => undefined)
+        .then(() => true)
+        .catch(() => false)
         .finally(() => {
           if (inflight.current === ctrl) inflight.current = null;
         });
@@ -328,7 +329,12 @@ export function ConsoleShell({
       setAccount,
       pinRef,
       verify: (verification: VerificationInput) => run({ verification }).finally(() => refocus("verify")),
-      noPin: () => run({ verification: { no_pin: true } }).finally(() => store.getState().dismissVerification()),
+      // The card closes only after the server completed the no_pin turn; a turn that never ran
+      // (429, 503, network) keeps it open next to the error (review rereview-pr78-r1 N-1).
+      noPin: () =>
+        run({ verification: { no_pin: true } }).then((completed) => {
+          if (completed) store.getState().dismissVerification();
+        }),
       decide: (confirm: ConfirmInput) => run({ confirm }).finally(() => refocus("decide")),
       offerTicket: () => run({ ticket_offer: { accept: true } }).finally(() => refocus("decide")),
     }),
