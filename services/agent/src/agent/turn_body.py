@@ -4,10 +4,13 @@ agent loop with the code-built turn message.
 Use when: the app (or a test) builds Ingress(run_agent=TurnRunner(agent, core, structured=...)).
 Inputs: the compiled agent, the agent-token core client, an optional structured-input handler, optional session
 flags writer (agent.sessions.awaiting_verification).
-Output: TurnRunner, StructuredResult, StructuredHandler, TurnPrep, SessionFlags, PgSessionFlags, monotonic_deadline.
+Output: TurnRunner, StructuredResult, StructuredHandler, TurnPrep, SessionFlags, PgSessionFlags, monotonic_deadline,
+voice_user_text.
 Side effects: thread reads and writes (checkpointer), core calls, events on the turn stream, the session flag.
-Role: composition of the ingress steps between the turn row and the final row. Steps 9a (PIN scan) and 12
-(transcript merge) belong to CS-E-03.S7.T9 and CS-E-05.S3.T2 and slot in here.
+Role: composition of the ingress steps between the turn row and the final row. Step 12's result (the merged
+<voice_transcript> message, from Ingress) is placed before the turn message; step 9a (PIN scan) is CS-E-03.S7.T9.
+Wiring part 2 (CS-E-08.S5): reuses the TurnControl Ingress bound (deadline, demo fault), passes cost_of to the SSE
+adapter and runs the loop with turn_run_config (LangSmith run id = turn id, fault tags).
 """
 from __future__ import annotations
 
@@ -16,12 +19,27 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Protocol
 
-from agent.assembly import run_config
+from langchain_core.messages import HumanMessage
+
+from agent.assembly import run_config, turn_run_config
 from agent.clients.core_agent import CoreAgentClient
 from agent.memory import MemoryRefresh, refresh_memory, repair_dangling
 from agent.prompt import TurnContext, build_turn_message
 from agent.sse import TurnOutcome, TurnStream, stream_agent_turn
-from agent.turn_control import TURN_CONTROL, TurnControl, bind_turn_control
+from agent.turn_control import TURN_CONTROL, TurnControl, bind_turn_control, current_control
+
+CostOf = Callable[[str, Any], float]
+
+
+def voice_user_text(body: Any) -> str:
+    """What: the voice turn's user text: the Realtime question, plus the final verbatim transcript when it differs.
+    Use when: TurnRunner on a voice turn the model answers. Inputs: VoiceAskRequest (question, user_transcript,
+    transcript_final). Output: text. Side effects: none. Role: doc 07 s2.6 row 4."""
+    question = body.question.strip()
+    said = (body.user_transcript or "").strip()
+    if body.transcript_final and said and said.lower() != question.lower():
+        return f"{question}\n(the customer said: {said})"
+    return question
 
 
 class SessionFlags(Protocol):
@@ -98,14 +116,17 @@ class TurnRunner:
     Role: steps 10, 11, 13, 14 in order."""
 
     def __init__(self, agent: Any, core: CoreAgentClient, *, structured: StructuredHandler | None = None,
-                 flags: SessionFlags | None = None) -> None:
-        """What: keep dependencies. Use when: app start or tests. Inputs: see class. Output: none.
-        Side effects: none. Role: constructor."""
-        self.agent, self.core, self.structured, self.flags = agent, core, structured, flags
+                 flags: SessionFlags | None = None, cost_of: CostOf | None = None) -> None:
+        """What: keep dependencies. Use when: app start or tests. Inputs: see class; cost_of(model, usage) -> USD
+        (ModelRegistry.cost_for_model; None: cost 0). Output: none. Side effects: none. Role: constructor."""
+        self.agent, self.core, self.structured, self.flags, self.cost_of = agent, core, structured, flags, cost_of
 
     async def __call__(self, stream: TurnStream, inp: Any, row: Any) -> TurnOutcome:
         """What: run one turn's body with a TurnControl bound once (spike 15). Use when: Ingress step 14.
         Inputs: stream, IngressInput, TurnRow. Output: TurnOutcome. Side effects: see module. Role: entry."""
+        bound = current_control()
+        if bound is not None and bound.turn_id == row.turn_id:  # Ingress already bound this turn's control
+            return await self._run(stream, inp, bound)
         control = TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
                               deadline=monotonic_deadline(row.deadline_at), events=stream,
                               demo_fault=getattr(inp, "demo_fault", None))
@@ -136,9 +157,18 @@ class TurnRunner:
                           verification="just_verified" if result.verification == "just_verified" else None,
                           pending=result.pending_summary,
                           context_snapshot=merged.get("context_snapshot") if verified else None, context_stale=stale)
-        text = result.model_text if result.model_text is not None else (inp.text or "")
-        agent_input = {**memory.update, **result.state, "messages": [build_turn_message(text, ctx)]}
-        outcome = await stream_agent_turn(stream, self.agent, agent_input, config, control=control)  # step 14
+        if result.model_text is not None:
+            text = result.model_text
+        elif inp.mode == "voice" and getattr(inp, "body", None) is not None and hasattr(inp.body, "question"):
+            text = voice_user_text(inp.body)
+        else:
+            text = inp.text or ""
+        merged_msg = getattr(inp, "merged_transcript", None)  # step 12: wrapped, untrusted client chatter
+        messages = ([HumanMessage(content=merged_msg)] if merged_msg else []) + [build_turn_message(text, ctx)]
+        agent_input = {**memory.update, **result.state, "messages": messages}
+        loop_config = turn_run_config(inp.session_id, control.turn_id, control.demo_fault)
+        outcome = await stream_agent_turn(stream, self.agent, agent_input, loop_config, control=control,
+                                          cost_of=self.cost_of)  # step 14
         if control.awaiting_verification and self.flags is not None:  # s6.3 step 2: agent.sessions is the authority
             await self.flags.set_awaiting_verification(inp.session_id, True)
         return outcome
