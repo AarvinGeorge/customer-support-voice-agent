@@ -7,14 +7,20 @@ must still be blocked.
 """
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import Any
 
+from contracts import limits
 from contracts.stubs import examples as ex
 from gate2_fakes import VERIFIER_MODEL, CitingVerifierModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from test_gate2 import Harness, grounding_gate, texts
+from virtual_clock import run_virtual
 
-from agent.gates import CLARIFY_LINE, GroundingVerifier, grounded_evidence
+from agent.gates import CLARIFY_LINE, GroundingVerifier, enforce_code_rules, grounded_evidence
+from agent.models.config import load_models_config
+from agent.turn_control import TurnControl
 
 CLAIMS = ex.CLAIMS.model_dump(mode="json")
 CONTEXT = ex.ME_CONTEXT.model_dump(mode="json")
@@ -107,3 +113,51 @@ async def test_the_verifier_call_is_counted_in_usage():
     assert outcome.usage.model_calls == 2  # one agent model call plus one Gate 2 verifier call
     assert VERIFIER_MODEL in outcome.usage.models_used
     assert outcome.usage.input_tokens >= 100 and outcome.usage.output_tokens >= 20
+
+
+# --- D-061: verifier timeout by channel (chat 5 s, voice 3 s), 0 retries, fail closed -------------------------
+class SlowCitingModel(CitingVerifierModel):
+    """What: the citing fake, answering after `delay_s` (virtual) seconds. Use when: the D-061 timing tests.
+    Inputs: delay, claims. Output: as CitingVerifierModel. Side effects: sleeps. Role: fake."""
+
+    def __init__(self, delay_s: float, *claims: tuple[str, str]) -> None:
+        """What: keep the delay. Use when: tests. Inputs: delay, claims. Output: none. Side effects: none.
+        Role: constructor."""
+        super().__init__(*claims)
+        self.delay_s = delay_s
+
+    async def ainvoke(self, messages: list[Any], config: Any = None) -> AIMessage:
+        """What: sleep, then answer. Use when: verify. Inputs: messages, config. Output: AIMessage.
+        Side effects: sleeps. Role: fake call."""
+        await asyncio.sleep(self.delay_s)
+        return await super().ainvoke(messages, config)
+
+
+def test_d061_a_4_s_verifier_passes_in_chat_and_fails_closed_in_voice():
+    # D-061 amends doc 07 s9 row "Gate 2 verifier": chat 5 s (Gate 2 path 4.4 + 10 + 5 = 19.4 s; with a re-ask
+    # 4.4 + 30 = 34.4 s, both under the 45 s chat deadline with the 3 s reserve), voice 3 s (20 s deadline, path 17.4 s).
+    evidence, sources = grounded_evidence(VERIFIED, [HumanMessage("hi")])
+
+    async def run(mode: str) -> Any:
+        """What: one verify on a turn of `mode` with a full deadline. Use when: this test. Inputs: mode.
+        Output: GroundingResult after the code rules. Side effects: virtual sleep. Role: helper."""
+        deadline_s = limits.CHAT_TURN_DEADLINE_S if mode == "chat" else limits.VOICE_TURN_DEADLINE_S
+        control = TurnControl(session_id="s", turn_id="t", mode=mode)
+        control.deadline = control.clock() + deadline_s
+        ver = GroundingVerifier(SlowCitingModel(4.0, *ACCOUNT_CLAIMS))
+        raw = await ver.verify(control, VERIFIED_DRAFT, evidence)
+        return enforce_code_rules(raw, VERIFIED_DRAFT, {}, tool_names=sources)
+
+    chat, _ = run_virtual(run("chat"))
+    voice, _ = run_virtual(run("voice"))
+    assert chat.verdict == "pass" and chat.passed
+    assert voice.verdict == "error" and not voice.passed
+
+
+def test_d061_timeouts_come_from_limits_and_the_role_config_allows_the_chat_budget():
+    assert (limits.GATE2_VERIFIER_TIMEOUT_CHAT_S, limits.GATE2_VERIFIER_TIMEOUT_VOICE_S) == (5, 3)
+    ver = GroundingVerifier(CitingVerifierModel())
+    assert ver.timeout_for("chat") == 5 and ver.timeout_for("voice") == 3
+    cfg = load_models_config(Path(__file__).resolve().parents[3] / "data" / "models.yaml")
+    # the provider client timeout must not cut the chat budget short
+    assert cfg.roles["grounding_verifier"].attempt_timeout_s == limits.GATE2_VERIFIER_TIMEOUT_CHAT_S

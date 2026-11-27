@@ -424,22 +424,35 @@ def parse_verifier_reply(text: str) -> GroundingResult:
 
 
 class GroundingVerifier:
-    """What: the grounding_verifier role (doc 07 s6.4, s8.1: 3 s, 0 retries, fail closed).
+    """What: the grounding_verifier role (doc 07 s6.4, s8.1; D-061: 5 s in chat, 3 s in voice; 0 retries, fail closed).
     Use when: GroundingMiddleware checks a draft. Inputs: a chat model (models.yaml roles.grounding_verifier),
-    the listed timeout and the minimum useful call. Output: verify(). Side effects: one model call per draft.
+    the per-channel timeouts from contracts.limits (or one test override) and the minimum useful call.
+    Output: verify(), timeout_for(). Side effects: one model call per draft.
     Role: tags its call GATE_TAGS, so its tokens never reach the stream (spike 6)."""
 
-    def __init__(self, model: Any, *, timeout_s: float = limits.GATE2_VERIFIER_TIMEOUT_S,
+    def __init__(self, model: Any, *, timeout_s: float | None = None,
+                 chat_timeout_s: float = limits.GATE2_VERIFIER_TIMEOUT_CHAT_S,
+                 voice_timeout_s: float = limits.GATE2_VERIFIER_TIMEOUT_VOICE_S,
                  min_s: float = limits.CORE_MIN_CALL_S) -> None:
-        """What: keep the model and the timeouts. Use when: assembly. Inputs: model, timeout, minimum.
-        Output: none. Side effects: none. Role: constructor."""
-        self.model, self.timeout_s, self.min_s = model, timeout_s, min_s
+        """What: keep the model and the timeouts. Use when: assembly. Inputs: model; timeout_s (tests: one value for
+        both channels); the chat and voice timeouts (D-061); minimum. Output: none. Side effects: none.
+        Role: constructor."""
+        self.model, self.min_s = model, min_s
+        self.timeouts = {"chat": chat_timeout_s if timeout_s is None else timeout_s,
+                         "voice": voice_timeout_s if timeout_s is None else timeout_s}
+
+    def timeout_for(self, mode: str) -> float:
+        """What: the verifier timeout for a channel (D-061 amends doc 07 s9: chat 5 s, voice 3 s). Chat budget: the
+        Gate 2 path is 4.4 + 10 + 5 = 19.4 s, with a re-ask 4.4 + 30 = 34.4 s, both under the 45 s deadline with the
+        3 s reserve; voice keeps 3 s (20 s deadline, path 17.4 s). Use when: verify. Inputs: "chat" or "voice".
+        Output: seconds (an unknown mode gets the shorter voice value). Side effects: none. Role: helper."""
+        return self.timeouts.get(mode, self.timeouts["voice"])
 
     async def verify(self, control: TurnControl, draft: str, evidence: str) -> GroundingResult:
-        """What: check one draft. Use when: Gate 2 runs. Inputs: control (deadline), draft, evidence text.
+        """What: check one draft. Use when: Gate 2 runs. Inputs: control (deadline, mode), draft, evidence text.
         Output: GroundingResult ("error" on timeout, exception, no time left or an unreadable reply).
         Side effects: one model call. Role: fail closed."""
-        timeout = clamp_timeout(self.timeout_s, control.remaining_s(), minimum_s=self.min_s)
+        timeout = clamp_timeout(self.timeout_for(control.mode), control.remaining_s(), minimum_s=self.min_s)
         if timeout is None:
             return GroundingResult("error")
         msgs = [SystemMessage(VERIFIER_PROMPT), HumanMessage(verifier_input(evidence, draft))]

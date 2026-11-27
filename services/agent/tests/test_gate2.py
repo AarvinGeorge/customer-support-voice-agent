@@ -349,7 +349,9 @@ def test_registry_wiring_attaches_both_gate_models(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(assembly, "build_agent", lambda *a, **kw: captured.update(kw))
     reg = ModelRegistry(load_models_config(Path(__file__).resolve().parents[3] / "data" / "models.yaml"))
     assembly.build_agent_from_registry(reg, checkpointer=InMemorySaver())
-    assert captured["grounding_verifier"].timeout_s == 3 and captured["scope_classifier"].timeout_s == 2
+    ver = captured["grounding_verifier"]
+    assert (ver.timeout_for("chat"), ver.timeout_for("voice")) == (5, 3)  # D-061
+    assert captured["scope_classifier"].timeout_s == 2
     assert "haiku" in str(getattr(captured["grounding_verifier"].model, "model", ""))
 
 

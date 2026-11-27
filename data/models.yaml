@@ -28,12 +28,13 @@ roles:
     max_tokens: 2048
     price: {input_per_mtok: 0.75, output_per_mtok: 4.50, cache_read_per_mtok: 0.075, as_of: 2026-11-27}
   grounding_verifier:
-    # Gate 2 (doc 07 s7): 3 s, 0 retries, fail closed. Prices are the prompts-up-to-100K tier
+    # Gate 2 (doc 07 s7; D-061): 0 retries, fail closed. The client timeout is the chat budget (5 s); voice turns are
+    # cut at 3 s by GroundingVerifier (contracts.limits). Prices are the prompts-up-to-100K tier
     # (a Gate 2 prompt is far below that).
     provider: anthropic
     model: claude-haiku-5-5
     effort: low
-    attempt_timeout_s: 3
+    attempt_timeout_s: 5
     max_tokens: 512
     price: {input_per_mtok: 0.10, output_per_mtok: 0.50, cache_read_per_mtok: 0.01, cache_write_per_mtok: 0.125, as_of: 2026-11-27}
   scope_classifier:
