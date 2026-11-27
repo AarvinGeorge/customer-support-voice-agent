@@ -698,11 +698,25 @@ def test_assert_wired_raises_naming_the_gap() -> None:
         composition.assert_wired(app)
 
 
-def test_gate_2_is_named_pending_exactly_while_the_grounding_stub_is_in_the_stack() -> None:
-    from agent.middleware.stubs import STUB_NAMES
+def test_the_production_agent_has_the_real_gate_2_verifier_so_gate_2_is_not_pending() -> None:
+    # PR #52 merged with #58: the stub is gone; the registry wiring attaches the grounding_verifier role.
     _, pending = composition.wiring_gaps(wired_state())
-    named = any(p.startswith("Gate 2 verifier") for p in pending)
-    assert named == ("GroundingMiddleware" in STUB_NAMES), pending
+    assert not any(p.startswith("Gate 2 verifier") for p in pending), pending
+    assert composition.gate2_wired(wired_state().state.ingress.run_agent.agent) is True
+
+
+def test_gate_2_is_named_pending_when_the_agent_has_no_verifier_or_cannot_be_inspected() -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from agent.assembly import build_agent
+    off = build_agent(FakeRegistry().build("agent"), fallback_model=FakeRegistry().build("agent_fallback"),
+                      checkpointer=InMemorySaver(), grounding_verifier=None)
+    assert composition.gate2_wired(off) is False
+    assert composition.gate2_wired(object()) is False  # unknown shape fails closed: pending
+    app = wired_state()
+    app.state.ingress.run_agent.agent = off
+    _, pending = composition.wiring_gaps(app)
+    assert any(p.startswith("Gate 2 verifier") for p in pending), pending
 
 
 def test_the_pin_scanner_is_named_pending_when_its_module_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:
