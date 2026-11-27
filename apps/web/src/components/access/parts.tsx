@@ -76,26 +76,32 @@ export function VoiceHint() {
  */
 export function useCountdown(): { remaining: number; start: (seconds: number | null) => void } {
   const [until, setUntil] = useState<number | null>(null);
-  const [remaining, setRemaining] = useState(0);
+  const [left, setLeft] = useState(0);
 
+  // The effect only subscribes to the clock: state is set from the interval callback, never
+  // synchronously in the effect body (react.dev, "Synchronizing with Effects").
   useEffect(() => {
-    if (until === null) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
-      setRemaining(0);
-      return;
-    }
-    const tick = () => {
-      const left = Math.max(0, Math.ceil((until - Date.now()) / 1000));
-      setRemaining(left);
-      if (left === 0) setUntil(null);
-    };
-    tick();
-    const id = setInterval(tick, 1000);
+    if (until === null) return;
+    const id = setInterval(() => {
+      const next = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+      setLeft(next);
+      if (next === 0) setUntil(null);
+    }, 1000);
     return () => clearInterval(id);
   }, [until]);
 
-  const start = (seconds: number | null) => setUntil(seconds === null ? null : Date.now() + seconds * 1000);
-  return { remaining, start };
+  // The first value is set where the event happens, not in an effect (react.dev, "Sharing state
+  // between components" and "You Might Not Need an Effect": handle events in handlers).
+  const start = (seconds: number | null) => {
+    if (seconds === null || seconds <= 0) {
+      setLeft(0);
+      setUntil(null);
+      return;
+    }
+    setLeft(Math.ceil(seconds));
+    setUntil(Date.now() + seconds * 1000);
+  };
+  return { remaining: until === null ? 0 : left, start };
 }
 
 /**

@@ -184,25 +184,31 @@ export function ConsoleShell({
     store.getState().clearLimit();
     setLimitNote("You can send again.");
   }, [store]);
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
-    if (busy) setLimitNote("");
-  }, [busy]);
   const limitId = limit?.id ?? null;
   const limitS = limit?.retryAfterS ?? null;
-  useEffect(() => {
-    // Announce the wait once per notice, from retry_after_s (not the ticking clock).
-    if (limitId === null) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
-    setLimitNote(limitS !== null && limitS > 0 ? `You can send again in about ${limitS} second${limitS === 1 ? "" : "s"}.` : "Sending is paused for a moment.");
-  }, [limitId]);
+  // Adjusting state while rendering when a value changed, instead of an effect (react.dev, "You
+  // Might Not Need an Effect": Adjusting some state when a prop changes). A turn starting clears
+  // the note; a new notice id announces the wait once, from retry_after_s (not the ticking clock).
+  const [seen, setSeen] = useState<{ busy: boolean; limitId: number | null; sessionId: string | null }>({ busy: false, limitId: null, sessionId });
+  const [account, setAccount] = useState("");
+  const [pickedTurnId, setPickedTurnId] = useState<string | null>(null);
+  if (seen.busy !== busy || seen.limitId !== limitId || seen.sessionId !== sessionId) {
+    setSeen({ busy, limitId, sessionId });
+    if (busy && !seen.busy) setLimitNote("");
+    if (limitId !== null && limitId !== seen.limitId) {
+      setLimitNote(limitS !== null && limitS > 0 ? `You can send again in about ${limitS} second${limitS === 1 ? "" : "s"}.` : "Sending is paused for a moment.");
+    }
+    // A new session starts clean: the typed Account ID and the picked turn belong to the old one.
+    if (seen.sessionId !== sessionId) {
+      setAccount("");
+      setPickedTurnId(null);
+    }
+  }
   const secondsLeft = useSecondsLeft(limit?.untilMs ?? null, clearLimit);
-  // eslint-disable-next-line react-hooks/purity -- intentional read of the clock at render for the countdown; refactor deferred
-  const locked = limit !== null && limit.untilMs !== null && limit.untilMs > Date.now() ? "Send unlocks when the countdown ends" : null;
+  const locked = secondsLeft > 0 ? "Send unlocks when the countdown ends" : null;
   const inflight = useRef<AbortController | null>(null);
   const messageRef = useRef<HTMLTextAreaElement | null>(null);
   const pinRef = useRef<HTMLInputElement | null>(null);
-  const [account, setAccount] = useState("");
   const ownVoice = useVoice(voiceOverride === undefined ? sessionId : null, store);
   const vc = voiceOverride ?? ownVoice;
   const { voice, toggle, available } = vc;
@@ -220,17 +226,12 @@ export function ConsoleShell({
     return summary.state === "running" ? summary.text : null;
   });
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [pickedTurnId, setPickedTurnId] = useState<string | null>(null);
   const inspectorRef = useRef<HTMLButtonElement | null>(null);
   const returnFocus = useRef(false);
   const drawerId = useId();
 
   useEffect(() => () => inflight.current?.abort(), []);
   useEffect(() => () => inflight.current?.abort(), [sessionId]);
-  // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
-  useEffect(() => setAccount(""), [sessionId]);
-  // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
-  useEffect(() => setPickedTurnId(null), [sessionId]);
 
   /**
    * What: closes the drawer and returns focus to the Inspector button.

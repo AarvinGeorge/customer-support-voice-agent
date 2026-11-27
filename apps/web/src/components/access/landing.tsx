@@ -32,6 +32,22 @@ import { PersonaList } from "./persona-list";
 type View = { kind: "checking" } | { kind: "gate" } | { kind: "personas"; personas: Persona[] } | { kind: "unreachable" };
 
 /**
+ * What: asks the agent for the personas and turns the outcome into a View; a 401 means the gate.
+ * Use when: on mount and after a granted code.
+ * Inputs: none.
+ * Output: a Promise of the View (never rejects).
+ * Side effects: network request.
+ * Role: data load shared by the mount effect and onGranted.
+ */
+async function resolveView(): Promise<View> {
+  try {
+    return { kind: "personas", personas: await listPersonas() };
+  } catch (err) {
+    return err instanceof ApiError && err.status === 401 ? { kind: "gate" } : { kind: "unreachable" };
+  }
+}
+
+/**
  * What: the landing component.
  * Use when: rendered by app/page.tsx.
  * Inputs: none.
@@ -59,18 +75,20 @@ export function Landing() {
    * Role: access probe and data load in one call.
    */
   const load = useCallback(async () => {
-    try {
-      const personas = await listPersonas();
-      setView({ kind: "personas", personas });
-    } catch (err) {
-      setView(err instanceof ApiError && err.status === 401 ? { kind: "gate" } : { kind: "unreachable" });
-    }
+    setView(await resolveView());
   }, []);
 
+  // Fetching on mount belongs in an effect; the ignore flag drops a stale answer (react.dev,
+  // "You Might Not Need an Effect": Fetching data).
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional state sync or reset in an effect; refactor deferred (no behaviour change in the lint pass)
-    void load();
-  }, [load]);
+    let ignore = false;
+    void resolveView().then((next) => {
+      if (!ignore) setView(next);
+    });
+    return () => {
+      ignore = true;
+    };
+  }, []);
 
   // After a granted code the gate unmounts; move focus to the list heading so keyboard and
   // screen-reader users land on the new content (review PR #8 I-2). Not on a cold load.

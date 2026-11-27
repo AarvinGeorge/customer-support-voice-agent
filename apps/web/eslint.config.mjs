@@ -9,5 +9,12 @@ import nextTs from "eslint-config-next/typescript";
 export default defineConfig([
   ...nextVitals,
   ...nextTs,
+  {
+    // A leading underscore marks a parameter that is required by a signature (a fetch stand-in's
+    // `_url, _init`) but deliberately unused; this is the TypeScript-ESLint convention.
+    rules: {
+      "@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
+    },
+  },
   globalIgnores([".next/**", "node_modules/**", "next-env.d.ts", "coverage/**"]),
 ]);
