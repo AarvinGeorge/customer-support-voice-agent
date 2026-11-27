@@ -14,36 +14,135 @@
  *   in words too.
  */
 import { CircleAlert, Clock, Copy, ExternalLink, FileText, LifeBuoy, RefreshCw, Repeat2, RotateCcw } from "lucide-react";
-import { useId, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { Streamdown } from "streamdown";
 
 import { Button } from "@/components/ui/button";
-import type { AnswerState, CitationView, DeclineNote, ErrorRow, FallbackNotice, TicketChipView } from "@/lib/turns/furniture";
+import { safeHref, type AnswerState, type CitationView, type DeclineNote, type ErrorRow, type FallbackNotice, type TicketChipView } from "@/lib/turns/furniture";
 import { cn } from "@/lib/utils";
 
 /**
- * What: a hint that shows above or below its trigger on hover and on keyboard focus, and is
- *   always in the DOM so the trigger can point at it with aria-describedby.
- * Use when: ticket chip, citation hover card, fallback badge.
- * Inputs: { id, className, children }.
- * Output: a role="tooltip" element, hidden until its group is hovered or holds focus.
+ * What: the open state of one hint: opens on hover or focus of its group, stays open while the
+ *   pointer is on the hint itself, closes on Escape until the pointer or focus leaves and comes
+ *   back, and shifts the open hint left so it ends inside the viewport.
+ * Use when: every Hint (ticket chip, citation card, fallback badge).
+ * Inputs: none.
+ * Output: { open, group, hintRef, shift }: spread group on the wrapper, pass hintRef and shift
+ *   to Hint.
+ * Side effects: a document keydown listener while open; one layout read when it opens.
+ * Role: WCAG 1.4.13 (dismissible, hoverable, persistent) and 1.4.10 (no sideways scroll at
+ *   320 px) for the one popover pattern.
+ */
+function useHint() {
+  const [hover, setHover] = useState(false);
+  const [focus, setFocus] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const [shift, setShift] = useState(0);
+  const hintRef = useRef<HTMLSpanElement>(null);
+  const open = (hover || focus) && !dismissed;
+
+  useEffect(() => {
+    if (!open) return;
+    /**
+     * What: closes the hint on Escape.
+     * Use when: a key goes down anywhere while the hint is open.
+     * Inputs: the keyboard event.
+     * Output: none.
+     * Side effects: sets dismissed.
+     * Role: handler (1.4.13 dismissible without moving pointer or focus).
+     */
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDismissed(true);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  useLayoutEffect(() => {
+    const el = hintRef.current;
+    if (!open || el === null) {
+      setShift(0);
+      return;
+    }
+    const over = el.getBoundingClientRect().right - (window.innerWidth - 16);
+    setShift(over > 0 ? Math.ceil(over) : 0);
+  }, [open]);
+
+  const group = {
+    onMouseEnter: () => {
+      setDismissed(false);
+      setHover(true);
+    },
+    onMouseLeave: () => setHover(false),
+    onFocus: () => {
+      setDismissed(false);
+      setFocus(true);
+    },
+    onBlur: () => setFocus(false),
+    onKeyDown: (e: ReactKeyboardEvent) => {
+      if (e.key === "Escape" && open) setDismissed(true);
+    },
+  };
+  return { open, group, hintRef, shift };
+}
+
+/**
+ * What: a hint under its trigger, shown while open; always in the DOM (display none when closed)
+ *   so the trigger can point at it with aria-describedby.
+ * Use when: ticket chip, citation hover card, fallback badge (with useHint).
+ * Inputs: { id, open, hintRef, shift, className, children }.
+ * Output: a role="tooltip" element with data-open.
  * Side effects: none.
  * Role: one popover pattern, no portal and no modal (DESIGN.md: no modals first; flat surfaces).
+ *   The top padding (not a margin) bridges the gap so the pointer can move onto the hint.
  */
-function Hint({ id, className, children }: { id: string; className?: string; children: ReactNode }) {
+function Hint({
+  id,
+  open,
+  hintRef,
+  shift,
+  className,
+  children,
+}: {
+  id: string;
+  open: boolean;
+  hintRef: RefObject<HTMLSpanElement | null>;
+  shift: number;
+  className?: string;
+  children: ReactNode;
+}) {
   return (
     <span
       id={id}
+      ref={hintRef}
       role="tooltip"
-      className={cn(
-        "pointer-events-none invisible absolute top-full left-0 z-20 mt-2 opacity-0 transition-opacity duration-150 ease-out-expo group-focus-within:visible group-focus-within:opacity-100 group-hover:visible group-hover:opacity-100",
-        className,
-      )}
+      data-open={open ? "true" : "false"}
+      style={shift > 0 ? { transform: `translateX(-${shift}px)` } : undefined}
+      className={cn("absolute top-full left-0 z-20 pt-2", open ? "block motion-safe:animate-in motion-safe:fade-in-0" : "hidden", className)}
     >
       {children}
     </span>
   );
 }
+
+/**
+ * What: scroll margins that keep a focused chip clear of the sticky header and input bar.
+ * Use when: any focusable chip in the log.
+ * Inputs: none.
+ * Output: a class string.
+ * Side effects: none.
+ * Role: WCAG 2.4.11 focus not obscured (the html scroll padding does the same for every control).
+ */
+const CLEAR = "scroll-mt-[var(--header-clearance)] scroll-mb-[var(--input-bar-clearance)]";
 
 /**
  * What: the dark tooltip surface (ink on paper) from the Figma tooltips.
@@ -53,7 +152,7 @@ function Hint({ id, className, children }: { id: string; className?: string; chi
  * Side effects: none.
  * Role: style constant.
  */
-const TOOLTIP = "flex w-max max-w-[min(30rem,85vw)] flex-col gap-0.5 rounded-[8px] bg-ink px-3 py-2 text-caption text-paper";
+const TOOLTIP = "flex w-max max-w-[min(30rem,calc(100vw-2rem))] flex-col gap-0.5 rounded-[8px] bg-ink px-3 py-2 text-caption text-paper";
 
 /**
  * What: the pill chip surface (raised, Rule border) shared by ticket, citation and badge chips.
@@ -63,19 +162,32 @@ const TOOLTIP = "flex w-max max-w-[min(30rem,85vw)] flex-col gap-0.5 rounded-[8p
  * Side effects: none.
  * Role: style constant (Figma chips: 10px by 4px, pill, Label Small).
  */
-const CHIP =
-  "inline-flex max-w-full items-center gap-1.5 rounded-full border bg-raised px-2.5 py-1 text-label-sm outline-none transition-colors duration-150 ease-out-expo focus-visible:ring-2 focus-visible:ring-ring";
+const CHIP = `inline-flex max-w-full items-center gap-1.5 rounded-full border bg-raised px-2.5 py-1 text-label-sm outline-none transition-colors duration-150 ease-out-expo focus-visible:ring-2 focus-visible:ring-ring ${CLEAR}`;
 
 /**
- * What: the answer text as markdown (headings, lists, emphasis, links), streamed or settled.
+ * What: the answer text as markdown (paragraphs, lists, emphasis, links, inline code), streamed
+ *   or settled.
  * Use when: an assistant turn has text.
  * Inputs: { text, streaming }.
- * Output: Streamdown output in Body type; links open in a new tab with rel noopener noreferrer.
- * Side effects: none.
- * Role: markdown renderer (doc 07 s6.2 FinalAnswer.text "markdown allowed"); Streamdown keeps its
- *   default sanitize and harden plugins because model text is untrusted; no code or diagram
- *   plugins, no table controls.
+ * Output: Streamdown output in Body type; only http(s) links are live (new tab, rel noopener
+ *   noreferrer); other links render as their text; images never render.
+ * Side effects: none (no element can fetch a remote resource).
+ * Role: markdown renderer (doc 07 s6.2 FinalAnswer.text "markdown allowed"). Model text is
+ *   untrusted: Streamdown keeps its sanitize and harden plugins, every other element is unwrapped
+ *   to its text (MARKDOWN_ELEMENTS), and img maps to nothing, so a prompt-injected answer cannot
+ *   load a tracking image or link to mailto, tel, same-origin or other schemes.
  */
+/**
+ * What: the only elements model markdown may produce; anything else keeps its text only.
+ * Use when: AnswerMarkdown (allowedElements with unwrapDisallowed).
+ * Inputs: none.
+ * Output: a tag list.
+ * Side effects: none.
+ * Role: allow list (review PR #29 I1 and M6: no images, media, headings, tables or raw HTML
+ *   widgets in a support answer).
+ */
+const MARKDOWN_ELEMENTS = ["p", "br", "ul", "ol", "li", "strong", "em", "del", "code", "a", "span"] as const;
+
 export function AnswerMarkdown({ text, streaming }: { text: string; streaming: boolean }) {
   return (
     <div className="answer-markdown max-w-[70ch] text-body text-ink">
@@ -84,13 +196,20 @@ export function AnswerMarkdown({ text, streaming }: { text: string; streaming: b
         parseIncompleteMarkdown={streaming}
         controls={false}
         linkSafety={{ enabled: false }}
+        allowedElements={MARKDOWN_ELEMENTS}
+        unwrapDisallowed
         components={{
+          img: () => null,
           strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-          a: ({ href, children }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer" className="text-ink underline decoration-rule underline-offset-2 hover:decoration-ink">
-              {children}
-            </a>
-          ),
+          a: ({ href, children }) => {
+            const safe = typeof href === "string" ? safeHref(href) : null;
+            if (safe === null) return <span>{children}</span>;
+            return (
+              <a href={safe} target="_blank" rel="noopener noreferrer" className="text-ink underline decoration-rule underline-offset-2 hover:decoration-ink">
+                {children}
+              </a>
+            );
+          },
         }}
       >
         {text}
@@ -177,6 +296,7 @@ export function TurnErrorRow({ row, onRetry }: { row: ErrorRow; onRetry?: () => 
  */
 export function TicketChip({ chip }: { chip: TicketChipView }) {
   const id = useId();
+  const hint = useHint();
   const [copied, setCopied] = useState(false);
   /**
    * What: copies the full ticket id.
@@ -196,13 +316,13 @@ export function TicketChip({ chip }: { chip: TicketChipView }) {
       .catch(() => undefined);
   };
   return (
-    <span className="group relative inline-flex">
+    <span className="relative inline-flex" {...hint.group}>
       <button type="button" aria-describedby={id} onClick={copy} className={cn(CHIP, "border-rule hover:border-muted")}>
         <LifeBuoy aria-hidden className="size-3.5 shrink-0 text-ink" />
         <span className="text-ink">{chip.label}</span>
         <span className="text-muted">· {chip.meta}</span>
       </button>
-      <Hint id={id}>
+      <Hint id={id} open={hint.open} hintRef={hint.hintRef} shift={hint.shift}>
         <span className={TOOLTIP}>
           <span className="font-mono text-mono font-medium">{chip.ticketId}</span>
           <span className="inline-flex items-center gap-1">
@@ -278,6 +398,7 @@ export function DeclineNoteBlock({ note, action }: { note: DeclineNote; action: 
  */
 function CitationChip({ view }: { view: CitationView }) {
   const id = useId();
+  const hint = useHint();
   const inner = (
     <>
       <FileText aria-hidden className="size-3.5 shrink-0 text-ink" />
@@ -286,7 +407,7 @@ function CitationChip({ view }: { view: CitationView }) {
     </>
   );
   return (
-    <span className="group relative inline-flex max-w-full">
+    <span className="relative inline-flex max-w-full" {...hint.group}>
       {view.href ? (
         <a
           href={view.href}
@@ -299,12 +420,12 @@ function CitationChip({ view }: { view: CitationView }) {
           <span className="sr-only">(opens in a new tab)</span>
         </a>
       ) : (
-        <span tabIndex={0} aria-describedby={id} className={cn(CHIP, "border-rule")}>
+        <span tabIndex={0} role="note" aria-describedby={id} className={cn(CHIP, "border-rule")}>
           {inner}
         </span>
       )}
-      <Hint id={id}>
-        <span className="flex w-[min(25rem,85vw)] flex-col gap-2 rounded-[12px] border border-rule bg-raised p-4">
+      <Hint id={id} open={hint.open} hintRef={hint.hintRef} shift={hint.shift}>
+        <span className="flex w-[min(25rem,calc(100vw-2rem))] flex-col gap-2 rounded-[12px] border border-rule bg-raised p-4">
           <span className="text-label text-ink">{view.heading}</span>
           <span className="text-body-sm text-ink">&ldquo;{view.excerpt}&rdquo;</span>
           <span className="truncate font-mono text-mono-sm text-muted">{view.urlText}</span>
@@ -346,13 +467,14 @@ export function SourcesRow({ views }: { views: readonly CitationView[] }) {
  */
 export function FallbackBadge({ notice }: { notice: FallbackNotice }) {
   const id = useId();
+  const hint = useHint();
   return (
-    <span className="group relative inline-flex">
+    <span className="relative inline-flex" {...hint.group}>
       <button type="button" aria-describedby={id} className={cn(CHIP, "border-warning text-warning")}>
         <Repeat2 aria-hidden className="size-3.5 shrink-0" />
         <span>{notice.label}</span>
       </button>
-      <Hint id={id}>
+      <Hint id={id} open={hint.open} hintRef={hint.hintRef} shift={hint.shift}>
         <span className={TOOLTIP}>
           <span className="font-medium">{notice.title}</span>
           <span>{notice.body}</span>

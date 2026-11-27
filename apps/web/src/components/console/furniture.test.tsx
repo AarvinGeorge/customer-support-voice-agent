@@ -135,6 +135,14 @@ describe("answer states", () => {
     await vi.waitFor(() => expect(calls).toEqual(["What changed on my invoice?"]));
   });
 
+  it("offers Retry on the latest turn only, so an old error cannot resend out of order", () => {
+    const deadline = edge.filter((e) => e.turn_id.endsWith("e3"));
+    const later = s1.filter((e) => e.turn_id === s1[0]?.turn_id);
+    render(<ConsoleShell sessionId="s" store={replayed([...deadline, ...later], ["What changed on my invoice?", "How do I add a seat?"])} />);
+    expect(screen.getByText("I couldn't finish that in time.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
   it("a non-retryable error has no Retry", () => {
     const deadline = edge.filter((e) => e.turn_id.endsWith("e3")).map((e) => (e.type === "error" ? { ...e, retryable: false } : e));
     render(<ConsoleShell sessionId="s" store={replayed(deadline, ["What changed?"])} />);
@@ -169,9 +177,11 @@ describe("input bar limit and placeholder", () => {
     const box = screen.getByRole("textbox", { name: "Message" });
     fireEvent.change(box, { target: { value: "a".repeat(1800) } });
     expect(screen.getByText("1,800 / 2,000")).toBeTruthy();
+    expect(screen.getByText("1,800 / 2,000").closest("p")?.getAttribute("aria-live")).toBeNull();
     fireEvent.change(box, { target: { value: "a".repeat(2001) } });
     expect(screen.getByText("2,001 / 2,000")).toBeTruthy();
     expect(screen.getByText(/Shorten your message to send/)).toBeTruthy();
+    expect(screen.getByText("2,001 / 2,000").closest("p")?.getAttribute("aria-live")).toBe("polite");
     fireEvent.keyDown(box, { key: "Enter" });
     expect(onSend).not.toHaveBeenCalled();
   });

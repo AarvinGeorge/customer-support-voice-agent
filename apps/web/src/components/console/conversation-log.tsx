@@ -265,7 +265,8 @@ function SendError({ item, onRetry }: { item: Extract<ThreadItem, { kind: "error
  * What: the conversation log component.
  * Use when: see module.
  * Inputs: { thread, conversation } from the turn store, the card actions, onRetry for send error
- *   rows, onResend for a retryable error inside a turn (sends the customer's chat text again).
+ *   rows, onResend for a retryable error inside the latest turn only (sends the customer's chat
+ *   text again; an older error never resends out of order).
  * Output: JSX.
  * Side effects: none.
  * Role: see module.
@@ -304,7 +305,8 @@ export function ConversationLog({
         const turn = turns[item.turnId];
         const prev = thread[i - 1];
         const typed = prev?.kind === "user" && prev.mode === "chat" ? prev.text : null;
-        const resend = typed !== null && onResend !== undefined ? () => onResend(typed) : undefined;
+        const latest = i === thread.length - 1;
+        const resend = latest && typed !== null && onResend !== undefined ? () => onResend(typed) : undefined;
         return turn ? (
           <AssistantMessage key={item.id} turn={turn} conversation={conversation} index={index} cards={cards} onResend={resend} />
         ) : null;

@@ -229,13 +229,13 @@ export interface CitationView {
 
 /**
  * What: a citation url as a link target, only for http and https.
- * Use when: building a CitationView.
+ * Use when: building a CitationView; the markdown link renderer.
  * Inputs: the url string from the agent.
  * Output: the normalized href, or null.
  * Side effects: none.
  * Role: guard (help article text and its urls are untrusted, L1 s10).
  */
-function safeHref(url: string): string | null {
+export function safeHref(url: string): string | null {
   try {
     const u = new URL(url);
     return u.protocol === "https:" || u.protocol === "http:" ? u.href : null;

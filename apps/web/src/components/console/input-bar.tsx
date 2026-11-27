@@ -122,7 +122,7 @@ export function InputBar({ onSend, busy, disabled, placeholder, inputRef }: Inpu
         </button>
       </div>
       {limit.show ? (
-        <p id={counterId} aria-live="polite" className={cn("text-center text-caption", limit.over ? "text-error" : "text-muted")}>
+        <p id={counterId} aria-live={limit.over ? "polite" : undefined} className={cn("text-center text-caption", limit.over ? "text-error" : "text-muted")}>
           <span className="font-mono tabular">{limit.text}</span>
           <span>{limit.over ? " characters. Shorten your message to send." : " characters"}</span>
         </p>
