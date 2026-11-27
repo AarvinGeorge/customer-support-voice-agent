@@ -1,14 +1,16 @@
-"""What: ticket create (verified merge, daily and per-session limits), the low-level ticket insert, the stage
+"""What: ticket create (requester check, merge, daily limit), the low-level ticket insert, the stage
 `transition()` and the pure policy helpers (priority, queue, target label, id format, transition table).
-Use when: POST /v1/tickets runs, or another core path (verify lockout, past-due decline, refund submit, operator
-approve) needs a ticket row or a stage change.
+Use when: POST /v1/tickets runs, or another core path (past-due decline, refund submit, operator approve) needs a
+ticket row or a stage change.
 Inputs: a connection inside the caller's transaction, PolicyConfig, the injected clock, ids and a TicketCreate.
 Output: TicketOutcome (a TicketRef plus merged and created flags), TicketRef from insert_ticket and transition.
 Side effects: INSERT and UPDATE on tickets, INSERT on ticket_events and audit_events, a transaction advisory lock per
-account (verified) or per session (unverified).
-Role: doc 07 s3.4 and s7.2, L1 s5 A3. Queue, priority and target label come from policy.yaml; the account tier is read
-from the accounts table, never from the caller. Every change writes a ticket event and an audit row in the same
-transaction as the change."""
+account.
+Role: doc 07 s3.4 and s7.2, L1 s5 A3, D-070. Every ticket has a known requester: the user and account come from the
+session claim, never from the request body; a session without valid claims gets the typed refusal REQUESTER_UNKNOWN
+(the CHECK tickets_requester_known backs this in the schema). Queue, priority and target label come from policy.yaml;
+the account tier is read from the accounts table, never from the caller. Every change writes a ticket event and an
+audit row in the same transaction as the change."""
 from __future__ import annotations
 
 import secrets
@@ -50,24 +52,21 @@ class TicketOutcome:
 
 
 @dataclass(frozen=True)
-class Caller:
-    """What: who a session is for ticket purposes. Use when: create_ticket decides verified or not.
-    Inputs: verified flag, user id, account id, tier. Output: frozen value. Side effects: none.
-    Role: unverified callers carry no account, user or tier (never linked to a claimed account)."""
+class Requester:
+    """What: the verified person a ticket is for. Use when: create_ticket has checked the session claim.
+    Inputs: user id, account id, account tier. Output: frozen value. Side effects: none.
+    Role: D-070; built only from session_claims, so a request body can never name the requester."""
 
-    verified: bool
-    user_id: str | None = None
-    account_id: str | None = None
-    tier: Tier | None = None
+    user_id: str
+    account_id: str
+    tier: Tier
 
 
-def priority_for(policy: PolicyConfig, *, tier: Tier | None, verified: bool, blocking: bool) -> Priority:
-    """What: the ticket priority. Use when: inserting a ticket. Inputs: policy, account tier, verified flag, the
-    blocking flag. Output: P1 to P4. Side effects: none. Role: unverified is always P4; Enterprise blocking is the
-    policy's blocking priority (P1); otherwise priority_by_tier (L1 s5 A3)."""
+def priority_for(policy: PolicyConfig, *, tier: Tier, blocking: bool) -> Priority:
+    """What: the ticket priority. Use when: inserting a ticket. Inputs: policy, account tier, the blocking flag.
+    Output: P1 to P4. Side effects: none. Role: Enterprise blocking is the policy's blocking priority (P1); otherwise
+    priority_by_tier (L1 s5 A3)."""
     cfg = policy.tickets
-    if not verified or tier is None:
-        return cfg.priority_by_tier["unverified"]
     if tier == "enterprise" and blocking:
         return cfg.enterprise_blocking_priority
     return cfg.priority_by_tier[tier]
@@ -80,7 +79,7 @@ def queue_for(policy: PolicyConfig, category: str) -> Queue:
     return policy.tickets.category_queue[category]  # pyright: ignore[reportArgumentType]
 
 
-def target_label_for(policy: PolicyConfig, priority: str, tier: Tier | None) -> str:
+def target_label_for(policy: PolicyConfig, priority: str, tier: Tier) -> str:
     """What: the first-response target label (text only, no timer). Use when: inserting a ticket.
     Inputs: policy, priority, account tier. Output: e.g. "4 hours". Side effects: none.
     Role: L1 s5 A3; P2 reads the Enterprise label for Enterprise accounts and the standard one otherwise."""
@@ -125,19 +124,21 @@ def _event(conn: Any, ticket_id: str, kind: str, *, actor: str, actor_id: str | 
                  "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", (ticket_id, kind, from_stage, to_stage, actor, actor_id, body, at))
 
 
-def load_caller(conn: Any, session_id: uuid.UUID | str, now: datetime) -> Caller:
-    """What: read the session's claims and the account tier. Use when: create_ticket starts. Inputs: connection,
-    session id, now. Output: Caller; verified only if the claims name a user and have not expired.
-    Side effects: one SELECT. Role: a locked, failed or expired session is unverified."""
-    row = conn.execute("SELECT c.user_id, c.account_id, c.expires_at, a.tier FROM session_claims c "
+def load_requester(conn: Any, session_id: uuid.UUID | str, now: datetime) -> Requester:
+    """What: the session claim's user, account and tier, or the typed refusal. Use when: create_ticket starts.
+    Inputs: connection, session id, now. Output: Requester when the claims name a user and have not expired.
+    Side effects: one SELECT. Raises CoreError REQUESTER_UNKNOWN (details reason requester_unknown, verify_locked) for
+    no claims, failed, locked or expired claims. Role: D-070; verify_locked lets the agent pick the no-ticket line."""
+    row = conn.execute("SELECT c.user_id, c.account_id, c.expires_at, a.tier, c.verify_locked FROM session_claims c "
                        "LEFT JOIN accounts a ON a.id = c.account_id WHERE c.session_id = %s", (session_id,)).fetchone()
-    if row and row[0] and row[1] and row[2] and row[2] > now:
-        return Caller(True, row[0], row[1], row[3])
-    return Caller(False)
+    if row and row[0] and row[1] and row[2] and row[2] > now and row[3]:
+        return Requester(row[0], row[1], row[3])
+    raise CoreError("REQUESTER_UNKNOWN", "A ticket needs a verified customer, so our team knows who to follow up with.",
+                    details={"reason": "requester_unknown", "verify_locked": bool(row and row[4])})
 
 
 def insert_ticket(conn: Any, *, policy: PolicyConfig, clock: Clock, session_id: uuid.UUID | str,
-                  account_id: str | None, user_id: str | None, tier: Tier | None, stage: Literal["open", "pending_approval"],
+                  account_id: str, user_id: str, tier: Tier, stage: Literal["open", "pending_approval"],
                   queue: Queue, category: str, summary: str, origin: Literal["model", "code", "core"], actor: Actor,
                   actor_id: str | None, blocking: bool = False, steps_tried: Sequence[str] = (),
                   confidence: float | None = None, transcript_ref: str | None = None,
@@ -145,17 +146,17 @@ def insert_ticket(conn: Any, *, policy: PolicyConfig, clock: Clock, session_id: 
                   rng: Callable[[int], int] | None = None, trace_id: str | None = None, mode: str | None = None,
                   idempotency_key: str | None = None) -> TicketRef:
     """What: insert one ticket row with a fresh id, its created event and an audit row, retrying an id clash.
-    Use when: create_ticket makes an Open ticket, or core makes a lockout, past-due or Pending approval ticket (that
-    caller bypasses the limits on purpose). Inputs: connection, policy, clock, session, account and user (both None for
-    unverified), account tier, stage (open or pending_approval), queue, category, summary, origin, actor, optional
+    Use when: create_ticket makes an Open ticket, or core makes a past-due or Pending approval ticket (that caller
+    bypasses the limits on purpose). Inputs: connection, policy, clock, session, the requester's account and user
+    (D-070: always known; the CHECK tickets_requester_known refuses a row without them), account tier, stage (open or pending_approval), queue, category, summary, origin, actor, optional
     blocking, steps, confidence, transcript ref, escalation reason, pending action id (required for pending_approval),
     rng, trace id, mode, idempotency key. Output: TicketRef. Side effects: three INSERTs.
     Role: the one writer of tickets rows; priority and target label are computed here from policy. It takes no
     account lock and never merges: a caller that makes an Open ticket (past-due follow-up) must take the account
     lock `tickets:<account_id>` and merge by category itself; Pending approval tickets are exempt (one per action)."""
-    verified = account_id is not None
-    priority = priority_for(policy, tier=tier, verified=verified, blocking=blocking)
-    label = target_label_for(policy, priority, tier if verified else None)
+    verified = True  # D-070: every ticket has a verified requester (column kept for the TicketRef wire field)
+    priority = priority_for(policy, tier=tier, blocking=blocking)
+    label = target_label_for(policy, priority, tier)
     now = clock.now()
     columns = ("id, session_id, verified, account_id, user_id, stage, queue, category, priority, target_label, summary, "
                "steps_tried, confidence, transcript_ref, origin, escalation_reason, pending_action_id, created_at, "
@@ -182,63 +183,56 @@ def insert_ticket(conn: Any, *, policy: PolicyConfig, clock: Clock, session_id: 
                      priority=priority, queue=queue, target_label=label, verified=verified)
 
 
-def _limit_error(conn: Any, where: str, args: tuple[Any, ...], verified: bool) -> CoreError:
-    """What: build the 429 TICKET_LIMIT_REACHED error with `existing`. Use when: a count reaches its limit.
-    Inputs: connection, a WHERE clause over tickets, its args, verified flag. Output: CoreError (not raised).
+def _limit_error(conn: Any, where: str, args: tuple[Any, ...]) -> CoreError:
+    """What: build the 429 TICKET_LIMIT_REACHED error with `existing`. Use when: the daily count reaches its limit.
+    Inputs: connection, a WHERE clause over tickets, its args. Output: CoreError (not raised).
     Side effects: one SELECT. Role: `existing` is the newest ticket in the counted set, so the agent can say
     "you already have ticket ending 8213"."""
     row = conn.execute(f"SELECT {_REF_COLS} FROM tickets WHERE {where} ORDER BY created_at DESC, id DESC LIMIT 1",
                        args).fetchone()
-    message = ("This account has reached today's limit for support tickets." if verified
-               else "This chat has already opened the maximum number of support tickets.")
-    return CoreError("TICKET_LIMIT_REACHED", message,
+    return CoreError("TICKET_LIMIT_REACHED", "This account has reached today's limit for support tickets.",
                      details={"existing": _ref(row).model_dump(mode="json") if row else None})
 
 
 def create_ticket(conn: Any, *, policy: PolicyConfig, clock: Clock, session_id: uuid.UUID | str, body: TicketCreate,
                   actor: Actor = "agent", rng: Callable[[int], int] | None = None, trace_id: str | None = None,
                   mode: str | None = None, idempotency_key: str | None = None) -> TicketOutcome:
-    """What: create a ticket for a session, or merge into the account's open ticket of the same category.
-    Use when: POST /v1/tickets (the model tool and agent code escalations). Inputs: connection (inside the request
-    transaction), policy, clock, session id, TicketCreate, actor, optional rng, trace id, mode, idempotency key.
-    Output: TicketOutcome. Side effects: an advisory lock (account or session), INSERTs or one merge event, audit row.
-    Raises CoreError TICKET_LIMIT_REACHED (details.existing) at the per-account daily limit (verified) or the
-    per-session limit (unverified). Role: doc 07 s3.4. Verified: merge first (a merge makes no ticket, so it is never
-    limited), then the daily limit counts every ticket of the account created on the business date, then insert.
-    Unverified: always P4, never linked to an account, never merged, limited per session."""
-    caller = load_caller(conn, session_id, clock.now())
-    limits = policy.tickets.limits
-    if caller.verified:
-        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"tickets:{caller.account_id}",))
-        open_row = conn.execute(
-            "SELECT id FROM tickets WHERE account_id = %s AND category = %s AND stage = 'open' "
-            "ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE", (caller.account_id, body.category)).fetchone()
-        if open_row:
-            tid = open_row[0]
-            now = clock.now()
-            _event(conn, tid, "merged", actor=actor, actor_id=caller.user_id, at=now, body=body.summary)
-            conn.execute("UPDATE tickets SET updated_at = %s WHERE id = %s", (now, tid))
-            write_audit(conn, AuditEvent(
-                event="ticket_merge", actor=actor, trace_id=trace_id, session_id=uuid.UUID(str(session_id)), mode=mode,
-                actor_id=caller.user_id, account_id=caller.account_id, ticket_id=tid,
-                policy_version=policy.policy_version, args={"category": body.category, "origin": body.origin},
-                idempotency_key=idempotency_key), clock=clock)
-            ref = _ref(conn.execute(f"SELECT {_REF_COLS} FROM tickets WHERE id = %s", (tid,)).fetchone())
-            return TicketOutcome(ref, merged=True, created=False)
-        # doc 07 s8.1: approvals (every approval ticket has a pending action) and merges are not counted
-        where, args = ("account_id = %s AND created_date = %s AND pending_action_id IS NULL",
-                       (caller.account_id, clock.today()))
-        cap = limits.verified_per_account_per_day
-    else:
-        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"tickets:session:{session_id}",))
-        where, args = "session_id = %s AND verified = false", (session_id,)
-        cap = limits.unverified_per_session
-    if conn.execute(f"SELECT count(*) FROM tickets WHERE {where}", args).fetchone()[0] >= cap:
-        raise _limit_error(conn, where, args, caller.verified)
+    """What: create a ticket for the session's verified requester, or merge into the account's open ticket of the
+    same category. Use when: POST /v1/tickets (the model tool and agent code escalations). Inputs: connection (inside
+    the request transaction), policy, clock, session id, TicketCreate (it has no user or account field), actor,
+    optional rng, trace id, mode, idempotency key. Output: TicketOutcome.
+    Side effects: an account advisory lock, INSERTs or one merge event, audit row.
+    Raises CoreError REQUESTER_UNKNOWN (403) when the session has no valid claim, TICKET_LIMIT_REACHED
+    (details.existing) at the per-account daily limit. Role: doc 07 s3.4 and D-070: requester check first, then merge
+    (a merge makes no ticket, so it is never limited), then the daily limit counts every ticket of the account
+    created on the business date, then insert."""
+    who = load_requester(conn, session_id, clock.now())
+    conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"tickets:{who.account_id}",))
+    open_row = conn.execute(
+        "SELECT id FROM tickets WHERE account_id = %s AND category = %s AND stage = 'open' "
+        "ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE", (who.account_id, body.category)).fetchone()
+    if open_row:
+        tid = open_row[0]
+        now = clock.now()
+        _event(conn, tid, "merged", actor=actor, actor_id=who.user_id, at=now, body=body.summary)
+        conn.execute("UPDATE tickets SET updated_at = %s WHERE id = %s", (now, tid))
+        write_audit(conn, AuditEvent(
+            event="ticket_merge", actor=actor, trace_id=trace_id, session_id=uuid.UUID(str(session_id)), mode=mode,
+            actor_id=who.user_id, account_id=who.account_id, ticket_id=tid,
+            policy_version=policy.policy_version, args={"category": body.category, "origin": body.origin},
+            idempotency_key=idempotency_key), clock=clock)
+        ref = _ref(conn.execute(f"SELECT {_REF_COLS} FROM tickets WHERE id = %s", (tid,)).fetchone())
+        return TicketOutcome(ref, merged=True, created=False)
+    # doc 07 s8.1: approvals (every approval ticket has a pending action) and merges are not counted
+    where, args = ("account_id = %s AND created_date = %s AND pending_action_id IS NULL",
+                   (who.account_id, clock.today()))
+    if conn.execute(f"SELECT count(*) FROM tickets WHERE {where}", args).fetchone()[0] >= \
+            policy.tickets.limits.verified_per_account_per_day:
+        raise _limit_error(conn, where, args)
     ref = insert_ticket(
-        conn, policy=policy, clock=clock, session_id=session_id, account_id=caller.account_id, user_id=caller.user_id,
-        tier=caller.tier, stage="open", queue=queue_for(policy, body.category), category=body.category,
-        summary=body.summary, origin=body.origin, actor=actor, actor_id=caller.user_id, blocking=body.blocking,
+        conn, policy=policy, clock=clock, session_id=session_id, account_id=who.account_id, user_id=who.user_id,
+        tier=who.tier, stage="open", queue=queue_for(policy, body.category), category=body.category,
+        summary=body.summary, origin=body.origin, actor=actor, actor_id=who.user_id, blocking=body.blocking,
         steps_tried=body.steps_tried, confidence=body.confidence, transcript_ref=body.transcript_ref,
         escalation_reason=body.escalation_reason, rng=rng, trace_id=trace_id, mode=mode, idempotency_key=idempotency_key)
     return TicketOutcome(ref, merged=False, created=True)
@@ -277,16 +271,6 @@ def transition(conn: Any, *, policy: PolicyConfig, clock: Clock, ticket_id: str,
         ticket_id=ticket_id, policy_version=policy.policy_version,
         args={"from_stage": from_stage, "to_stage": to_stage, "outcome": outcome}), clock=clock)
     return _ref(conn.execute(f"SELECT {_REF_COLS} FROM tickets WHERE id = %s", (ticket_id,)).fetchone())
-
-
-def session_lockout_ticket(conn: Any, session_id: uuid.UUID | str) -> TicketRef | None:
-    """What: the newest core-made access ticket of an unverified session (the verify lockout ticket).
-    Use when: a locked session tries to verify again and the answer should name the ticket. Inputs: connection,
-    session id. Output: TicketRef or None. Side effects: one SELECT. Role: lets VERIFY_LOCKED carry the same ticket
-    on every later attempt (doc 07 s3.1 `VERIFY_LOCKED {ticket}`)."""
-    row = conn.execute(f"SELECT {_REF_COLS} FROM tickets WHERE session_id = %s AND verified = false AND origin = 'core' "
-                       "AND category = 'access' ORDER BY created_at DESC, id DESC LIMIT 1", (session_id,)).fetchone()
-    return _ref(row) if row else None
 
 
 REF_COLUMNS = _REF_COLS
