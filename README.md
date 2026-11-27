@@ -287,10 +287,13 @@ Written: see the [Production posture](#production-posture) table. Each item has 
 
 ## Production posture
 
-Built is the thin slice (D-035). The rows below are designed and not built, so each one has a trigger: the observation that would justify the work. "Designed in" points at the contract (07), the architecture (06), the scope (L1) or a decision (D-nnn) that holds the design.
+Built is the thin slice (D-035). The rows below are designed and not built, so each one has a trigger: the observation that would justify the work.
+
+Built ticket posture (D-070): every ticket has a known requester. Core takes the user and account from the session's verified claim, never from the request body, refuses any other request with `403 REQUESTER_UNKNOWN`, and the database CHECK `tickets_requester_known` backs it. When an escalation is needed before the customer has verified, the agent does not open a ticket: it holds the escalation on the session, shows the verification card ("To open a ticket for our team, I need to know who you are first."), and opens the ticket for that person once the card verifies them. While a card is already on screen the escalation does not fire. A locked-out customer, or one who says they do not have their PIN, gets a fixed line pointing to the "How to reach support" help article section and no ticket. `create_ticket` is not offered to the model while unverified. "Designed in" points at the contract (07), the architecture (06), the scope (L1) or a decision (D-nnn) that holds the design.
 
 | Item | Designed in | Trigger |
 |---|---|---|
+| Tickets for customers who cannot verify (forgotten PIN, lockout) | D-070 | A second identity path exists (email link or SSO sign-in), so such a ticket would have a requester our team can follow up |
 | Approvals UI (`/operator` page) | 07 s2.2 operator rows | A real approver queue exists, or a reviewer asks to see the operator step |
 | Ops router and core operator endpoints (login, approvals, approve, reject, resolve, close) | 07 s3.5, s2.2 | Same as the approvals UI |
 | A2 billing email change and step-up PIN | 07 s3.1 step-up, s3.3; L1 s5 A2 | Next build window after the Loom; needed before any account-takeover-sensitive action ships |

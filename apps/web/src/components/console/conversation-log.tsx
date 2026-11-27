@@ -80,6 +80,8 @@ export interface CardActions {
   setAccount: (value: string) => void;
   pinRef: RefObject<HTMLInputElement | null>;
   verify: (body: VerificationInput) => Promise<unknown>;
+  /** The card's "I don't have my PIN" press: TurnRequest.verification {no_pin: true} (D-070). */
+  noPin: () => Promise<unknown>;
   decide: (body: ConfirmInput) => Promise<unknown>;
   /** The Create ticket button after both models were unavailable (doc 07 s6.7). */
   offerTicket: () => Promise<unknown>;
@@ -99,6 +101,7 @@ const NO_ACTIONS: CardActions = Object.freeze({
   setAccount: () => undefined,
   pinRef: { current: null },
   verify: async () => undefined,
+  noPin: async () => undefined,
   decide: async () => undefined,
   offerTicket: async () => undefined,
 });
@@ -308,6 +311,7 @@ function AssistantMessage({
           onAccountChange={cards.setAccount}
           pinRef={cards.pinRef}
           onSubmit={cards.verify}
+          onNoPin={cards.noPin}
         />
       )}
       {turn.confirmation && (

@@ -122,6 +122,9 @@ class TurnControl:
     # Usage by stream_agent_turn so model_calls keeps matching LangSmith's llm run count (doc 07 s2.3).
     gate_calls: list[tuple[str, Any]] = field(default_factory=list)
     ticket: dict[str, Any] | None = None
+    # D-070: core's REQUESTER_UNKNOWN details ({reason, verify_locked}) when it refused this turn's ticket because the
+    # session has no verified requester; the escalation module then holds the escalation instead (agent.escalation).
+    requester_refusal: dict[str, Any] | None = None
     model_node_failed: bool = False  # the agent model node raised (primary and fallback failed or skipped), s6.7
     # Agent model replies cut at max_tokens and discarded (review PR #68 I-1): (model name, usage metadata), so the
     # drawer shows the reason and the turn usage keeps their tokens (each is already one of model_attempts).

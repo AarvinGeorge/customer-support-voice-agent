@@ -2,7 +2,7 @@
 Use when: changing core/identity.py or core/identity_routes.py. Inputs: the Compose Postgres (marker pg).
 Output: pytest results. Side effects: committed rows under random ids, removed with the owner role at teardown
 (audit rows stay: audit_events is append-only by design).
-Role: CS-E-03.S1.T1 Done-when: attempts_left 2, then 1, then 423 with a ticket ref; a second identity in one
+Role: CS-E-03.S1.T1 Done-when: attempts_left 2, then 1, then 423 (no ticket since D-070); a second identity in one
 session gets 409 IDENTITY_CONFLICT. Failures must persist across requests, so these tests commit."""
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ def test_fixture_ids_never_contain_a_fixture_pin():
 
 
 def count_tickets(conn: psycopg.Connection, sid: str) -> int:
-    """What: how many tickets a session has. Use when: asserting the lockout ticket rule. Inputs: connection, session
+    """What: how many tickets a session has. Use when: asserting that a lockout opens no ticket. Inputs: connection, session
     id. Output: int. Side effects: one SELECT. Role: shorthand that keeps the type checker happy."""
     row = conn.execute("SELECT count(*) FROM tickets WHERE session_id=%s::uuid", (sid,)).fetchone()
     return row[0] if row else -1
@@ -131,11 +131,11 @@ def stack(app_url, owner_url, migrated):
         o.execute("DELETE FROM accounts WHERE id = ANY(%s)", ([w.a, w.b],))
 
 
-def test_done_when_attempts_left_2_then_1_then_423_with_ticket(stack):
-    """What: wrong PIN three times gives 401 attempts_left 2, 401 attempts_left 1, then 423 VERIFY_LOCKED with a
-    ticket ref; the ticket is P4, category access, queue technical, with no account link; a fourth try with the right
-    PIN is still 423. Use when: always. Inputs: stack. Output: assertions. Side effects: committed rows.
-    Role: the S1.T1 Done-when over the wire."""
+def test_done_when_attempts_left_2_then_1_then_423_with_no_ticket(stack):
+    """What: wrong PIN three times gives 401 attempts_left 2, 401 attempts_left 1, then 423 VERIFY_LOCKED with
+    details.ticket null and no ticket row for the session (D-070: a ticket needs a known requester, and a locked
+    session has none); a fourth try with the right PIN is still 423. Use when: always. Inputs: stack.
+    Output: assertions. Side effects: committed rows. Role: the S1.T1 Done-when over the wire, amended by D-070."""
     s, sid = stack, stack.new_session()
     r1 = s.verify(sid, s.w.a, "0000")
     assert r1.status_code == 401
@@ -147,14 +147,9 @@ def test_done_when_attempts_left_2_then_1_then_423_with_ticket(stack):
     r3 = s.verify(sid, s.w.a, "2222")
     assert r3.status_code == 423
     e3 = r3.json()["error"]
-    assert e3["code"] == "VERIFY_LOCKED"
-    ticket = e3["details"]["ticket"]
-    assert ticket["ticket_id"].startswith("TCK-26") and ticket["priority"] == "P4" and ticket["verified"] is False
-    assert ticket["queue"] == "technical" and ticket["stage"] == "open"
+    assert e3["code"] == "VERIFY_LOCKED" and e3["details"]["ticket"] is None
     with psycopg.connect(s.app_url) as c:
-        row = c.execute("SELECT category, account_id, user_id, origin, session_id::text FROM tickets WHERE id=%s",
-                        (ticket["ticket_id"],)).fetchone()
-        assert row == ("access", None, None, "core", sid)
+        assert count_tickets(c, sid) == 0
     # still locked with the right PIN, and claims say so
     assert s.verify(sid, s.w.a, "4821").status_code == 423
     c = s.claims(sid).json()
@@ -283,24 +278,6 @@ def test_pin_never_reaches_audit_logs_or_tables(stack, caplog):
     assert attempts == [(s.w.a, "verify", False), (s.w.a, "verify", True)]
 
 
-def test_lockout_ticket_is_skipped_when_the_session_already_has_two_unverified_tickets(stack):
-    """What: with two unverified tickets already open in the session the third failed verify still locks the
-    session (423) but details.ticket is null and no third ticket exists. Use when: always. Inputs: stack.
-    Output: assertions. Side effects: committed rows. Role: doc 07 s3.1 'unless the session already has 2'."""
-    s, sid = stack, stack.new_session()
-    for i in range(2):
-        r = s.client.post("/v1/tickets", json={"category": "bug", "summary": f"x{i}", "origin": "model"},
-                          headers={"Authorization": f"Bearer {TOKENS['agent_tools']}", "X-Session-Id": sid,
-                                   "Idempotency-Key": f"idn-{sid}-{i}"})
-        assert r.status_code == 200, r.text
-    for _ in range(2):
-        s.verify(sid, s.w.a, "0000")
-    r = s.verify(sid, s.w.a, "0000")
-    assert r.status_code == 423 and r.json()["error"]["details"]["ticket"] is None
-    with psycopg.connect(s.app_url) as c:
-        assert count_tickets(c, sid) == 2
-
-
 def test_expired_claims_are_unverified_and_can_be_replaced(stack):
     """What: after the 120 minute lifetime GET claims says verified false, and a new verify (even as another
     person) succeeds instead of 409. Use when: always. Inputs: stack. Output: assertions. Side effects: committed rows.
@@ -345,9 +322,9 @@ def test_pin_check_uses_a_constant_time_compare_for_known_and_unknown_accounts(s
     assert known >= 1 and len(calls) > known
 
 
-def test_concurrent_wrong_pins_lock_once_and_open_one_ticket(stack):
+def test_concurrent_wrong_pins_lock_once_and_open_no_ticket(stack):
     """What: six parallel wrong-PIN requests in one session end with exactly 3 counted failures, the session locked
-    and exactly one lockout ticket. Use when: always. Inputs: stack. Output: assertions. Side effects: committed rows.
+    and no ticket (D-070: a locked session has no requester). Use when: always. Inputs: stack. Output: assertions. Side effects: committed rows.
     Role: the per-session advisory lock (a lost update would let a fourth guess through)."""
     s, sid = stack, stack.new_session()
     with ThreadPoolExecutor(6) as pool:
@@ -356,4 +333,4 @@ def test_concurrent_wrong_pins_lock_once_and_open_one_ticket(stack):
     c = s.claims(sid).json()
     assert c["failed_verifies"] == 3 and c["verify_locked"] is True
     with psycopg.connect(s.app_url) as conn:
-        assert count_tickets(conn, sid) == 1
+        assert count_tickets(conn, sid) == 0

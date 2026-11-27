@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import re
-import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -23,7 +22,7 @@ from fastapi.responses import JSONResponse
 from contracts.errors import CORE_ERROR_CODES
 
 from core.actions import cancel_pending, commit_pending, pending_status, prepare_refund, submit_pending
-from core.audit import AuditEvent, write_audit
+from core.audit import write_refusal
 from core.auth import RequestContext, get_ctx
 from core.db import Database
 from core.errors import CoreError
@@ -71,21 +70,14 @@ def _pending_id(raw: str) -> str:
 
 def _audit_refusal(request: Request, ctx: RequestContext, session_id: str, event: str, pending_id: str | None,
                    exc: CoreError) -> None:
-    """What: write one refusal audit row in its own transaction after the request transaction rolled back.
-    Use when: a prepare, commit, submit or cancel raised a CoreError (the effect and any audit row inside it are gone).
-    Inputs: request, context, session, event name (e.g. action_commit_refused), pending id or None, the error.
-    Output: none. Side effects: one INSERT on audit_events; a failure to write is logged, never raised (the original
-    error must reach the caller). Role: review M2 and D-055 ('an audit row records the refusal')."""
-    try:
-        with _db(request).tx() as conn:
-            write_audit(conn, AuditEvent(
-                event=event, actor="agent", trace_id=ctx.trace_id, session_id=uuid.UUID(session_id), mode=ctx.mode,
-                action_type="refund", pending_action_id=pending_id, decision="error",
-                policy_version=request.app.state.policy.policy_version, args={"code": exc.code},
-                result_status=CORE_ERROR_CODES[exc.code][0], idempotency_key=ctx.idempotency_key),
-                clock=request.app.state.clock)
-    except Exception as audit_exc:  # noqa: BLE001 (the refusal itself must still be returned)
-        log.warning("refusal audit not written event=%s code=%s error=%s", event, exc.code, type(audit_exc).__name__)
+    """What: the refusal audit row for an action route (core.audit.write_refusal, action type refund).
+    Use when: a prepare, commit, submit or cancel raised a CoreError. Inputs: request, context, session, event name,
+    pending id or None, the error. Output: none. Side effects: one INSERT in its own transaction (never raises).
+    Role: adapter from the request to the shared writer."""
+    write_refusal(_db(request), event=event, code=exc.code, status=CORE_ERROR_CODES[exc.code][0],
+                  session_id=session_id, clock=request.app.state.clock,
+                  policy_version=request.app.state.policy.policy_version, trace_id=ctx.trace_id, mode=ctx.mode,
+                  action_type="refund", pending_action_id=pending_id, idempotency_key=ctx.idempotency_key)
 
 
 def refund_prepare(request: Request, body: RefundPrepareRequest) -> JSONResponse:
