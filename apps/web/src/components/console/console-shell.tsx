@@ -8,9 +8,11 @@
  * Output: the full-height console frame.
  * Side effects: sending a message or pressing a card calls store.sendTurn (one network request);
  *   an in-flight turn is aborted on unmount (its turn ends in the failed state, review PR #16 I1).
- *   Closing the drawer returns focus to the Inspector button.
+ *   Closing the drawer returns focus to the Inspector button. A 429 or 503 notice shows the
+ *   limit banner with a countdown, pauses Send and the cards, and keeps the draft.
  * Role: CS-E-04.S5.T1 shell, laid out from the Figma page "Console, chat (S1)"; the drawer is
- *   CS-E-06.S3.T1 (Figma "Observability drawer").
+ *   CS-E-06.S3.T1 (Figma "Observability drawer"); limit banner and Create ticket are
+ *   CS-E-07.S1.T4 (Figma "States").
  */
 import { MotionConfig } from "motion/react";
 import { PanelRight, Plus, Shield, ShieldCheck } from "lucide-react";
@@ -24,11 +26,13 @@ import { publicConfig } from "@/lib/config/public";
 import type { TurnView } from "@/lib/turns/reducer";
 import { turnStore, type ThreadItem, type TurnStoreState } from "@/lib/turns/store";
 import { inputPlaceholder } from "@/lib/turns/furniture";
+import { limitWords } from "@/lib/turns/limits";
 import { trailSummary } from "@/lib/turns/trail";
 
 import { ConversationLog, type CardActions } from "./conversation-log";
 import { InputBar } from "./input-bar";
 import { InspectorDrawer } from "./inspector-drawer";
+import { LimitBanner, useSecondsLeft } from "./limit-banner";
 
 /**
  * What: words for a verified person's role.
@@ -145,6 +149,10 @@ export function ConsoleShell({
   const conversation = useStore(store, (s) => s.conversation);
   const person = useStore(store, (s) => s.conversation.verified);
   const busy = useStore(store, (s) => s.connection.phase === "streaming");
+  const limit = useStore(store, (s) => s.limit);
+  const clearLimit = useCallback(() => store.getState().clearLimit(), [store]);
+  const secondsLeft = useSecondsLeft(limit?.untilMs ?? null, clearLimit);
+  const locked = limit !== null && limit.untilMs !== null && limit.untilMs > Date.now() ? "Send unlocks when the countdown ends" : null;
   const inflight = useRef<AbortController | null>(null);
   const messageRef = useRef<HTMLTextAreaElement | null>(null);
   const pinRef = useRef<HTMLInputElement | null>(null);
@@ -250,14 +258,15 @@ export function ConsoleShell({
 
   const cards: CardActions = useMemo(
     () => ({
-      disabled: busy,
+      disabled: busy || locked !== null,
       account,
       setAccount,
       pinRef,
       verify: (verification: VerificationInput) => run({ verification }).finally(() => refocus("verify")),
       decide: (confirm: ConfirmInput) => run({ confirm }).finally(() => refocus("decide")),
+      offerTicket: () => run({ ticket_offer: { accept: true } }).finally(() => refocus("decide")),
     }),
-    [busy, run, account, refocus],
+    [busy, locked, run, account, refocus],
   );
 
   /**
@@ -328,7 +337,11 @@ export function ConsoleShell({
             </div>
           </div>
           <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
+            {limit !== null && <LimitBanner notice={limit} seconds={secondsLeft} />}
             <InputBar
+              locked={locked}
+              restore={limit?.draft ? { id: limit.id, text: limit.draft } : null}
+              caption={limit ? limitWords(limit).caption : null}
               onSend={send}
               busy={busy}
               disabled={sessionId === null}

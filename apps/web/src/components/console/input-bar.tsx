@@ -3,15 +3,16 @@
  * What: the console input bar: a message field that sends on Enter, a send button, and a
  *   disabled mic placeholder (voice arrives with CS-E-05).
  * Use when: the bottom of the console.
- * Inputs: { onSend, busy, disabled, placeholder?, inputRef? }.
+ * Inputs: { onSend, busy, disabled, placeholder?, inputRef?, locked?, restore?, caption? }.
  * Output: JSX.
- * Side effects: calls onSend with the trimmed text and clears the field.
+ * Side effects: calls onSend with the trimmed text and clears the field; puts a refused draft
+ *   back into an empty field (restore).
  * Role: CS-E-04.S5.T1 input bar (F1 s5.1, s5.4); CS-E-04.S5.T3 adds the 2,000 character counter
  *   (shown from 1,800, blocks sending over the limit; doc 07 s2.3) and the placeholder from the
  *   console (the pending-confirmation prompt).
  */
 import { ArrowUp, Mic } from "lucide-react";
-import { useId, useState, type KeyboardEvent, type Ref } from "react";
+import { useEffect, useId, useState, type KeyboardEvent, type Ref } from "react";
 
 import { messageLimit } from "@/lib/turns/furniture";
 import { cn } from "@/lib/utils";
@@ -32,6 +33,12 @@ export interface InputBarProps {
   placeholder?: string;
   /** Ref to the message field, so the shell can return focus to it after a card press. */
   inputRef?: Ref<HTMLTextAreaElement>;
+  /** Why sending is paused (a 429 or 503 countdown), or null; typing stays allowed. */
+  locked?: string | null;
+  /** A draft the agent refused (429 or 503); restored once per id, only into an empty field. */
+  restore?: { id: number; text: string } | null;
+  /** Replaces the helper line under the bar (the limit caption). */
+  caption?: string | null;
 }
 
 /**
@@ -42,10 +49,17 @@ export interface InputBarProps {
  * Side effects: see module.
  * Role: see module. Enter sends (ignored while an IME is composing); Shift+Enter is a newline.
  */
-export function InputBar({ onSend, busy, disabled, placeholder, inputRef }: InputBarProps) {
+export function InputBar({ onSend, busy, disabled, placeholder, inputRef, locked = null, restore = null, caption = null }: InputBarProps) {
   const [text, setText] = useState("");
   const limit = messageLimit(text.trim());
-  const canSend = !busy && !disabled && text.trim() !== "" && !limit.over;
+  const canSend = !busy && !disabled && locked === null && text.trim() !== "" && !limit.over;
+  const restoreId = restore?.id ?? null;
+
+  useEffect(() => {
+    if (restore === null) return;
+    setText((current) => (current === "" ? restore.text : current));
+    // Only a new notice id restores; later renders of the same notice keep what the customer typed.
+  }, [restoreId]);
   const counterId = useId();
 
   /**
@@ -111,7 +125,7 @@ export function InputBar({ onSend, busy, disabled, placeholder, inputRef }: Inpu
           type="button"
           aria-label="Send"
           aria-disabled={!canSend}
-          title={busy ? "Finishing the current reply" : limit.over ? "Shorten your message to send" : undefined}
+          title={busy ? "Finishing the current reply" : locked ?? (limit.over ? "Shorten your message to send" : undefined)}
           onClick={send}
           className={cn(
             "flex size-9 shrink-0 items-center justify-center rounded-full bg-ink text-paper outline-none transition-[opacity,transform] duration-150 ease-out-expo focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-raised motion-safe:active:scale-[0.97]",
@@ -127,7 +141,7 @@ export function InputBar({ onSend, busy, disabled, placeholder, inputRef }: Inpu
           <span>{limit.over ? " characters. Shorten your message to send." : " characters"}</span>
         </p>
       ) : (
-        <p className="text-center text-caption text-muted">Answers come only from Quillstack help articles. Actions need your clear yes.</p>
+        <p className="text-center text-caption text-muted">{caption ?? "Answers come only from Quillstack help articles. Actions need your clear yes."}</p>
       )}
     </div>
   );

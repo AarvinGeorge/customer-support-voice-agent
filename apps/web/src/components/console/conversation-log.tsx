@@ -12,7 +12,7 @@
  *   states (Gate 2 hold, slow, retrying), error rows with Retry, decline notes, the Sources row,
  *   ticket chips, the escalation line and the fallback badge.
  */
-import { CircleAlert, Mic, PanelRight, RotateCcw } from "lucide-react";
+import { CircleAlert, LifeBuoy, Mic, PanelRight, RotateCcw } from "lucide-react";
 import type { StatusEvent } from "@contracts/contracts";
 import type { RefObject } from "react";
 import type { ConfirmInput, VerificationInput } from "@contracts/contracts";
@@ -79,6 +79,8 @@ export interface CardActions {
   pinRef: RefObject<HTMLInputElement | null>;
   verify: (body: VerificationInput) => Promise<unknown>;
   decide: (body: ConfirmInput) => Promise<unknown>;
+  /** The Create ticket button after both models were unavailable (doc 07 s6.7). */
+  offerTicket: () => Promise<unknown>;
 }
 
 /**
@@ -96,6 +98,7 @@ const NO_ACTIONS: CardActions = Object.freeze({
   pinRef: { current: null },
   verify: async () => undefined,
   decide: async () => undefined,
+  offerTicket: async () => undefined,
 });
 
 /**
@@ -147,7 +150,8 @@ const DECLINE_SUBJECT: Readonly<Record<string, string>> = Object.freeze({
 /**
  * What: one agent turn: trail, verification result and receipt lines, the answer (markdown, or
  *   the held, slow or retrying state), decline notes, the cards, Sources, ticket chips, the
- *   escalation line, error rows and the footer with the fallback badge.
+ *   escalation line, the Create ticket offer (both models unavailable, while it is still the
+ *   session's open offer), error rows and the footer with the fallback badge.
  * Use when: a turn thread item.
  * Inputs: { turn, conversation, index, cards, onResend?, inspect?, number } (onResend is set when
  *   the customer's typed text for this turn is known, so a retryable error row can offer Retry;
@@ -224,6 +228,15 @@ function AssistantMessage({
       )}
       <SourcesRow views={sources} />
       {turn.escalation && <EscalationLine text={escalationWords(turn.escalation)} />}
+      {conversation.ticketOffer !== null && conversation.ticketOffer.turn_id === turn.turnId && (
+        <div className="flex flex-wrap items-center gap-3">
+          <Button variant="ink" size="sm" disabled={cards.disabled} onClick={() => void cards.offerTicket()}>
+            <LifeBuoy aria-hidden className="size-3.5" />
+            Create ticket
+          </Button>
+          <span className="text-caption text-muted">No ticket is created unless you ask.</span>
+        </div>
+      )}
       {tickets.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           {tickets.map((t) => (
