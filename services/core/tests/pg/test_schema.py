@@ -117,7 +117,7 @@ def test_app_role_cannot_touch_the_migration_ledger(app_conn):
 def test_migration_is_idempotent(owner_url, migrated):
     """What: running the migrations again applies nothing. Use when: always. Inputs: owner_url, migrated.
     Output: assertion. Side effects: none. Role: the migrate job runs on every `up`."""
-    import migrate
+    import migrate  # pyright: ignore[reportMissingImports]
     from tests.pg.conftest import MIGRATIONS
     assert migrate.apply_migrations(owner_url, "core", MIGRATIONS) == []
 

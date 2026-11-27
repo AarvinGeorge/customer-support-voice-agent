@@ -33,7 +33,7 @@ def test_system_clock_is_new_york_not_utc():
     """What: SystemClock.now() is timezone-aware with the America/New_York zone. Use when: always.
     Inputs: none. Output: assertions. Side effects: reads wall time. Role: business dates are local (doc 07)."""
     now = SystemClock("America/New_York").now()
-    assert now.tzinfo is not None and now.tzinfo.key == "America/New_York"
+    assert now.tzinfo is not None and getattr(now.tzinfo, "key", None) == "America/New_York"
     assert abs((now - datetime.now(timezone.utc)).total_seconds()) < 5
 
 

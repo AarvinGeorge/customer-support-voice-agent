@@ -82,9 +82,10 @@ def core_error_response(request: Request, exc: CoreError) -> JSONResponse:
     Use when: the CoreError handler runs. Inputs: request, exception. Output: JSONResponse.
     Side effects: none. Role: status, retryable and changed come from the contract table."""
     status, retryable, changed = CORE_ERROR_CODES[exc.code]
-    body = ErrorBody(**{"class": exc.klass}, code=exc.code, message=exc.message, retryable=retryable,
-                     changed=changed, retry_after_s=exc.retry_after_s, fault_injected=False,
-                     trace_id=_ids(request)[1] or None, details=exc.details)
+    body = ErrorBody.model_validate({
+        "class": exc.klass, "code": exc.code, "message": exc.message, "retryable": retryable, "changed": changed,
+        "retry_after_s": exc.retry_after_s, "fault_injected": False, "trace_id": _ids(request)[1] or None,
+        "details": exc.details})
     return envelope_response(request, status, body)
 
 

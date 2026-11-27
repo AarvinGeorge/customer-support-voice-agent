@@ -25,9 +25,10 @@ def _stub(name: str) -> Callable[[Request], JSONResponse]:
     def handler(request: Request) -> JSONResponse:
         """What: answer 501 NOT_IMPLEMENTED in the envelope. Use when: a stubbed route is called with the right scope.
         Inputs: request. Output: 501 envelope. Side effects: none. Role: placeholder."""
-        body = ErrorBody(**{"class": "core_unavailable"}, code=STUB_NOT_IMPLEMENTED,
-                         message=f"{name} is not built yet.", retryable=False, changed=False,
-                         fault_injected=False, trace_id=request.state.trace_id, details={})
+        body = ErrorBody.model_validate({
+            "class": "core_unavailable", "code": STUB_NOT_IMPLEMENTED, "message": f"{name} is not built yet.",
+            "retryable": False, "changed": False, "fault_injected": False, "trace_id": request.state.trace_id,
+            "details": {}})
         return envelope_response(request, 501, body)
 
     handler.__name__ = f"stub_{name}"
