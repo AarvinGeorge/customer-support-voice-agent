@@ -5,6 +5,8 @@ Side effects: none. Role: guarantees every non-2xx from knowledge, including 404
 with the trace id. Codes: UNAUTHORIZED 401, NOT_FOUND 404, INVALID_REQUEST 422, RETRIEVAL_UNAVAILABLE 503 (doc 07 s4.1)."""
 from __future__ import annotations
 
+import uuid
+
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -22,6 +24,8 @@ class ApiError(Exception):
     def __init__(self, status: int, code: str, class_: str, message: str, retryable: bool = False,
                  retry_after_s: int | None = None, headers: dict[str, str] | None = None,
                  details: dict | None = None):
+        """What: build the error. Use when: raising a non-2xx. Inputs: status, code, class, message, retryable,
+        retry_after_s, headers, details. Output: exception. Side effects: none. Role: carries everything _respond needs."""
         self.details = details or {}
         self.status, self.code, self.class_, self.message = status, code, class_, message
         self.retryable, self.retry_after_s, self.headers = retryable, retry_after_s, headers or {}
@@ -37,7 +41,9 @@ def _respond(request: Request, status: int, code: str, class_: str, message: str
     body = ErrorEnvelope(error=ErrorBody(**{"class": class_}, code=code, message=message, retryable=retryable,
                                          changed=False, retry_after_s=retry_after_s, fault_injected=False,
                                          trace_id=trace_id, details=details or {}))
-    out = {"X-Trace-Id": trace_id, "X-Request-Id": getattr(request.state, "request_id", "") or uuid7(), **(headers or {})}
+    if retry_after_s is not None:
+        headers = {**(headers or {}), "Retry-After": str(retry_after_s)}
+    out = {"X-Trace-Id": trace_id, "X-Request-Id": getattr(request.state, "request_id", "") or str(uuid.uuid4()), **(headers or {})}
     return JSONResponse(body.model_dump(mode="json"), status_code=status, headers=out)
 
 

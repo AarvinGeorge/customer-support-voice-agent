@@ -9,6 +9,7 @@ dependencies = [
   "quillstack-contracts",
   "tiktoken>=0.14.0",
   "httpx>=0.29.0",
+  "pyyaml>=6.0.4",
 ]
 
 [dependency-groups]

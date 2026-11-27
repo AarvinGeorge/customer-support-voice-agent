@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
@@ -18,6 +20,26 @@ from knowledge.embeddings import EmbeddingError, OpenAIEmbedder
 from knowledge.ids import uuid7
 
 log = logging.getLogger("knowledge")
+_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def configure_logging() -> None:
+    """What: make the 'knowledge' logger emit INFO to stderr once. Use when: create_app. Inputs: none.
+    Output: none. Side effects: sets the logger level and adds one stream handler if none exists.
+    Role: uvicorn configures only its own loggers, so without this the per-request trace id line was dropped (review PR9 I1)."""
+    lg = logging.getLogger("knowledge")
+    lg.setLevel(logging.INFO)
+    if not lg.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        lg.addHandler(handler)
+
+
+def _id_or(value: str | None, make) -> str:
+    """What: accept an inbound id only when it is a uuid, else mint one. Use when: reading X-Trace-Id and X-Request-Id.
+    Inputs: header value or None, a minting function. Output: id string. Side effects: none.
+    Role: keeps hostile or oversized ids out of logs and responses (review PR9 M3)."""
+    return value if value and _UUID.fullmatch(value) else make()
 
 
 @asynccontextmanager
@@ -26,6 +48,8 @@ async def lifespan(app: FastAPI):
     Output: yields while serving. Side effects: raises RuntimeError if a token is unset; sets app.state.db.
     Role: fail loudly instead of serving without auth."""
     auth.check_configured()
+    if not os.environ.get("KNOWLEDGE_DB_URL"):
+        raise RuntimeError("KNOWLEDGE_DB_URL is not set")
     app.state.db = db.Database(os.environ.get("KNOWLEDGE_DB_URL", ""))
     try:
         app.state.embedder = OpenAIEmbedder()
@@ -38,7 +62,8 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     """What: build the FastAPI app. Use when: uvicorn import and tests. Inputs: none. Output: FastAPI app.
     Side effects: none until it is served. Role: factory so tests get a fresh app."""
-    app = FastAPI(title="quillstack-knowledge", lifespan=lifespan)
+    configure_logging()
+    app = FastAPI(title="quillstack-knowledge", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     errors.install(app)
 
     @app.middleware("http")
@@ -46,8 +71,8 @@ def create_app() -> FastAPI:
         """What: set request and trace ids, echo them, log one line. Use when: every request.
         Inputs: request. Output: response with X-Trace-Id and X-Request-Id. Side effects: logs.
         Role: doc 07 s1.2; the trace id is in every log line."""
-        request.state.trace_id = request.headers.get("X-Trace-Id") or uuid7()
-        request.state.request_id = request.headers.get("X-Request-Id") or uuid7()
+        request.state.trace_id = _id_or(request.headers.get("X-Trace-Id"), uuid7)
+        request.state.request_id = _id_or(request.headers.get("X-Request-Id"), lambda: str(uuid.uuid4()))
         started = time.monotonic()
         response = await call_next(request)
         response.headers["X-Trace-Id"] = request.state.trace_id

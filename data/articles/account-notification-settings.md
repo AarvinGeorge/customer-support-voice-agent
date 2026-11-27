@@ -2,7 +2,7 @@
 article_id: account-notification-settings
 title: "Account and notification settings"
 source_url: https://app.notion.com/p/4257c83d5896812d9fcbd1e1da0f9f30
-last_edited_time: 2026-11-27T05:25:37.865Z
+last_edited_time: 2026-11-27T06:10:06.504Z
 tiers: [all]
 ---
 
@@ -26,7 +26,7 @@ You can turn each type on or off in Quillstack under Settings, then Notification
 Each person has their own 4-digit support PIN. Support uses your account ID and your PIN to confirm who you are before it looks at your account or makes any change.
 
 - In chat, enter your PIN only in the secure verification box. Never type it into a chat message.
-- In a voice conversation, say your PIN only when support asks you to verify.
+- In a voice conversation, enter your PIN in the secure card that appears on your screen. Do not say it aloud.
 - If verification fails 3 times in one conversation, support stops asking and opens a ticket so a person can help you.
 
 ## Account settings support can help with

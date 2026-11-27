@@ -7,10 +7,12 @@ boundaries up to 400 and a single block over 500 fails, (7) no overlap, (8) dete
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import lru_cache
+from pathlib import Path
 
 from knowledge.ingest.errors import IngestError
 from knowledge.ingest.parse import ALLOWED_TIERS, Article, Block, parse_blocks
@@ -21,17 +23,26 @@ SMALL = 50
 TARGET_MAX = 400
 HARD_MAX = 500
 ERROR_CODE = re.compile(r"\bE-[A-Z]{2,6}-\d{3}\b")
-_TIERS_COMMENT = re.compile(r"<!--\s*tiers:\s*([A-Za-z, ]+?)\s*-->")
+_TIERS_ANY = re.compile(r"<!--\s*tiers\b.*?-->", re.I | re.S)
+_TIERS_STRICT = re.compile(r"<!--\s*tiers:\s*([A-Za-z]+(?:\s*,\s*[A-Za-z]+)*)\s*-->", re.I)
 DOC_VERSION = 1  # the Notion snapshot carries no version; one constant until it does
 
 
 @lru_cache(maxsize=1)
 def _encoding():
-    """What: load the cl100k_base encoding once. Use when: counting tokens. Inputs: none. Output: tiktoken
-    Encoding. Side effects: first call downloads the vocabulary file if it is not cached. Role: the encoding
-    text-embedding-3-small uses."""
-    import tiktoken
-    return tiktoken.get_encoding("cl100k_base")
+    """What: load the cl100k_base encoding once, from a local cache. Use when: counting tokens. Inputs: none.
+    Output: tiktoken Encoding. Side effects: sets TIKTOKEN_CACHE_DIR to services/knowledge/tiktoken_cache (committed,
+    and the same path the image bakes at /app/tiktoken_cache) when the variable is unset. Role: no network at run time;
+    a missing or corrupt vocabulary raises IngestError saying how to fix it (tiktoken checks the file hash)."""
+    cache = Path(__file__).resolve().parents[3] / "tiktoken_cache"
+    if cache.is_dir():
+        os.environ.setdefault("TIKTOKEN_CACHE_DIR", str(cache))
+    try:
+        import tiktoken
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception as exc:
+        raise IngestError("cannot load the cl100k_base vocabulary; set TIKTOKEN_CACHE_DIR to a directory holding "
+                          f"9b5ad71b2ce5302211f9c61530b329a4922fc6a4 (committed in services/knowledge/tiktoken_cache): {exc}") from exc
 
 
 def count_tokens(text: str) -> int:
@@ -97,17 +108,28 @@ def _prepare(article: Article, policy) -> list[Block]:
     Use when: first step of chunk_article. Inputs: article, policy. Output: blocks (headings sanitized too).
     Side effects: none. Role: tiers comments become sentinels first, then other comments are blanked with their
     line breaks kept so error line numbers stay true."""
+    body = article.body.replace("\x00", "")  # a raw NUL could forge a sentinel; none is legitimate in an article
+
     def tiers_sentinel(m: re.Match) -> str:
-        """What: replace a tiers comment by a sentinel line. Use when: re.sub. Inputs: match. Output: text.
-        Side effects: none. Role: keeps the marker through comment stripping."""
-        names = [t.strip() for t in m.group(1).split(",") if t.strip()]
+        """What: replace one tiers comment by a sentinel line, or fail. Use when: re.sub. Inputs: match.
+        Output: sentinel text. Side effects: none. Role: fail closed: the marker must parse, name only allowed tiers
+        and stand alone on its line; anything else raises (it is the retrieval access filter)."""
+        line_no = article.body_first_line + body.count("\n", 0, m.start())
+        strict = _TIERS_STRICT.fullmatch(m.group(0))
+        start = body.rfind("\n", 0, m.start()) + 1
+        end = body.find("\n", m.end())
+        end = len(body) if end == -1 else end
+        if not strict or body[start:m.start()].strip() or body[m.end():end].strip():
+            raise IngestError(f"{article.filename}:{line_no}: a tiers comment must read '<!-- tiers: a, b -->' alone on "
+                              f"its own line, got {m.group(0)[:60]!r}")
+        names = [t.strip().lower() for t in strict.group(1).split(",") if t.strip()]
         bad = [t for t in names if t not in ALLOWED_TIERS]
-        if bad or not names:
-            raise IngestError(f"{article.filename}: tier {bad[0] if bad else '(none)'} in a tiers comment is not "
-                              f"one of {sorted(ALLOWED_TIERS)}")
+        if bad:
+            raise IngestError(f"{article.filename}:{line_no}: tier {bad[0]} in a tiers comment is not one of "
+                              f"{sorted(ALLOWED_TIERS)}")
         return "\x00TIERS " + ",".join(names) + "\x00" + "\n" * m.group(0).count("\n")
 
-    text = _TIERS_COMMENT.sub(tiers_sentinel, article.body)
+    text = _TIERS_ANY.sub(tiers_sentinel, body)
     text = COMMENT.sub(lambda m: "\n" * m.group(0).count("\n"), text)
     out: list[Block] = []
     for b in parse_blocks(text, article.body_first_line):
@@ -117,6 +139,13 @@ def _prepare(article: Article, policy) -> list[Block]:
         rendered, keys = render_policy(b.text, policy, article.filename, b.line)
         out.append(replace(b, text=sanitize(rendered), keys=tuple(keys)))
     return out
+
+
+def _heading_block(sec: _Section) -> Block:
+    """What: the Markdown heading line of a section as a block. Use when: a section is merged into another or has no
+    body, so its title and any error code in it stay in the chunk text. Inputs: section. Output: Block of kind
+    'paragraph' holding '## Title' or '### Title'. Side effects: none. Role: review finding 1 (headings were lost)."""
+    return Block("paragraph", ("##" if sec.kind == "h2" else "###") + " " + sec.path[-1], 0)
 
 
 def _sections(article: Article, blocks: list[Block]) -> list[_Section]:
@@ -146,7 +175,7 @@ def _sections(article: Article, blocks: list[Block]) -> list[_Section]:
             cur.blocks.append(b)
             cur.keys.extend(b.keys)
     secs.append(cur)
-    return [s for s in secs if s.blocks]
+    return [s for s in secs if s.blocks or s.kind == "h3"]  # an H2 with no body makes none; an H3 is kept
 
 
 def _merge(secs: list[_Section], count: Callable[[str], int]) -> list[_Section]:
@@ -159,7 +188,7 @@ def _merge(secs: list[_Section], count: Callable[[str], int]) -> list[_Section]:
     for s in secs:
         if pending is not None:
             if (pending.kind == "intro" or pending.h2 == s.h2) and pending.tiers == s.tiers:
-                s = _Section(pending.h2, pending.h3, pending.kind, pending.blocks + s.blocks, pending.tiers,
+                s = _Section(pending.h2, pending.h3, pending.kind, pending.blocks + [_heading_block(s)] + s.blocks, pending.tiers,
                              pending.keys + s.keys, f"{pending.heading} + {s.heading}", pending.path, pending.id_base)
             else:
                 out.append(pending)
@@ -167,7 +196,7 @@ def _merge(secs: list[_Section], count: Callable[[str], int]) -> list[_Section]:
         if count(s.text()) < SMALL:
             prev = out[-1] if out else None
             if prev is not None and prev.h2 == s.h2 and prev.kind != "intro" and prev.tiers == s.tiers:
-                prev.blocks += s.blocks
+                prev.blocks += [_heading_block(s)] + s.blocks
                 prev.keys += s.keys
                 prev.heading = f"{prev.heading} + {s.heading}"
             else:
@@ -176,6 +205,9 @@ def _merge(secs: list[_Section], count: Callable[[str], int]) -> list[_Section]:
             out.append(s)
     if pending is not None:
         out.append(pending)
+    for s in out:
+        if not s.blocks:  # a lone heading-only H3: its heading line is its text
+            s.blocks = [_heading_block(s)]
     return out
 
 
@@ -203,6 +235,7 @@ def chunk_article(article: Article, policy, count: Callable[[str], int] = count_
     Output: ordered Chunk list with unique deterministic ids. Side effects: none.
     Role: runs render, sanitize and the 8 rules; raises IngestError for an unknown placeholder, a bad tier,
     an unsplittable block over 500 tokens, duplicate ids, or zero chunks."""
+    title = sanitize(article.title)
     blocks = _prepare(article, policy)
     sections = _merge(_sections(article, blocks), count)
     chunks: list[Chunk] = []
@@ -210,7 +243,7 @@ def chunk_article(article: Article, policy, count: Callable[[str], int] = count_
         pieces = _split(sec, article, count)
         for n, piece in enumerate(pieces, 1):
             body = "\n\n".join(b.text for b in piece)
-            path = " > ".join([article.title, *sec.path]) if sec.kind != "intro" else f"{article.title} > Introduction"
+            path = " > ".join([title, *sec.path]) if sec.kind != "intro" else f"{title} > Introduction"
             header = f"Article: {path}\nApplies to: {', '.join(sec.tiers)}\nUpdated: {article.last_updated}"
             embed = header + "\n\n" + body
             cid = f"{article.article_id}#{sec.id_base}" + (f"~{n}" if len(pieces) > 1 else "")
@@ -218,8 +251,8 @@ def chunk_article(article: Article, policy, count: Callable[[str], int] = count_
             chunks.append(Chunk(
                 chunk_id=cid, article_slug=article.article_id, ordinal=len(chunks), section_path=list(sec.path),
                 heading=sec.heading, header=header, body=body, embed_text=embed, source_url=article.source_url,
-                tiers=list(sec.tiers), error_codes=sorted(set(ERROR_CODE.findall(" ".join(sec.path) + "\n" + body))), policy_keys=keys,
-                injection_suspect=is_suspect(body), token_count=count(body),
+                tiers=list(sec.tiers), error_codes=sorted(set(ERROR_CODE.findall(" ".join(sec.path) + "\n" + sec.heading + "\n" + body))), policy_keys=keys,
+                injection_suspect=is_suspect(embed), token_count=count(body),
                 content_hash=hashlib.sha256(embed.encode()).hexdigest(), doc_version=DOC_VERSION,
                 last_updated=article.last_updated))
     if not chunks:

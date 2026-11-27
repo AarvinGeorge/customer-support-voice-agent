@@ -3,7 +3,7 @@
 !.env.example
 .git
 .claude
-node_modules
+**/node_modules
 **/__pycache__
-.venv
+**/.venv
 **/.pytest_cache
