@@ -235,7 +235,7 @@ Written: see [Architecture](#architecture). Owner CS-E-08.S1.T1.
 Chunks follow the help articles' own structure instead of a fixed window. The chunker (`services/knowledge/src/knowledge/ingest/chunker.py`) works in this order:
 
 - Split by heading: the intro, each H2 body and each H3 section become candidate chunks. A section is one idea an agent can quote, so a citation points at one section (with its source link), not at a slice that starts mid-sentence.
-- Merge a section body under 50 tokens into its neighbour, so a heading with one short line does not become its own chunk.
+- Merge small sections, within limits. The rule (`_merge` in the chunker): a section under 50 tokens joins the previous section only if both sit under the same H2 and apply to the same tiers; with no previous section it joins the next one. It never merges across two H2 sections or across tiers. Most articles are flat lists of H2 sections, so most small sections stay on their own: 13 of the 81 chunks are under 50 tokens (for example `refund-policy#free-plan`, 14 tokens, a heading with one short line).
 - Keep a section whole when it is 150 to 400 tokens. Split only a section over 500 tokens, at paragraph or list boundaries and up to 400 tokens; one block over 500 tokens fails the ingest instead of being cut. No overlap between chunks.
 - Add a short context header to the text that is embedded (article path, tiers the section applies to, updated date), so a chunk that says "Step 3" still knows which article it belongs to. The header is not counted in the body size.
 - Tokens are counted with the cl100k_base encoding. Chunk ids are deterministic, so a re-ingest of an unchanged article changes nothing.
@@ -297,12 +297,12 @@ Built is the thin slice (D-035). The rows below are designed and not built, so e
 | A4 grace extension | L1 s5 A4; D-018 | `FEATURE_A4` after a green build window |
 | Notification preferences (act alone) | 07 s3.2 | Customers ask for preference changes in support volume |
 | Live Notion sync, weekly scheduler, Sync now, policy drift check | 07 s16; D-034 | Articles change more than once a week, or a second author edits them |
-| LangSmith detail tab and `/api/traces` proxy | 07 s2.2, s2.3 `TraceDetail` | The drawer needs per-run detail beyond our SSE usage events (the drawer links to LangSmith meanwhile) |
+| LangSmith detail tab and `/api/traces` proxy | 07 s2.2, s2.3 `TraceDetail` | The drawer needs per-run detail beyond our SSE usage events (the observability drawer is in the build plan, doc 09 s1.1, and is not on main yet) |
 | LLM judge and model comparison matrix | 06 s19; doc 08 | Free-text cases the code graders cannot score, or a model switch decision |
-| Mocked-model load test | 06 s14 | Before real traffic, or to size replicas; the demo is verified at 1 to 2 concurrent conversations |
+| Mocked-model load test | 06 s14 | Before real traffic, or to size replicas; the demo is sized for 1 to 2 concurrent conversations (a target, not measured) |
 | Mobile layouts | D-031 cut order | Phone users in the audience |
-| Spoken verification (rule V, spike 18) | 07 s7.3 rule V, s14 row 18 | Spike 18 passes on real recordings; until then the card is used in voice (the contract fallback) |
-| Gate 2 re-ask (spike 2) | 07 s6.4, s14 row 2 | Golden-set evidence that a re-ask helps; today a fixed clarifying line is used |
+| Spoken verification (rule V, spike 18) | 07 s7.3 rule V, s14 row 18 | Spike 18 passes on real recordings; until then voice is planned to use the verification card (the contract fallback; the voice client is not on main yet) |
+| Gate 2 re-ask (spike 2) | 07 s6.4, s14 row 2 | Golden-set evidence that a re-ask helps; the slice is planned to use a fixed clarifying line instead (the grounding middleware is a stub on main) |
 | First-token timeout (spike 5) | 07 s6.4, s14 row 5 | First-token stalls observed in real use |
 | Turn drop recovery UI | 07 s2.2, s8.1 | Dropped streams observed in real use |
 | Page-refresh rehydrate (`GET /api/turns`, `GET /api/sessions/{sid}` snapshot) | 07 s2.2, s2.3 | Dropped streams or refreshes observed in real use |
@@ -326,7 +326,7 @@ Built is the thin slice (D-035). The rows below are designed and not built, so e
 | Event log retention job | 06 s14 | The event tables grow beyond what the demo needs (proposed) |
 | Approval withdrawal (customer withdraws a submitted approval) | 06 s14 | Customers ask to retract a request after submitting it (proposed) |
 
-Triggers marked (proposed) are my wording: the architecture doc names the item as deferred but gives no trigger.
+Triggers marked (proposed) are this README's wording: the architecture doc names the item as deferred but gives no trigger.
 
 Cut order if the build runs behind (06 s14): A4, the approvals button (ticket shown as pending), the LangSmith detail tab, mobile layouts.
 

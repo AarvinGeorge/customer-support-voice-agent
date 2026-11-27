@@ -88,16 +88,16 @@ def test_every_row_has_a_designed_in_and_a_trigger() -> None:
 
 
 def test_posture_section_has_no_em_dash() -> None:
-    """What: no long dash in the posture section or the chunking slot. Use when: pytest. Inputs: none. Output: assert.
+    """What: no em or en dash in the posture section or the chunking slot. Use when: pytest. Inputs: none. Output: assert.
     Side effects: none. Role: project writing rule."""
     chunk = re.search(r"^#### 3\.2 .*?(?=^#### )", README, flags=re.M | re.S)
     assert chunk
-    assert "—" not in _section(README, "Production posture") + chunk.group(0)
+    assert not re.search("[\u2013\u2014]", _section(README, "Production posture") + chunk.group(0))
 
 
 def test_chunking_slot_is_filled_with_the_measured_numbers() -> None:
     """What: showcase 3.2 has no TODO and states the real counts (81 chunks, largest body 203 tokens).
-    Use when: pytest. Inputs: none. Output: assert. Side effects: none. Role: README claims come from the chunker output."""
+    Use when: pytest. Inputs: none. Output: assert. Side effects: none. Role: pins the numbers printed from the chunker run of 27 Nov 2026 (it does not recompute them; update both when articles change)."""
     m = re.search(r"^#### 3\.2 .*?(?=^#### )", README, flags=re.M | re.S)
     assert m
     body = m.group(0)
