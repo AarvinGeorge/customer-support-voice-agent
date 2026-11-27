@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from agent import escalation, ingress
 from agent.middleware import router
 from agent.say import speak
-from agent.structured import confirm, handler, verification
+from agent.structured import confirm, handler, verification, voice_yes
 from escalation_world import OWNER, Boom, World, error_response
 
 SNAPSHOT = Path(__file__).parent / "snapshots" / "say_fixed_lines.txt"
@@ -67,7 +67,7 @@ def fixed_lines() -> dict[str, str]:
         "escalation.deadline_ticket": escalation.DEADLINE_TICKET_LINE.format(display=DISPLAY),
         "escalation.deadline_no_ticket": f"{escalation.DEADLINE_LEAD} {router.NO_TICKET_CLAUSE.format(ref=REF)}",
         "handler.not_current": handler.NOT_CURRENT_LINE,
-        "handler.verify_expired": handler.VERIFY_EXPIRED_LINE, "handler.voice_press_confirm": handler.VOICE_PRESS_CONFIRM,
+        "handler.verify_expired": handler.VERIFY_EXPIRED_LINE, "voice_yes.reprompt": voice_yes.REPROMPT_LINE,
         "confirm.verify_lapsed": confirm.VERIFY_LAPSED_LINE,
         "verification.failed": verification.FAILED_LINE.format(n=2, tries="tries"),
         "verification.locked": verification.LOCKED_LINE.format(display=DISPLAY),
@@ -112,7 +112,7 @@ def test_the_line_inventory_misses_no_line_constant() -> None:
     pattern = re.compile(r"(_LINE|_LEAD|_CLAUSE|_MESSAGE|_TICKET|_UNCONFIRMED(_NO_TICKET)?|_FROM_STATUS|_TAIL|_SAY|"
                          r"_OPENED)$")
     missing = []
-    for module in (router, ingress, escalation, handler, verification, confirm):
+    for module in (router, ingress, escalation, handler, verification, confirm, voice_yes):
         for name in dir(module):
             value = getattr(module, name)
             if isinstance(value, str) and pattern.search(name):
@@ -207,3 +207,37 @@ def test_speak_falls_back_to_the_stripped_text_and_logs_on_an_unexpected_error(
     monkeypatch.setattr(say, "_spoken", broken)
     assert speak("**Your** total is $5") == "Your total is $5"
     assert any(r.name == "agent.say" and r.exc_info for r in caplog.records)
+
+
+@pytest.mark.parametrize("raw,spoken", [
+    # re-review N1: a minus sign directly before the amount (no space) is spoken as "minus"
+    ("-$49", "minus forty-nine dollars"),
+    ("−$49", "minus forty-nine dollars"),
+    ("$-49", "minus forty-nine dollars"),
+    ("total -$49.50", "total minus forty-nine dollars and fifty cents"),
+    ("(-$5.00)", "(minus five dollars)"),
+    ("adjustment: -$0.50", "adjustment: minus fifty cents"),
+    ("-$1,234.56 balance", "minus one thousand two hundred thirty-four dollars and fifty-six cents balance"),
+    ("a minus $20 change", "a minus twenty dollars change"),
+    ("a credit of $96.00", "a credit of ninety-six dollars"),
+    ("balance -5", "balance minus five"),
+])
+def test_a_sign_touching_the_amount_is_minus(raw: str, spoken: str) -> None:
+    assert speak(raw) == spoken
+
+
+@pytest.mark.parametrize("raw,spoken", [
+    # re-review N1: a spaced dash between words is punctuation, never "minus"
+    ("Pro plan - $49 per month", "Pro plan - forty-nine dollars per month"),
+    ("Starter - $19/mo, Pro - $49/mo", "Starter - nineteen dollars/mo, Pro - forty-nine dollars/mo"),
+    ("between $10 - $20", "between ten dollars - twenty dollars"),
+    ("Team plan − $99", "Team plan − ninety-nine dollars"),
+    ("Refund - $96.00 to your card", "Refund - ninety-six dollars to your card"),
+    ("$10-$20", "ten dollars-twenty dollars"),
+    ("3-5 business days", "three-five business days"),
+    ("seats - 5 left", "seats - five left"),
+    ("Annual -  $490", "Annual - four hundred ninety dollars"),
+    ("Pro: $49 - billed monthly", "Pro: forty-nine dollars - billed monthly"),
+])
+def test_a_spaced_dash_is_punctuation_not_minus(raw: str, spoken: str) -> None:
+    assert speak(raw) == spoken

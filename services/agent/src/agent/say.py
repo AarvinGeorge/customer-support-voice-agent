@@ -100,7 +100,8 @@ def _date_or_text(match: re.Match[str], day: str, month: int | None, year: str |
 
 
 def _money(match: re.Match[str]) -> str:
-    """What: "$96.50" as "ninety-six dollars and fifty cents", with a sign before or after the "$" as "minus".
+    """What: "$96.50" as "ninety-six dollars and fifty cents", with a sign touching the "$" (no space, before or
+    after it) as "minus"; a spaced dash is punctuation and is left alone.
     Use when: the amount rule. Inputs: match (groups: sign, sign, dollars, cents). Output: words.
     Side effects: none. Role: helper."""
     minus = "minus " if match.group(1) or match.group(2) else ""
@@ -181,7 +182,7 @@ def _spoken(s: str) -> str:
     s = re.sub(r"(\b\w+\s)?\b([A-Z]{1,4})-([0-9A-Z]{4,}(?:-[0-9A-Z]+)*)\b", _ident, s)
     s = re.sub(r"\b(ending|reference)\s+((?=[0-9A-Fa-f]*\d)[0-9A-Fa-f]{4})\b",
                lambda m: f"{m.group(1)} {spell(m.group(2))}", s)
-    s = re.sub(rf"(?:(?<!\w)([{_MINUS}])\s?)?\$\s?([{_MINUS}])?(\d[\d,]*)(?:\.(\d{{2}}))?", _money, s)
+    s = re.sub(rf"(?:(?<!\w)([{_MINUS}]))?\$\s?([{_MINUS}])?(\d[\d,]*)(?:\.(\d{{2}}))?", _money, s)
     s = re.sub(r"\b(\d{4})-(\d{2})-(\d{2})\b", lambda m: _date_or_text(m, m.group(3), int(m.group(2)), m.group(1)), s)
     s = re.sub(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+{_MONTH_RE}(?:\s+(\d{{4}}))?",
                lambda m: _date_or_text(m, m.group(1), _month_of(m.group(2)), m.group(3)), s)

@@ -21,7 +21,6 @@ escalation.nothing_to_offer: There's nothing waiting for a ticket right now. Wha
 escalation.ticket_offer_opened: I've opened ticket ending eight two one three for our team.
 handler.not_current: That request is no longer active. Ask me again if you still need it.
 handler.verify_expired: Your verification has expired. Please verify again in the secure card, then confirm.
-handler.voice_press_confirm: To go ahead, please press Confirm on screen.
 ingress.cap: This conversation is getting long. Please start a new conversation; your tickets and account history are kept.
 ingress.deadline: I couldn't finish that in time.
 ingress.swept: I couldn't finish that. Please send your message again.
@@ -60,3 +59,4 @@ verification.failed: That account ID and PIN didn't match. You have two tries le
 verification.locked: I couldn't verify you after three tries, so I've opened a ticket for our team, ticket ending eight two one three.
 verification.locked_no_ticket: I couldn't verify you after three tries, so verification is locked for this conversation.
 verification.unavailable: I couldn't check your details just now. Please try the card again in a moment.
+voice_yes.reprompt: I didn't catch that clearly. Please say yes, or press Confirm on screen.
