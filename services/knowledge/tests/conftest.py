@@ -22,10 +22,10 @@ def client(monkeypatch):
         """What: stand-in for knowledge.db.Database. Use when: unit tests. Inputs: none.
         Output: canned rows. Side effects: none. Role: no Postgres needed."""
 
-        def ping(self) -> bool:
-            """What: pretend the database answers. Use when: readyz. Inputs: none. Output: True.
-            Side effects: none. Role: fake."""
-            return True
+        def status(self) -> dict | None:
+            """What: canned readiness facts. Use when: readyz. Inputs: none. Output: dict with chunk count and
+            corpus version. Side effects: none. Role: fake."""
+            return {"chunks": 74, "corpus_version": "abc123"}
 
         def corpus(self) -> dict:
             """What: canned empty corpus. Use when: GET /v1/corpus. Inputs: none. Output: dict.

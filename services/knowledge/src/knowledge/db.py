@@ -1,6 +1,6 @@
 """What: the knowledge database handle (psycopg, one short connection per call).
-Use when: readyz pings the database; GET /v1/corpus lists articles. Search and ingest add methods later.
-Inputs: KNOWLEDGE_DB_URL (the knowledge_app role). Output: Database with ping() and corpus().
+Use when: readyz reads status; GET /v1/corpus lists articles. Search and ingest add methods later.
+Inputs: KNOWLEDGE_DB_URL (the knowledge_app role). Output: Database with status() and corpus().
 Side effects: opens a connection per call with a 1 s connect timeout and statement_timeout 1 s.
 Role: the only module that talks to Postgres; unit tests replace Database with a fake."""
 from __future__ import annotations
@@ -25,15 +25,18 @@ class Database:
         return psycopg.connect(self.url, row_factory=dict_row, connect_timeout=1,
                                options="-c statement_timeout=1000")
 
-    def ping(self) -> bool:
-        """What: check the database answers. Use when: /readyz. Inputs: none. Output: True or False.
-        Side effects: one SELECT 1. Role: minimal readiness (chunk count and calibration arrive with CS-E-02.S1.T6)."""
+    def status(self) -> dict | None:
+        """What: readiness facts: chunk count and the latest ok corpus_version. Use when: /readyz.
+        Inputs: none. Output: {"chunks": int, "corpus_version": str} or None when the database does not answer.
+        Side effects: two SELECTs. Role: doc 07 s4.2 readiness (calibration check arrives with CS-E-02.S3.T3)."""
         try:
             with self._connect() as conn:
-                conn.execute("SELECT 1")
-            return True
+                n = conn.execute("SELECT count(*)::int AS n FROM chunks").fetchone()["n"]
+                run = conn.execute("SELECT corpus_version FROM ingest_runs WHERE status = 'ok' "
+                                   "ORDER BY finished_at DESC LIMIT 1").fetchone()
+            return {"chunks": n, "corpus_version": (run["corpus_version"] if run else None) or "none"}
         except psycopg.Error:
-            return False
+            return None
 
     def corpus(self) -> dict:
         """What: list articles with chunk counts and the latest ok ingest. Use when: GET /v1/corpus.

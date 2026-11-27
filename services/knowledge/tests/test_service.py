@@ -58,13 +58,15 @@ def test_health_needs_no_token(client):
     Side effects: none. Role: Compose healthcheck target (doc 07 s4.2)."""
     assert client.get("/healthz").json() == {"status": "alive"}
     r = client.get("/readyz")
-    assert r.status_code == 200 and r.json()["status"] == "ready" and r.json()["database"] == "ok"
+    body = r.json()
+    assert r.status_code == 200 and body["status"] == "ready" and body["database"] == "ok"
+    assert (body["chunks"], body["corpus_version"], body["embedding_model"]) == (74, "abc123", "text-embedding-3-small")
 
 
 def test_readyz_503_when_db_down(client, monkeypatch):
     """What: readyz is 503 in the envelope when the database does not answer. Use when: CI.
     Inputs: a failing ping. Output: assertion. Side effects: patches the fake. Role: failure path."""
-    client.app.state.db.ping = lambda: False
+    client.app.state.db.status = lambda: None
     r = client.get("/readyz")
     assert r.status_code == 503
     err = _envelope(r).error
@@ -115,3 +117,12 @@ def test_startup_fails_without_token(monkeypatch):
     with pytest.raises(RuntimeError, match="KNOWLEDGE_TOKEN_AGENT"):
         with TestClient(create_app()):
             pass
+
+
+def test_readyz_503_when_no_chunks(client):
+    """What: an empty corpus is not ready (ingest has not run). Use when: CI. Inputs: status with 0 chunks.
+    Output: assertion. Side effects: patches the fake. Role: doc 07 s4.2 'at least one chunk'."""
+    client.app.state.db.status = lambda: {"chunks": 0, "corpus_version": "none"}
+    r = client.get("/readyz")
+    assert r.status_code == 503 and _envelope(r).error.code == "RETRIEVAL_UNAVAILABLE"
+    assert _envelope(r).error.details["chunks"] == 0

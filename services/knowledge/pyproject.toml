@@ -8,6 +8,7 @@ dependencies = [
   "psycopg[binary]>=3.2",
   "quillstack-contracts",
   "tiktoken>=0.14.0",
+  "httpx>=0.29.0",
 ]
 
 [dependency-groups]

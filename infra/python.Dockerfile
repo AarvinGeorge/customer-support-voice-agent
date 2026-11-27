@@ -18,6 +18,9 @@ WORKDIR /app
 COPY services/${SERVICE}/src ./src
 COPY services/${SERVICE}/migrations ./migrations
 COPY infra/migrate.py ./migrate.py
+# knowledge only: bake the cl100k_base vocabulary so the chunker never needs the network at run time
+ENV TIKTOKEN_CACHE_DIR=/app/tiktoken_cache
+RUN if [ "$SERVICE" = knowledge ]; then python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"; fi
 RUN useradd --system --uid 10001 app && chown -R app /app
 USER app
 EXPOSE 8000

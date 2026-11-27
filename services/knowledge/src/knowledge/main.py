@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
 
-from knowledge import auth, db, errors
+from knowledge import auth, config, db, errors
 from knowledge.ids import uuid7
 
 log = logging.getLogger("knowledge")
@@ -56,14 +56,21 @@ def create_app() -> FastAPI:
         return {"status": "alive"}
 
     @app.get("/readyz")
-    def readyz(request: Request) -> dict[str, str]:
-        """What: readiness (minimal: the database answers). Use when: Compose healthcheck.
-        Inputs: request. Output: {"status": "ready", "database": "ok"} or a 503 envelope.
-        Side effects: one SELECT 1. Role: doc 07 s4.2; chunk and calibration checks arrive with CS-E-02.S1.T6."""
-        if not request.app.state.db.ping():
+    def readyz(request: Request) -> dict:
+        """What: readiness: database answers and at least one chunk is ingested. Use when: callers and checks.
+        Inputs: request. Output: {"status": "ready", "database": "ok", "corpus_version", "chunks", "embedding_model"}
+        or a 503 envelope (details carry chunks). Side effects: two SELECTs.
+        Role: doc 07 s4.2; the calibration-file check arrives with CS-E-02.S3.T3."""
+        st = request.app.state.db.status()
+        if st is None:
             raise errors.ApiError(503, "RETRIEVAL_UNAVAILABLE", "db_unavailable", "The knowledge database is not reachable.",
                                   retryable=True, retry_after_s=2)
-        return {"status": "ready", "database": "ok"}
+        if st["chunks"] < 1:
+            raise errors.ApiError(503, "RETRIEVAL_UNAVAILABLE", "retrieval_failed",
+                                  "The knowledge base has no content yet.", retryable=True, retry_after_s=5,
+                                  details={"chunks": st["chunks"]})
+        return {"status": "ready", "database": "ok", "corpus_version": st["corpus_version"], "chunks": st["chunks"],
+                "embedding_model": config.embedding_model()}
 
     @app.get("/v1/corpus", dependencies=[Depends(auth.require_scope("corpus.read"))])
     def corpus(request: Request) -> dict:

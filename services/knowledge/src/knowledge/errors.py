@@ -20,20 +20,23 @@ class ApiError(Exception):
     Side effects: none. Role: the one way knowledge code signals a non-2xx."""
 
     def __init__(self, status: int, code: str, class_: str, message: str, retryable: bool = False,
-                 retry_after_s: int | None = None, headers: dict[str, str] | None = None):
+                 retry_after_s: int | None = None, headers: dict[str, str] | None = None,
+                 details: dict | None = None):
+        self.details = details or {}
         self.status, self.code, self.class_, self.message = status, code, class_, message
         self.retryable, self.retry_after_s, self.headers = retryable, retry_after_s, headers or {}
 
 
 def _respond(request: Request, status: int, code: str, class_: str, message: str, retryable: bool = False,
-             retry_after_s: int | None = None, headers: dict[str, str] | None = None) -> JSONResponse:
+             retry_after_s: int | None = None, headers: dict[str, str] | None = None,
+             details: dict | None = None) -> JSONResponse:
     """What: build the envelope response with trace headers. Use when: any handler. Inputs: error parts.
     Output: JSONResponse. Side effects: none. Role: single place that shapes the body (changed is false:
     knowledge never mutates on a request)."""
     trace_id = getattr(request.state, "trace_id", None) or uuid7()
     body = ErrorEnvelope(error=ErrorBody(**{"class": class_}, code=code, message=message, retryable=retryable,
                                          changed=False, retry_after_s=retry_after_s, fault_injected=False,
-                                         trace_id=trace_id, details={}))
+                                         trace_id=trace_id, details=details or {}))
     out = {"X-Trace-Id": trace_id, "X-Request-Id": getattr(request.state, "request_id", "") or uuid7(), **(headers or {})}
     return JSONResponse(body.model_dump(mode="json"), status_code=status, headers=out)
 
@@ -41,7 +44,7 @@ def _respond(request: Request, status: int, code: str, class_: str, message: str
 async def _api_error(request: Request, exc: ApiError) -> JSONResponse:
     """What: handler for ApiError. Use when: FastAPI dispatches it. Inputs: request, exc.
     Output: envelope response. Side effects: none. Role: ApiError to envelope."""
-    return _respond(request, exc.status, exc.code, exc.class_, exc.message, exc.retryable, exc.retry_after_s, exc.headers)
+    return _respond(request, exc.status, exc.code, exc.class_, exc.message, exc.retryable, exc.retry_after_s, exc.headers, exc.details)
 
 
 async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
