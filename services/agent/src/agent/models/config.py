@@ -75,6 +75,8 @@ class ModelsConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_roles(self) -> "ModelsConfig":
+        """What: require every role and the chat roles' timeouts. Use when: pydantic validation of models.yaml.
+        Inputs: self. Output: self; ValueError on a missing role or timeout. Side effects: none. Role: validator."""
         missing = [r for r in REQUIRED_ROLES if r not in self.roles]
         if missing:
             raise ValueError(f"missing roles: {', '.join(missing)}")

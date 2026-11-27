@@ -81,18 +81,36 @@ class VoiceStore(Protocol):
     """What: the voice_sessions and transcript_items operations. Use when: typing.
     Inputs: see methods. Output: see methods. Side effects: database. Role: storage port."""
 
-    async def create_voice_session(self, row: VoiceSessionRow) -> None: ...
-    async def get_voice_session(self, voice_session_id: str) -> VoiceSessionRow | None: ...
+    async def create_voice_session(self, row: VoiceSessionRow) -> None:
+        """What: insert one voice_sessions row. Use when: typing. Inputs: see signature. Output: see signature.
+        Side effects: see the adapter. Role: port method."""
+        ...
+
+    async def get_voice_session(self, voice_session_id: str) -> VoiceSessionRow | None:
+        """What: read one voice_sessions row. Use when: typing. Inputs: see signature. Output: see signature.
+        Side effects: see the adapter. Role: port method."""
+        ...
+
     async def add_transcript_items(self, session_id: str, voice_session_id: str,
-                                   items: list[TranscriptItemIn]) -> int: ...
-    async def take_unmerged(self, session_id: str, turn_id: str, covered: CoveredItem | None) -> list[MergedItem]: ...
+                                   items: list[TranscriptItemIn]) -> int:
+        """What: store client transcript items, re-posts ignored. Use when: typing. Inputs: see signature. Output: see signature.
+        Side effects: see the adapter. Role: port method."""
+        ...
+
+    async def take_unmerged(self, session_id: str, turn_id: str, covered: CoveredItem | None) -> list[MergedItem]:
+        """What: claim unmerged items for a turn (step 12). Use when: typing. Inputs: see signature. Output: see signature.
+        Side effects: see the adapter. Role: port method."""
+        ...
 
 
 class Minter(Protocol):
     """What: mints a Realtime client secret. Use when: typing. Inputs: session config. Output: MintedSecret.
     Side effects: provider call. Role: port (OpenAIRealtimeMinter in production)."""
 
-    async def mint(self, session: dict[str, Any]) -> MintedSecret: ...
+    async def mint(self, session: dict[str, Any]) -> MintedSecret:
+        """What: mint one Realtime client secret. Use when: typing. Inputs: see signature. Output: see signature.
+        Side effects: see the adapter. Role: port method."""
+        ...
 
 
 @dataclass
