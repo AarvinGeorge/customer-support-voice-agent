@@ -1,10 +1,12 @@
 """What: fails if a tool module of services/agent reaches the commit or ops code, client or token (doc 07 s1.4).
-Use when: CI (and locally). Tool wrappers hold only the agent token; commit code lives in `ingress/confirm.py`,
+Use when: CI (and locally). Tool wrappers hold only the agent token; commit code lives in `structured/confirm.py`
+(doc 07 s1.4 names `ingress/confirm.py`; both paths are forbidden),
 ops code in `ops/`, and the commit and ops tokens are `CORE_TOKEN_COMMIT` and `CORE_TOKEN_OPS`.
 Inputs: argv[0] = repo root (default: the parent of scripts/). Scope: every .py under services/agent that sits in a
 `tools` directory or is named `tools.py`.
 Output: exit 0 and "import guard: N tool modules scanned, 0 violations"; exit 1 and one `path:line` per violation.
-Forbidden: (1) any import (absolute or relative, plain, from, or aliased name) that resolves to `ingress.confirm` or to
+Forbidden: (1) any import (absolute or relative, plain, from, or aliased name) that resolves to `ingress.confirm`,
+`structured.confirm` or to
 an `ops` package; (2) an import path or imported name that is a commit or ops client (`commit_client`, `OpsClient`,
 `core_commit`, `core_ops`; whole snake-case words, so `devops_client` is fine); (3) `importlib.import_module` or
 `__import__` with such a literal, or with a non-literal argument; (4) the strings CORE_TOKEN_COMMIT or CORE_TOKEN_OPS.
@@ -31,7 +33,7 @@ def _forbidden_path(dotted: str) -> bool:
     parts = [p for p in dotted.split(".") if p]
     if "ops" in parts:
         return True
-    if any(a == "ingress" and b == "confirm" for a, b in zip(parts, parts[1:])):
+    if any(a in ("ingress", "structured") and b == "confirm" for a, b in zip(parts, parts[1:])):
         return True
     return any(CLIENT_WORD.search(_snake(p)) for p in parts)
 

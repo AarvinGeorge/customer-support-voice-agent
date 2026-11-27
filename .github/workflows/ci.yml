@@ -33,6 +33,7 @@ jobs:
           - {project: services/core, pyright_target: ""}
           - {project: services/knowledge, pyright_target: ""}
           - {project: scripts, pyright_target: ""}
+          - {project: evals, pyright_target: ""}
           - {project: infra, pyright_target: skip}
     env:
       REQUIRE_ARTICLES: "1"  # the policy article tests fail instead of skipping (packages/contracts tests, PR #7)
