@@ -11,8 +11,11 @@ import pytest
 from contracts import VERSION
 from contracts.agent_api import AgentReady
 from contracts.errors import ErrorEnvelope
+from agent.access import sign_cookie
 from agent.main import create_app
 from agent.settings import Settings
+
+KEY = "k" * 32
 
 
 def settings(**kw) -> Settings:
@@ -92,7 +95,8 @@ async def test_readyz_core_or_knowledge_down_is_degraded_not_503():
 
 
 async def test_unknown_path_returns_the_error_envelope_with_trace_id():
-    async with client(create_app(settings(), probes=probes())) as c:
+    async with client(create_app(settings(session_signing_key=KEY), probes=probes())) as c:
+        c.cookies.set("qs_access", sign_cookie(KEY))  # the access gate answers 401 before routing otherwise
         r = await c.get("/api/nope")
     assert r.status_code == 404
     env = ErrorEnvelope.model_validate(r.json())
@@ -110,7 +114,7 @@ async def test_wrong_method_returns_the_envelope():
 
 
 async def test_unhandled_exception_returns_envelope_not_a_stack_trace():
-    app = create_app(settings(), probes=probes())
+    app = create_app(settings(session_signing_key=KEY), probes=probes())
 
     @app.get("/api/boom")
     async def boom() -> None:
@@ -118,7 +122,7 @@ async def test_unhandled_exception_returns_envelope_not_a_stack_trace():
         raise RuntimeError("secret internals")
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
-                                 base_url="http://test") as c:
+                                 base_url="http://test", cookies={"qs_access": sign_cookie(KEY)}) as c:
         r = await c.get("/api/boom")
     assert r.status_code == 500
     assert "secret internals" not in r.text

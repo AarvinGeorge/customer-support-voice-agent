@@ -1,0 +1,18 @@
+# Test fixture shaped like data/seeds/personas.yaml (doc 07 s2.2 Persona).
+personas:
+  - name: Priya Raman
+    role: owner
+    tier: pro
+    contract_status: active
+    account_id: ACC-1001
+    pin: "4821"
+    scenarios: [S1, S2, S5]
+    description: Ask about the duplicate $96 charge from 21 November
+  - name: Marcus Lee
+    role: member
+    tier: pro
+    contract_status: active
+    account_id: ACC-1002
+    pin: "1357"
+    scenarios: [S3]
+    description: Ask for a refund as a member and read the decline

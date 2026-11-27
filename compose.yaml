@@ -17,6 +17,7 @@ x-agent: &agent
     args: {SERVICE: agent}
   stop_grace_period: 60s   # above the 45 s turn deadline
   networks: [edge, backend, egress]
+  volumes: ["./data:/data:ro"]   # data/seeds/personas.yaml for GET /api/demo/personas
   depends_on:
     migrate_agent: {condition: service_completed_successfully}
     redis: {condition: service_healthy}
