@@ -34,7 +34,7 @@ from agent.prompt import TurnContext, build_turn_message
 from agent.settings import Settings
 from agent.sse import TurnOutcome, TurnStream, stream_agent_turn
 from agent.tools.catalog import build_tools
-from agent.turn_control import TurnControl
+from agent.turn_control import TurnControl, current_control
 
 log = logging.getLogger("agent.composition")
 
@@ -100,8 +100,9 @@ class AgentTurnBody:
         if inp.merged_transcript:  # step 12 result: client voice chatter, already wrapped as untrusted
             messages.append(HumanMessage(content=inp.merged_transcript))
         messages.append(build_turn_message(text, ctx))
-        control = TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
-                              deadline=_monotonic(row.deadline_at), events=stream)
+        # Ingress binds the turn's TurnControl (deadline, demo fault) once CS-E-07.S1.T2 lands; reuse it then.
+        control = current_control() or TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
+                                                   deadline=_monotonic(row.deadline_at), events=stream)
         return await stream_agent_turn(stream, self.agent, {"messages": messages}, config, control=control)
 
 
@@ -123,12 +124,13 @@ def build_agent_runtime(cfg: Settings, *, http: httpx.AsyncClient, checkpointer:
 
 def build_ingress(agent: Any, *, store: TurnStore, lock: TurnLock, served_by: str, call_keys: CallKeys | None = None,
                   merge_transcript: MergeTranscript | None = None,
-                  body_factory: Callable[[Any], AgentBody] = AgentTurnBody) -> Ingress:
+                  body_factory: Callable[[Any], AgentBody] = AgentTurnBody, **extra: Any) -> Ingress:
     """What: the one Ingress for chat and voice. Use when: wire_app; tests with memory stores.
     Inputs: agent, turn store, turn lock, replica name, voice call keys, transcript merger, body factory (seam for
-    TurnRunner). Output: Ingress. Side effects: none. Role: wiring."""
+    TurnRunner), extra Ingress keyword arguments (for example trajectory, CS-E-03.S8.T8). Output: Ingress.
+    Side effects: none. Role: wiring."""
     return Ingress(store, lock, served_by=served_by, run_agent=body_factory(agent), call_keys=call_keys,
-                   merge_transcript=merge_transcript)
+                   merge_transcript=merge_transcript, **extra)
 
 
 def wire_app(app: FastAPI, cfg: Settings) -> Ingress | None:
@@ -152,9 +154,11 @@ def wire_app(app: FastAPI, cfg: Settings) -> Ingress | None:
     for name, value in ("CORE_TOKEN_AGENT", cfg.core_token_agent), ("KNOWLEDGE_TOKEN_AGENT", cfg.knowledge_token_agent):
         if not value:
             log.error("%s is not set: every tool call will be refused", name)
+    # Hook for CS-E-03.S8.T8: the lifespan that opens a TrajectoryWriter sets app.state.trajectory; pass it on.
+    extra = {"trajectory": state.trajectory} if getattr(state, "trajectory", None) is not None else {}
     ingress = build_ingress(runtime.agent, store=PgTurnStore(state.pg_pool), lock=RedisTurnLock(state.redis),
                             served_by=cfg.served_by, call_keys=RedisCallKeys(state.redis),
-                            merge_transcript=TranscriptMerger(PgVoiceStore(state.pg_pool)))
+                            merge_transcript=TranscriptMerger(PgVoiceStore(state.pg_pool)), **extra)
     state.ingress = ingress
     if getattr(state, "voice", None) is not None:
         state.voice.ingress = ingress

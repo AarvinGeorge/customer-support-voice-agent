@@ -18,6 +18,14 @@ from agent.ingress import Ingress, IngressError, IngressInput, input_kind_of, pa
 from agent.web import error_response
 
 
+def request_demo_fault(request: Request) -> str | None:
+    """What: HOOK for the X-Demo-Fault header (doc 07 s10). Returns None until CS-E-07.S1.T2 (PR #44) merges; then it
+    returns demo_fault_from_header(request.headers.get("x-demo-fault"), enabled=settings.demo_faults_enabled) and the
+    route passes it as IngressInput(demo_fault=...).
+    Use when: post_turn. Inputs: request. Output: the gated fault or None. Side effects: none. Role: seam."""
+    return None
+
+
 def install_turns(app: FastAPI) -> None:
     """What: register the turn route. Use when: once in create_app. Inputs: app. Output: none.
     Side effects: mutates app. Role: route wiring."""
@@ -41,6 +49,7 @@ def install_turns(app: FastAPI) -> None:
         req = parse_turn_request(raw)
         if isinstance(req, IngressError):
             return to_response(request, req)
+        _ = request_demo_fault(request)  # wired into IngressInput.demo_fault with PR #44
         result = await ingress.handle(IngressInput(
             session_id=sid, visitor_id=request.state.visitor_id, client_turn_id=str(req.client_turn_id),
             mode="chat", input_kind=input_kind_of(req), text=req.text, body=req))

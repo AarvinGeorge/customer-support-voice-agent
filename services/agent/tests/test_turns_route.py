@@ -415,3 +415,41 @@ def _far() -> Any:
     from datetime import UTC, datetime, timedelta
     return datetime.now(UTC) + timedelta(seconds=45)
 
+
+
+async def test_body_reuses_a_turn_control_that_ingress_already_bound() -> None:
+    from agent.turn_control import TurnControl, bind_turn_control
+    w = World(AIMessage(content="Sure."))
+    stream = TurnStream(composition_meta())
+    row = TurnRow(turn_id="019a7c2e-5b20-7000-8000-0000000000d1", session_id=SID, client_turn_id="c", mode="chat",
+                  input_kind="text", status="running", deadline_at=_far(), started_at=_far())
+    bound = TurnControl(session_id=SID, turn_id=row.turn_id, mode="chat", demo_fault="tool_error", events=stream)
+    bind_turn_control(bound)
+    inp = IngressInput(session_id=SID, visitor_id=VISITOR, client_turn_id="c", mode="chat", input_kind="text", text="hi")
+    seen: list[Any] = []
+    real = composition.stream_agent_turn
+
+    async def spy(*a: Any, **kw: Any) -> Any:
+        """What: record the control passed. Use when: this test. Inputs: adapter args. Output: outcome.
+        Side effects: records. Role: spy."""
+        seen.append(kw.get("control"))
+        return await real(*a, **kw)
+
+    composition.stream_agent_turn = spy  # type: ignore[assignment]
+    try:
+        await composition.AgentTurnBody(w.runtime.agent)(stream, inp, row)
+    finally:
+        composition.stream_agent_turn = real  # type: ignore[assignment]
+    assert seen == [bound]
+
+
+def test_wire_app_passes_the_trajectory_writer_when_the_app_has_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    got: dict[str, Any] = {}
+    monkeypatch.setattr(composition, "build_agent_runtime",
+                        lambda cfg, **kw: SimpleNamespace(agent=object()))
+    monkeypatch.setattr(composition, "Ingress", lambda *a, **kw: got.update(kw) or SimpleNamespace())
+    sentinel = object()
+    state = SimpleNamespace(checkpointer=object(), pg_pool=object(), redis=object(), http=object(), voice=None,
+                            trajectory=sentinel)
+    composition.wire_app(SimpleNamespace(state=state), settings())  # type: ignore[arg-type]
+    assert got["trajectory"] is sentinel
