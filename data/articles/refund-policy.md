@@ -2,7 +2,7 @@
 article_id: refund-policy
 title: "Refund policy"
 source_url: https://app.notion.com/p/4257c83d5896817b9a5fcc8230b8a559
-last_edited_time: 2026-11-27T07:03:37.963Z
+last_edited_time: 2026-11-27T07:11:41.925Z
 tiers: [all]
 ---
 
@@ -41,7 +41,7 @@ Some charges cannot be refunded:
 
 ## Did my refund go through, and when will I see it?
 
-Support can confirm that a refund was issued, and when, from your account's action history. Once a refund is issued, it goes back to the original payment method. How long it takes to reach your card or show on your statement depends on your bank.
+Support can confirm that a refund was issued, and when, from your account records. Once a refund is issued, it goes back to the original payment method. How long it takes to reach your card or show on your statement depends on your bank.
 
 ## Refund for a duplicate charge
 
@@ -49,7 +49,7 @@ If you were charged twice for the same thing, ask for a refund of the duplicate 
 
 ## If a refund fails, was my account charged or changed?
 
-If something goes wrong while a refund is being issued, support tries once more. If it still fails, support opens a ticket for our team and tells you plainly what did and did not change. A refund that fails leaves your charges unchanged.
+If something goes wrong while a refund is being issued, support checks the status of the refund before trying anything again, so a refund is never issued twice. Support tells you plainly what did and did not change. If support cannot confirm the result, it tells you the outcome is unconfirmed and opens a ticket for our team to check.
 
 ## Free plan
 

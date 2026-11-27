@@ -2,7 +2,7 @@
 article_id: support-and-escalation
 title: "Support, response times and escalation"
 source_url: https://app.notion.com/p/4257c83d589681ecb0c8c14ee773dcf2
-last_edited_time: 2026-11-27T07:03:02.167Z
+last_edited_time: 2026-11-27T07:11:44.001Z
 tiers: [all]
 ---
 
@@ -71,7 +71,7 @@ When something fails, support tells you plainly what did and did not change.
 
 ## How to talk to a person
 
-To reach a human support agent, ask to speak to a person, in chat or by voice. Support opens a ticket for our team and gives you its number.
+To reach a human support agent, ask to speak to a person, in chat or by voice. Support opens a ticket for our team and gives you its number, or adds a note to your open ticket in the same category.
 
 ## What support will not promise
 

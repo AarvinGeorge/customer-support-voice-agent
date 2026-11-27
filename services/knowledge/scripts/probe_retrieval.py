@@ -111,24 +111,41 @@ async def run_all(db, embedder) -> list[dict]:
 
 
 def thresholds(rows: list[dict]) -> dict:
-    """What: tau_low and tau_high by doc 07 s4.1 steps 2 and 3. Use when: after the probes. Inputs: rows.
-    Output: dict with taus and overlap flag. Side effects: none. Role: tau_low = midpoint of (highest off_topic,
-    lowest answerable), or highest off_topic plus 0.01 when the ranges overlap; tau_high = inclusive lower quartile
-    of answerable top cosines, at least tau_low."""
-    ans = [r["top_cosine"] for r in rows if r["label"] == "answerable"]
-    off = [r["top_cosine"] for r in rows if r["label"] == "off_topic"]
+    """What: tau_low and tau_high by doc 07 s4.1 steps 2 and 3, over the GENERIC probes only (D-053). Use when:
+    after the probes. Inputs: rows. Output: dict with taus and overlap flag. Side effects: none. Role: tau_low =
+    midpoint of (highest off_topic, lowest answerable), or the highest off_topic plus 0.01 when the ranges overlap;
+    tau_high = inclusive lower quartile of answerable top cosines, at least tau_low. Scenario probes (S1 to S5) are
+    checks and never move the numbers they are tested against."""
+    gen = [r for r in rows if r["scenario"] == "generic"]
+    ans = [r["top_cosine"] for r in gen if r["label"] == "answerable"]
+    off = [r["top_cosine"] for r in gen if r["label"] == "off_topic"]
     low = (max(off) + min(ans)) / 2 if max(off) < min(ans) else max(off) + 0.01
     high = max(statistics.quantiles(ans, n=4, method="inclusive")[0], low)
     return {"overlap": max(off) >= min(ans), "tau_low": round(low, 3), "tau_high": round(high, 3)}
 
 
+def add_margins(rows: list[dict], tau_low: float, tau_high: float) -> None:
+    """What: record each scenario probe's margin to the bar it is tested against and flag thin ones. Use when: after
+    thresholds. Inputs: rows (edited in place), tau_low, tau_high. Output: none. Side effects: adds `margin` and `risk`
+    to scenario rows only. Role: D-053: answerable margin = top cosine minus tau_high; off_topic = tau_low minus
+    top cosine; not_in_docs = tau_high minus top cosine; risk is True under 0.02 (inside run-to-run noise of
+    about 0.0003 and thin for a recorded demo)."""
+    for r in rows:
+        if r["scenario"] == "generic":
+            continue
+        c = r["top_cosine"]
+        r["margin"] = round({"answerable": c - tau_high, "off_topic": tau_low - c, "not_in_docs": tau_high - c}[r["label"]], 4)
+        r["risk"] = r["margin"] < 0.02
+
+
 def main() -> None:
     """What: run, then print JSON. Use when: script start. Inputs: none. Output: JSON on stdout. Side effects: see
-    module docstring. Role: adds a verdict per probe using the computed taus (cosine only: no code probes)."""
+    module docstring. Role: adds a verdict per probe and the scenario margins using the computed taus (cosine only: no code probes)."""
     db = Database(os.environ["KNOWLEDGE_DB_URL"])
     embedder = OpenAIEmbedder()
     rows = asyncio.run(run_all(db, embedder))
     t = thresholds(rows)
+    add_margins(rows, t["tau_low"], t["tau_high"])
     for r in rows:
         c = r["top_cosine"]
         r["verdict"] = "none" if c < t["tau_low"] else ("weak" if c < t["tau_high"] else "pass")
