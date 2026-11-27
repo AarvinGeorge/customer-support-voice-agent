@@ -41,7 +41,13 @@ class KnowledgeClient:
             raise SearchFailed(f"transport error: {type(e).__name__}") from e
         if r.status_code != 200:
             raise SearchFailed(f"HTTP {r.status_code}")
-        return dict(r.json())
+        try:
+            body = dict(r.json())
+            body["confidence"]["verdict"]
+            body["chunks"]
+        except (ValueError, KeyError, TypeError) as e:
+            raise SearchFailed(f"malformed search response: {type(e).__name__}") from e
+        return body
 
 
 def run_gate1(queries: list[dict[str, Any]], search: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
@@ -57,13 +63,12 @@ def run_gate1(queries: list[dict[str, Any]], search: Callable[[dict[str, Any]], 
         split, label = q["split"], q["label"]
         try:
             r = search(q)
-        except SearchFailed as e:
-            verdict, ids, top = "request_failed", [], None
-            failures.append({"id": q["id"], "error": str(e)})
-        else:
             verdict = r["confidence"]["verdict"]
             ids = [c["chunk_id"] for c in r["chunks"]]
             top = r["confidence"].get("top_cosine")
+        except (SearchFailed, KeyError, TypeError, ValueError) as e:
+            verdict, ids, top = "request_failed", [], None
+            failures.append({"id": q["id"], "error": str(e) or type(e).__name__})
         cell = confusion[split].setdefault(label, {})
         cell[verdict] = cell.get(verdict, 0) + 1
         if label == "answerable":

@@ -56,6 +56,8 @@ class PgStore:
     def _rows(self, conn: Any, sql: str, sid: str) -> list[dict[str, Any]]:
         """What: run one SELECT for a session. Use when: collecting. Inputs: connection, sql, session id.
         Output: rows. Side effects: a read. Role: single query path (parameterised)."""
+        if not sql.lstrip().upper().startswith("SELECT"):
+            raise DataUnavailable("refusing to run a non-SELECT statement on a grading connection")
         return list(conn.execute(sql, (sid,)).fetchall())
 
     def collect(self, session_id: str, expected_events: dict[str, int]) -> RunData:
@@ -65,6 +67,9 @@ class PgStore:
         try:
             core = self.connect(self.core_url)
             agent = self.connect(self.agent_url)
+            # grading never writes: a read-only session (READ COMMITTED stays, the event poll needs fresh reads)
+            core.read_only = True
+            agent.read_only = True
         except Exception as e:
             raise DataUnavailable(f"cannot connect to Postgres: {type(e).__name__}") from e
         try:

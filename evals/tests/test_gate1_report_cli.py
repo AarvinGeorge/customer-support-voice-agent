@@ -185,3 +185,19 @@ def test_agent_client_access_failure_is_exit_2(tmp_path: Path) -> None:
 
 def test_all_golden_cases_and_personas_still_load() -> None:
     assert len(load_cases()) == 14 and "Priya Raman" in load_personas() and AgentClient and ACCESS_CODE
+
+
+def test_a_malformed_search_body_is_request_failed_and_does_not_lose_the_run() -> None:
+    g = gate1.run_gate1(Q, lambda q: {} if q["id"] == "R-01" else ANSWERS[q["query"]])
+    assert g["confusion"]["train"]["answerable"] == {"request_failed": 1} and g["n"] == 5
+
+
+def test_knowledge_client_non_json_200_is_search_failed() -> None:
+    kc = gate1.KnowledgeClient(httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, text="oops")), base_url="http://k.test"), "t")
+    with pytest.raises(gate1.SearchFailed):
+        kc.search(Q[0])
+
+
+def test_default_reseed_uses_the_seed_core_job_that_holds_the_owner_url() -> None:
+    assert "seed_core" in cli.DEFAULT_RESEED and "--profile seed" in cli.DEFAULT_RESEED and " exec " not in cli.DEFAULT_RESEED
+    assert "DEMO_RESEED=true" in cli.DEFAULT_RESEED

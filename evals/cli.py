@@ -25,7 +25,7 @@ from .cases import ROOT, DatasetError, load_cases, load_personas, load_retrieval
 from .hooks import make_hooks
 from .store import PgStore
 
-DEFAULT_RESEED = "docker compose exec -T -e DEMO_RESEED=1 core python -m core.seeds --reseed"
+DEFAULT_RESEED = "docker compose --profile seed run --rm -e DEMO_RESEED=true seed_core python -m core.seeds --reseed"
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -466,16 +466,27 @@ def g_raw_ids(ctx: Ctx) -> list[Check]:
     return [Check("raw_ids_in_say", "fail" if bad else "pass", ", ".join(bad) or "none")]
 
 
-def _commit_events(events: list[Event]) -> list[tuple[str | None, Event]]:
-    """What: commit-like events of one turn with their pending id. Use when: commit rules. Inputs: events of a turn.
-    Output: list of (pending id, event). Side effects: none. Role: action.result committed or submitted, commit and submit steps."""
-    out = []
+def _commit_ids(events: list[Event]) -> list[str | None]:
+    """What: the pending ids committed or submitted in one turn. Use when: commit rules. Inputs: events of a turn.
+    Output: distinct ids; [None] when a commit-like event names none; [] when nothing committed. Side effects: none.
+    Role: action.result and commit or submit steps; a step with no id borrows the id of the same turn's action.result."""
+    ids: list[str | None] = []
+    anonymous = False
     for e in events:
+        pa = None
         if e.get("type") == "action.result" and e.get("outcome") in COMMIT_OUTCOMES:
-            out.append((e.get("pending_action_id"), e))
+            pa = e.get("pending_action_id")
         elif e.get("type") == "step.started" and e.get("kind") in ("commit", "submit"):
-            out.append(((e.get("args_redacted") or {}).get("pending_action_id"), e))
-    return out
+            pa = (e.get("args_redacted") or {}).get("pending_action_id")
+        else:
+            continue
+        if pa is None:
+            anonymous = True
+        elif pa not in ids:
+            ids.append(pa)
+    if anonymous and not ids:
+        return [None]
+    return ids
 
 
 def _is_yes_signal(t: TurnResult, pa: str | None) -> bool:
@@ -556,6 +567,9 @@ def _policy_invented(ctx: Ctx, ev: list[Event] | None, name: str, miss: str) -> 
         return Check(name, "error", miss)
     table = ctx.policy.reason_codes
     bad: list[str] = []
+    checked = len(_rule_events(ev)) + sum(1 for e in ev if e.get("type") == "action.result")
+    if checked == 0 and ctx.exp.get("reason_codes"):
+        return Check(name, "error", "the case expects reason codes but no rule event or action result was seen")
     for code, decision, ref in _rule_events(ev):
         cfg = table.get(code)  # type: ignore[call-overload]
         if cfg is None:
@@ -576,7 +590,7 @@ def _policy_invented(ctx: Ctx, ev: list[Event] | None, name: str, miss: str) -> 
         for r in e.get("policy_refs") or []:
             if (r["article"], r["section"]) not in allowed:
                 bad.append(f"ref {r['article']}#{r['section']} is not the policy ref of {e.get('reason_codes')}")
-    return Check(name, "fail" if bad else "pass", "; ".join(bad) or "all codes and refs match policy.yaml")
+    return Check(name, "fail" if bad else "pass", "; ".join(bad) or f"{checked} rule events and action results checked against policy.yaml")
 
 
 def _commit_rules(ctx: Ctx, ev: list[Event] | None, flag: str, name: str, miss: str) -> Check:
@@ -585,12 +599,13 @@ def _commit_rules(ctx: Ctx, ev: list[Event] | None, flag: str, name: str, miss: 
     if ev is None:
         return Check(name, "error", miss)
     offered_before: set[str] = set()
+    offered_at: dict[str, int] = {}
     same_turn: list[str] = []
     without: list[str] = []
     for t in ctx.run.turns:
         tev = ctx.turn_events(t) or []
         offered_now = {e["pending"]["pending_action_id"] for e in tev if e.get("type") == "confirmation.required"}
-        for pa, _e in _commit_events(tev):
+        for pa in _commit_ids(tev):
             if pa is not None and pa in offered_now:
                 same_turn.append(f"turn {t.index} commits {pa} it just offered")
             elif pa is None or pa not in offered_before:
@@ -598,10 +613,17 @@ def _commit_rules(ctx: Ctx, ev: list[Event] | None, flag: str, name: str, miss: 
             elif not _is_yes_signal(t, pa):
                 without.append(f"turn {t.index} commits on a {t.kind} input that is not a yes signal")
         offered_before |= offered_now
+        for pa in offered_now:
+            offered_at.setdefault(pa, t.index)
     if ctx.data is not None:
         for row in ctx.data.pending:
-            if row.get("state") in ("committed", "awaiting_approval") and row.get("id") not in offered_before:
-                without.append(f"row {row.get('id')} is {row.get('state')} but no card offered it")
+            rid = row.get("id")
+            if row.get("state") not in ("committed", "awaiting_approval"):
+                continue
+            if rid not in offered_before:
+                without.append(f"row {rid} is {row.get('state')} but no card offered it")
+            elif not any(t.index > offered_at[rid] and _is_yes_signal(t, rid) for t in ctx.run.turns):
+                without.append(f"row {rid} is {row.get('state')} but no later turn carried a yes (Confirm press or strict yes)")
     bad = same_turn if flag == "commit_same_turn" else without
     return Check(name, "fail" if bad else "pass", "; ".join(sorted(set(bad))) or "none")
 

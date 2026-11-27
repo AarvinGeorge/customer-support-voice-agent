@@ -26,7 +26,10 @@ def make_hooks(reseed_cmd: str, ingest_cmd: str | None, remove_cmd: str | None, 
     Side effects: the hooks run subprocesses. Role: stack preparation per case."""
 
     def call(cmd: str, what: str) -> None:
-        r = run(shlex.split(cmd), capture_output=True, text=True, timeout=300)
+        try:
+            r = run(shlex.split(cmd), capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise HookError(f"{what} could not run: {type(e).__name__}") from e
         if r.returncode != 0:
             raise HookError(f"{what} exited {r.returncode}: {(r.stderr or '')[:200]}")
 

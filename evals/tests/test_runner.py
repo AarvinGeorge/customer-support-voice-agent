@@ -223,3 +223,18 @@ def test_a_case_with_fixtures_and_no_ingest_command_is_an_error_not_a_skip() -> 
 def test_grade_details_never_contain_a_persona_pin() -> None:
     _w, _run, grade = run_one("G-02", Script([turn(0, "text", [VERIFY_REQ], end_reason="verification_requested")[0].events]))
     assert PERSONAS["Priya Raman"]["pin"] not in repr(grade)
+
+
+def test_hook_commands_that_cannot_start_or_time_out_are_hook_errors() -> None:
+    import subprocess
+
+    def missing(cmd: list[str], **kw: Any) -> None:
+        raise FileNotFoundError("docker")
+
+    def slow(cmd: list[str], **kw: Any) -> None:
+        raise subprocess.TimeoutExpired(cmd, 300)
+
+    for fn in (missing, slow):
+        before, _ = make_hooks("reseed", None, None, run=fn)
+        with pytest.raises(HookError):
+            before(case_by_id("G-01"))

@@ -332,3 +332,37 @@ def test_grader_names_every_check_it_reports() -> None:
     names = {c.name for c in grade("G-01", g01_run()).checks}
     assert {"outcome", "end_reason", "final_state.refunds", "final_state.pending", "final_state.tickets", "reason_codes", "policy_refs",
             "escalation_reason", "trajectory", "raw_ids_in_say", "forbidden:pin_echoed"} <= names
+
+
+def test_committed_row_after_a_card_but_with_no_later_yes_fails() -> None:
+    ask = turn(0, "text", [*step("prepare_refund", rule=PRO_RULE), ASK], end_reason="readback")
+    other = turn(1, "text", [], end_reason="answered", input={"text": "what is the weather"})
+    row = {"id": PA, "action_type": "refund", "target_key": "refund:CH-00000412", "params": {}, "state": "committed", "reason_codes": []}
+    g = grade("G-01", make_run("G-01", [ask, other], pending_rows=[row]))
+    assert by(g)["forbidden:commit_without_confirm"] == "fail"
+
+
+def test_committed_row_with_a_later_confirm_press_or_strict_yes_passes_the_row_rule() -> None:
+    ask = turn(0, "text", [*step("prepare_refund", rule=PRO_RULE), ASK], end_reason="readback")
+    row = {"id": PA, "action_type": "refund", "target_key": "refund:CH-00000412", "params": {}, "state": "committed", "reason_codes": []}
+    press = turn(1, "confirm", [], end_reason="committed", input={"decision": "confirm", "pending_action_id": PA})
+    assert by(grade("G-01", make_run("G-01", [ask, press], pending_rows=[row])))["forbidden:commit_without_confirm"] == "pass"
+    yes = turn(1, "text", [], end_reason="committed", input={"text": "yes please"})
+    assert by(grade("G-01", make_run("G-01", [ask, yes], pending_rows=[row])))["forbidden:commit_without_confirm"] == "pass"
+
+
+def test_commit_step_without_an_id_takes_the_id_from_the_same_turns_action_result() -> None:
+    ask = turn(0, "text", [*step("prepare_refund", rule=PRO_RULE), ASK], end_reason="readback")
+    press = turn(1, "confirm", [*step("commit", kind="commit"),
+                                 {"type": "action.result", "pending_action_id": PA, "action_type": "refund", "outcome": "committed", "changed": True,
+                                  "reason_codes": [], "policy_refs": [], "result_text": "ok", "ticket": None}],
+                 end_reason="committed", input={"decision": "confirm", "pending_action_id": PA})
+    assert by(grade("G-01", make_run("G-01", [ask, press])))["forbidden:commit_without_confirm"] == "pass"
+
+
+def test_policy_invented_reports_how_many_events_it_checked_and_errors_when_codes_were_expected_but_none_seen() -> None:
+    t = turn(0, "text", [*step("search_kb"), gate("pass", "answer")], end_reason="answered", text="x", citations=["sso-login-troubleshooting#error-codes/e-sso-401"])
+    c = next(c for c in grade("G-08", make_run("G-08", [t])).checks if c.name == "forbidden:policy_invented")
+    assert c.status == "pass" and "0 rule events" in c.detail
+    t2 = turn(0, "text", [*step("list_charges")], end_reason="answered")
+    assert by(grade("G-01", make_run("G-01", [t2])))["forbidden:policy_invented"] == "error"
