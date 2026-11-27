@@ -143,8 +143,8 @@ class World:
                                                  served_by="agent_a", call_keys=self.keys,
                                                  merge_transcript=TranscriptMerger(self.vstore))
 
-        async def summary(sid: str) -> SessionSummary:
-            """What: fake thread summary. Use when: voice/token. Inputs: sid. Output: summary. Side effects: none.
+        async def summary(sid: str, context: object) -> SessionSummary:
+            """What: fake thread summary. Use when: voice/token. Inputs: sid, RedactContext (ignored). Output: summary. Side effects: none.
             Role: fake."""
             return SessionSummary()
 
