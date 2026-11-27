@@ -155,6 +155,7 @@ def world(app_url, owner_url, migrated):
                                              "X-Mode": "chat"})
 
         w.get = get
+        w.client = client
         yield w
     accounts = [w.a, w.b]
     with psycopg.connect(owner_url, autocommit=True) as o:
