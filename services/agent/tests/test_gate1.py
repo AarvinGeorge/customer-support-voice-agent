@@ -280,3 +280,21 @@ async def test_retrieval_error_escalates_retrieval_unavailable_and_never_says_no
     for line in (outcome.final.text, outcome.final.say):
         assert not any(p in line.lower() for p in NOT_IN_DOCS), line
     assert len(h.model.seen) == 1  # no answer from memory
+
+
+# --- drawer contract (coordinator note, PR #41): every retrieval gate event sets the score fields --------------
+@pytest.mark.parametrize(("knowledge", "scope"), [
+    pytest.param(search_body("pass"), None, id="pass"),
+    pytest.param(search_body("weak", "weak_match"), None, id="weak"),
+    pytest.param(search_body("none", "below_threshold"), "OFF", id="none"),
+    pytest.param(search_body("error", "retrieval_unavailable"), None, id="verdict_error"),
+    pytest.param(503, None, id="http_503"),
+    pytest.param("timeout", None, id="timeout"),
+])
+async def test_every_retrieval_gate_event_sets_code_match_and_the_score_fields(knowledge: Any, scope: str | None):
+    h = Harness(knowledge, scope=classifier(scope) if scope else None)
+    _, events, _ = await h.run()
+    [g] = gates(events)
+    assert isinstance(g.code_match, bool)
+    assert {"verdict", "top_cosine", "tau_low", "tau_high", "calibration_status", "code_match"} <= g.model_fields_set
+    assert isinstance(g.calibration_status, str)

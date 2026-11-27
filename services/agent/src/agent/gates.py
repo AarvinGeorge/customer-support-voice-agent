@@ -96,11 +96,14 @@ def start_gate_step(control: TurnControl, name: str, label: str) -> GateStep:
 
 
 def _retrieval_fields(confidence: dict[str, Any], chunk_ids: list[str]) -> dict[str, Any]:
-    """What: the Gate 1 score fields of the gate event from a knowledge Confidence. Use when: gate events.
-    Inputs: confidence dict, all returned chunk ids. Output: dict. Side effects: none. Role: helper."""
+    """What: the Gate 1 score fields of the gate event from a knowledge Confidence (or {} when the search failed).
+    Use when: every retrieval gate event. Inputs: confidence dict, all returned chunk ids. Output: dict with every
+    key always present: code_match is always a bool and calibration_status always a string ("none" when unknown),
+    so the drawer sentence (PR #41) never contradicts itself. Side effects: none. Role: helper."""
     return {"top_cosine": confidence.get("top_cosine"), "tau_low": confidence.get("tau_low"),
-            "tau_high": confidence.get("tau_high"), "calibration_status": confidence.get("calibration_status"),
-            "code_match": confidence.get("code_match"), "chunk_ids": chunk_ids}
+            "tau_high": confidence.get("tau_high"),
+            "calibration_status": str(confidence.get("calibration_status") or "none"),
+            "code_match": bool(confidence.get("code_match")), "chunk_ids": chunk_ids}
 
 
 _DECISION_TITLES = {"answer": "Found matching help articles", "clarify": "Search was not specific enough",
@@ -137,11 +140,12 @@ def retrieval_unavailable(control: TurnControl) -> None:
     route escalate(retrieval_unavailable). Use when: ToolGuard, when a search_kb call fails for good.
     Inputs: control. Output: none. Side effects: TurnControl.retrieval and route; events.
     Role: doc 07 s6.5 row 4 ("503, or timeout"); never "not in our docs"."""
-    control.retrieval = {"verdict": "error", "decision": "escalate", "chunk_ids": []}
+    fields = _retrieval_fields({}, [])
+    control.retrieval = {"verdict": "error", "decision": "escalate", **fields}
     step = start_gate_step(control, "retrieval_gate", "Checking the search results")
     control.set_route(Route("escalate", reason="retrieval_unavailable"))
     step.finish(gate="retrieval", verdict="error", decision="escalate", title=_DECISION_TITLES["escalate"],
-                status="error", chunk_ids=[])
+                status="error", **fields)
 
 
 def last_user_text(messages: list[BaseMessage]) -> str:
@@ -199,9 +203,7 @@ async def run_scope_check(control: TurnControl, classifier: ScopeClassifier | No
     if control.retrieval is not None:
         control.retrieval["decision"] = decision
     step.finish(gate="retrieval", verdict="none", decision=decision, title=_DECISION_TITLES[decision],
-                top_cosine=r.get("top_cosine"), tau_low=r.get("tau_low"), tau_high=r.get("tau_high"),
-                calibration_status=r.get("calibration_status"), code_match=r.get("code_match"),
-                chunk_ids=list(r.get("chunk_ids") or []))
+                **_retrieval_fields(r, list(r.get("chunk_ids") or [])))
 
 
 def next_weak_streak(control: TurnControl) -> int:
