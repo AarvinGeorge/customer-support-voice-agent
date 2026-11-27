@@ -1,8 +1,8 @@
 """What: local API-key helper. Sets keys into .env with hidden input, shows which are set (masked),
 and verifies each with one read-only API call.
-Use when: adding or rotating a key on a dev machine. Production keys live in Railway and Vercel
-environment variables, not here.
-Inputs: subcommand (status | set [NAME] | verify | gen-access-code); key values typed at a hidden prompt,
+Use when: adding or rotating a key on a dev machine. On the VM, the same names are rendered into the
+server env from GitHub Actions secrets at deploy (D-008).
+Inputs: subcommand (status | set [NAME] | verify | gen); key values typed at a hidden prompt,
 never as arguments (they would land in shell history).
 Output: masked status lines; verification results as HTTP status meanings. Never prints a key.
 Side effects: writes development/.env (mode 0600); verify sends GET requests to provider APIs.
@@ -26,26 +26,32 @@ ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 class KeySpec:
     """What: description of one secret the app needs.
     Use when: adding a new key to the registry. Inputs: fields below. Output: none.
-    Side effects: none. Role: one row of the key registry."""
+    Side effects: none. Role: one row of the key registry (names follow contract doc 07 section 1.4)."""
 
     name: str
     purpose: str
     prefixes: tuple[str, ...]  # accepted prefixes; empty means no prefix check
-    needed: str  # "now" or "deploy"
+    source: str  # "provider" (a person pastes it) or "generated" (random, made by gen)
     verify_url: str | None = None
 
 
 REGISTRY: tuple[KeySpec, ...] = (
-    KeySpec("LANGSMITH_API_KEY", "LangSmith tracing and drawer reads (service key)",
-            ("lsv2_sk_", "lsv2_pt_"), "now", "https://api.smith.langchain.com/api/v1/sessions?limit=1"),
-    KeySpec("ANTHROPIC_API_KEY", "Agent model (Claude)", ("sk-ant-",), "now",
+    KeySpec("ANTHROPIC_API_KEY", "Agent model and Gate 2 verifier (Claude)", ("sk-ant-",), "provider",
             "https://api.anthropic.com/v1/models?limit=1"),
-    KeySpec("OPENAI_API_KEY", "Voice (Realtime), embeddings, fallback model, eval judge", ("sk-",), "now",
+    KeySpec("OPENAI_API_KEY", "Voice (Realtime), embeddings, fallback model, eval judge", ("sk-",), "provider",
             "https://api.openai.com/v1/models"),
-    KeySpec("DATABASE_URL", "Postgres + pgvector (Neon)", ("postgres://", "postgresql://"), "deploy"),
-    KeySpec("UPSTASH_REDIS_REST_URL", "Rate limits (Upstash Redis)", ("https://",), "deploy"),
-    KeySpec("UPSTASH_REDIS_REST_TOKEN", "Rate limits (Upstash Redis)", (), "deploy"),
-    KeySpec("DEMO_ACCESS_CODE", "Gate on the public demo URL", (), "deploy"),
+    KeySpec("LANGSMITH_API_KEY", "LangSmith tracing and drawer reads (service key)",
+            ("lsv2_sk_", "lsv2_pt_"), "provider", "https://api.smith.langchain.com/api/v1/sessions?limit=1"),
+    KeySpec("CORE_TOKEN_AGENT", "Agent tool wrappers to core (no commit scope)", (), "generated"),
+    KeySpec("CORE_TOKEN_COMMIT", "Agent ingress confirmation code to core (commit scope)", (), "generated"),
+    KeySpec("CORE_TOKEN_OPS", "Agent ops router to core (approvals)", (), "generated"),
+    KeySpec("KNOWLEDGE_TOKEN_AGENT", "Agent and local evals to knowledge", (), "generated"),
+    KeySpec("SESSION_SIGNING_KEY", "Signs the visitor access cookie", (), "generated"),
+    KeySpec("PIN_PEPPER", "Secret pepper for PIN hashes in core", (), "generated"),
+    KeySpec("OPERATOR_TOKEN_KEY", "Signs core-issued operator tokens", (), "generated"),
+    KeySpec("DEMO_ACCESS_CODE", "Gate on the demo URL (shared with reviewers)", (), "generated"),
+    KeySpec("OPERATOR_ACCESS_CODE", "Gate on the operator approvals page", (), "generated"),
+    KeySpec("POSTGRES_PASSWORD", "Local and VM Postgres password (Compose)", (), "generated"),
 )
 SPECS = {s.name: s for s in REGISTRY}
 
@@ -101,7 +107,7 @@ def format_problem(name: str, value: str) -> str | None:
     Side effects: none. Role: catches a key pasted into the wrong slot."""
     if any(c.isspace() for c in value):
         return "contains whitespace"
-    if len(value) < 20 and name != "DEMO_ACCESS_CODE":
+    if len(value) < 20 and name not in ("DEMO_ACCESS_CODE", "OPERATOR_ACCESS_CODE"):
         return "too short to be a real key"
     spec = SPECS.get(name)
     if spec and spec.prefixes and not value.startswith(spec.prefixes):
@@ -143,22 +149,22 @@ def verify(spec: KeySpec, value: str) -> str:
 
 def cmd_status() -> int:
     """What: print each registry key as MISSING or masked. Use when: checking setup.
-    Inputs: none. Output: exit 1 if any 'now' key is missing. Side effects: reads .env. Role: subcommand."""
+    Inputs: none. Output: exit 1 if any key is missing. Side effects: reads .env. Role: subcommand."""
     env = read_env(ENV_PATH)
     missing_now = 0
     for spec in REGISTRY:
         state = mask(env.get(spec.name, ""))
-        if spec.needed == "now" and state == "MISSING":
+        if state == "MISSING":
             missing_now += 1
-        print(f"{spec.name:26} {state:22} [{spec.needed}] {spec.purpose}")
+        print(f"{spec.name:26} {state:22} [{spec.source}] {spec.purpose}")
     return 1 if missing_now else 0
 
 
 def cmd_set(names: list[str]) -> int:
-    """What: prompt (hidden) for each named key, or every 'now' key, and save it.
+    """What: prompt (hidden) for each named key, or every provider key, and save it.
     Use when: adding or rotating keys. Inputs: key names. Output: exit 0 on success.
     Side effects: writes .env. Role: subcommand."""
-    targets = names or [s.name for s in REGISTRY if s.needed == "now"]
+    targets = names or [s.name for s in REGISTRY if s.source == "provider"]
     for name in targets:
         if name not in SPECS:
             print(f"Unknown key {name}. Known: {', '.join(SPECS)}")
@@ -196,11 +202,27 @@ def cmd_verify() -> int:
     return 1 if failures else 0
 
 
-def cmd_gen_access_code() -> int:
-    """What: generate a random demo access code and save it. Use when: before sharing the URL.
+def generate_missing(path: Path) -> list[str]:
+    """What: create a random value for every generated secret that is not set yet.
+    Use when: first setup, or after adding a new generated secret. Inputs: env file path.
+    Output: names that were created (empty if nothing was missing); never overwrites a set value.
+    Side effects: writes the env file. Role: generator for internal secrets."""
+    env = read_env(path)
+    made = []
+    for spec in REGISTRY:
+        if spec.source != "generated" or env.get(spec.name):
+            continue
+        short = spec.name in ("DEMO_ACCESS_CODE", "OPERATOR_ACCESS_CODE")
+        upsert_env(path, spec.name, secrets.token_urlsafe(9 if short else 32))
+        made.append(spec.name)
+    return made
+
+
+def cmd_gen() -> int:
+    """What: generate missing internal secrets and say which. Use when: first setup.
     Inputs: none. Output: exit 0. Side effects: writes .env. Role: subcommand."""
-    upsert_env(ENV_PATH, "DEMO_ACCESS_CODE", secrets.token_urlsafe(12))
-    print("DEMO_ACCESS_CODE saved. Read it from .env when you need to share it.")
+    made = generate_missing(ENV_PATH)
+    print("Generated: " + (", ".join(made) if made else "nothing (all already set)"))
     return 0
 
 
@@ -209,7 +231,7 @@ def main(argv: list[str]) -> int:
     Output: exit code. Side effects: per subcommand. Role: entry point."""
     if not argv or argv[0] in {"-h", "--help"}:
         print(__doc__)
-        print("Usage: python3 scripts/keys.py status | set [NAME ...] | verify | gen-access-code")
+        print("Usage: python3 scripts/keys.py status | set [NAME ...] | verify | gen")
         return 0
     cmd, rest = argv[0], argv[1:]
     if cmd == "status":
@@ -218,8 +240,8 @@ def main(argv: list[str]) -> int:
         return cmd_set(rest)
     if cmd == "verify":
         return cmd_verify()
-    if cmd == "gen-access-code":
-        return cmd_gen_access_code()
+    if cmd == "gen":
+        return cmd_gen()
     print(f"Unknown command {cmd}")
     return 2
 
