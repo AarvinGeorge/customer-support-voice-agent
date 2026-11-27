@@ -8,11 +8,13 @@ Output: StructuredInput, the fixed lines.
 Side effects: core calls through verification and the Confirmer; verification.*, confirmation.required and
 action.result events.
 Role: decides whether the turn ends with a deterministic reply or goes to the model; the model can never commit.
+Fix round 1: a typed yes commits only when the read-back turn was delivered (I1); a lapsed verification shows the
+card again and keeps the pending (I2, D-055); a voice text yes never commits until CS-E-05.S1.T1 (I3).
 Current pending = MeContext.pending_action read from core this turn (the step 11 snapshot).
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from contracts.events import FinalAnswer
 from langchain_core.messages import AIMessage, HumanMessage
@@ -30,19 +32,24 @@ from agent.turn_body import SessionFlags, StructuredResult, TurnPrep
 
 NOT_CURRENT_LINE = "That request is no longer active. Ask me again if you still need it."
 TICKET_OFFER_PRESSED = "[customer pressed Create ticket]"
+VERIFY_EXPIRED_LINE = "Your verification has expired. Please verify again in the secure card, then confirm."
+VOICE_PRESS_CONFIRM = "To go ahead, please press Confirm on screen."
 CONFIRM_PRESSED = "[customer pressed Confirm]"
 CANCEL_PRESSED = "[customer pressed Cancel]"
 
+LastTurn = Callable[[str, str], Awaitable["tuple[str, str] | None"]]
+
 
 class StructuredInput:
-    """What: the step 13 handler. Use when: one per app. Inputs: core client, confirmer, flags.
+    """What: the step 13 handler. Use when: one per app. Inputs: core client, confirmer, flags, last_turn, escalator.
     Output: __call__(stream, inp, prep) -> StructuredResult. Side effects: see module. Role: s7.3 dispatcher."""
 
     def __init__(self, core: CoreAgentClient, confirmer: Confirmer, *, flags: SessionFlags | None = None,
-                 escalator: Escalator | None = None) -> None:
-        """What: keep dependencies. Use when: app start or tests. Inputs: see class (escalator defaults to one on
-        the same core client). Output: none. Side effects: none. Role: constructor."""
-        self.core, self.confirmer, self.flags = core, confirmer, flags
+                 last_turn: LastTurn | None = None, escalator: Escalator | None = None) -> None:
+        """What: keep dependencies. Use when: app start or tests. Inputs: see class; last_turn reads the session's
+        previous turn row (PgTurnStore.last_turn); escalator defaults to one on the same core client.
+        Output: none. Side effects: none. Role: constructor."""
+        self.core, self.confirmer, self.flags, self.last_turn = core, confirmer, flags, last_turn
         self.escalator = escalator or Escalator(core)
 
     async def __call__(self, stream: TurnStream, inp: Any, prep: TurnPrep) -> StructuredResult:
@@ -55,30 +62,40 @@ class StructuredInput:
             return await self._ticket_offer(stream, prep, TICKET_OFFER_PRESSED)
         pending = prep.memory.current_pending
         confirm = getattr(body, "confirm", None) if body is not None else None
+        text = inp.text
+        yes = no = False
+        if confirm is None and text is not None:
+            yes, no = is_strict_yes(text), is_strict_no(text)
+        lapsed = prep.memory.verified_cleared or (not prep.values.get("verified") and bool(prep.values.get("pending")))
+        if lapsed and (confirm is not None or ((yes or no) and prep.values.get("pending"))):
+            human = (CONFIRM_PRESSED if confirm.decision == "confirm" else CANCEL_PRESSED) if confirm else text
+            return await self._verify_again(stream, prep, human, VERIFY_EXPIRED_LINE)  # D-055: never "not active"
         if confirm is not None:
             human = CONFIRM_PRESSED if confirm.decision == "confirm" else CANCEL_PRESSED
             if pending is None or pending.get("pending_action_id") != confirm.pending_action_id:
                 return self._not_current(stream, prep, human, confirm.pending_action_id)
             if confirm.decision == "confirm":  # yes signal 1
-                return self._action(stream, prep, human, pending, await self.confirmer.confirm(prep.control, pending))
-            return self._action(stream, prep, human, pending, await self.confirmer.cancel(prep.control, pending))
-        text = inp.text
+                return await self._action(stream, prep, human, pending, await self.confirmer.confirm(prep.control, pending))
+            return await self._action(stream, prep, human, pending, await self.confirmer.cancel(prep.control, pending))
         if (text is not None and pending is None and inp.mode == "voice" and is_strict_yes(text)
                 and apology_is_last(list(prep.values.get("messages") or []))):  # s6.7 voice yes to the offer
             return await self._ticket_offer(stream, prep, build_turn_message(text, TurnContext(
                 mode="voice", verified=bool(prep.values.get("verified")))))
         if text is None or pending is None:  # a yes or no with no current pending answers something else
             return StructuredResult()
-        yes, no = is_strict_yes(text), is_strict_no(text)
         if not (yes or no):  # anything else while a pending exists: the model, told the pending awaits yes or no
             return StructuredResult(pending_summary=str(pending.get("readback_text") or ""))
-        human_msg = build_turn_message(text, TurnContext(mode="voice" if inp.mode == "voice" else "chat",
+        voice = inp.mode == "voice"
+        human_msg = build_turn_message(text, TurnContext(mode="voice" if voice else "chat",
                                                          verified=bool(prep.values.get("verified"))))
-        if not is_adjacent(prep.values, pending):
+        if voice and yes:  # I3: a voice yes needs the final transcript rule (CS-E-05.S1.T1); until then never commits
+            return self._readback(stream, prep, human_msg, pending, tail=VOICE_PRESS_CONFIRM)
+        previous = await self.last_turn(prep.control.session_id, prep.control.turn_id) if self.last_turn else None
+        if not is_adjacent(prep.values, pending, previous):
             return self._readback(stream, prep, human_msg, pending)
-        if yes:  # yes signal 2 (typed chat, adjacent); step-up re-prompt is out of the thin slice
-            return self._action(stream, prep, human_msg, pending, await self.confirmer.confirm(prep.control, pending))
-        return self._action(stream, prep, human_msg, pending, await self.confirmer.cancel(prep.control, pending))
+        if yes:  # yes signal 2 (typed chat, adjacent, read-back delivered); step-up re-prompt is out of the thin slice
+            return await self._action(stream, prep, human_msg, pending, await self.confirmer.confirm(prep.control, pending))
+        return await self._action(stream, prep, human_msg, pending, await self.confirmer.cancel(prep.control, pending))
 
     @staticmethod
     def _human(line: Any) -> Any:
@@ -116,21 +133,41 @@ class StructuredInput:
                     changed=False, reason_codes=[], policy_refs=[], result_text=NOT_CURRENT_LINE)
         return self._reply(stream, prep, human, NOT_CURRENT_LINE, "answered")
 
-    def _readback(self, stream: TurnStream, prep: TurnPrep, human: Any, pending: dict[str, Any]) -> StructuredResult:
+    def _readback(self, stream: TurnStream, prep: TurnPrep, human: Any, pending: dict[str, Any], *,
+                  tail: str = "") -> StructuredResult:
         """What: repeat the read-back in code and show the card again; sets readback_turn_id and clears
-        readback_interrupted. Use when: a strict yes or no that is not adjacent, or core said CONFIRMATION_REQUIRED.
-        Inputs: stream, prep, human line, pending. Output: result (end_reason readback). Side effects: one
-        confirmation.required. Role: s7.3 row 1."""
+        readback_interrupted. Use when: a strict yes or no that is not adjacent, core said CONFIRMATION_REQUIRED, or a
+        voice text yes (tail asks for the Confirm press). Inputs: stream, prep, human line, pending, optional tail.
+        Output: result (end_reason readback). Side effects: one confirmation.required. Role: s7.3 row 1."""
         stream.emit("confirmation.required", pending=pending, confirm_label=confirm_label(pending))
-        return self._reply(stream, prep, human, str(pending.get("readback_text") or ""), "readback",
-                           say=str(pending.get("readback_say") or pending.get("readback_text") or ""),
+        text = str(pending.get("readback_text") or "")
+        say = str(pending.get("readback_say") or text)
+        return self._reply(stream, prep, human, f"{text} {tail}".strip(), "readback", say=f"{say} {tail}".strip(),
                            final_extra={"pending_action": pending},
                            state={"pending": pending_ref(pending, prep.control.turn_id)})
 
-    def _action(self, stream: TurnStream, prep: TurnPrep, human: Any, pending: dict[str, Any],
-                reply: ActionReply) -> StructuredResult:
+    async def _verify_again(self, stream: TurnStream, prep: TurnPrep, human: Any, line: str, *,
+                            state: dict[str, Any] | None = None) -> StructuredResult:
+        """What: D-055: verification lapsed at the irreversible step; show the verification card again, keep the
+        pending (state.pending is not touched), set awaiting_verification. Use when: core said 401
+        SESSION_NOT_VERIFIED on the confirm turn (refresh, commit or submit). Inputs: stream, prep, human line, the
+        reply line, extra state. Output: result (end_reason verification_requested). Side effects: one
+        verification.required; agent.sessions.awaiting_verification set true. Role: never claims success or "not
+        active"."""
+        control = prep.control
+        stream.emit("verification.required", reason="action", prompt_text=line,
+                    attempts_left=control.verify_attempts_left, fields=["account_id", "pin"])
+        control.awaiting_verification = True
+        if self.flags is not None:
+            await self.flags.set_awaiting_verification(control.session_id, True)
+        cleared = {"verified": False, "claims_snapshot": None, "context_snapshot": None}
+        return self._reply(stream, prep, human, line, "verification_requested", state={**cleared, **(state or {})})
+
+    async def _action(self, stream: TurnStream, prep: TurnPrep, human: Any, pending: dict[str, Any],
+                      reply: ActionReply) -> StructuredResult:
         """What: emit action.result and end the turn with the outcome's line. Use when: after the Confirmer.
-        Inputs: stream, prep, human line, pending, reply. Output: result. Side effects: events.
+        Inputs: stream, prep, human line, pending, reply. Output: result. Side effects: events; on a lapsed
+        verification (D-055) also verification.required and the awaiting flag.
         Role: s7.3 outcome table to the wire (action.result plus the final)."""
         if reply.repeat_readback:
             return self._readback(stream, prep, human, pending)
@@ -141,6 +178,8 @@ class StructuredInput:
                     result_text=speak(reply.say) if voice else reply.text, ticket=reply.ticket)
         if reply.end_reason == "escalated":  # commit or submit failure ticket (doc 07 fixture s5_failures)
             self.escalator.emit(prep.control, "tool_failure", reply.ticket)
+        if reply.needs_verification:
+            return await self._verify_again(stream, prep, human, reply.text)
         state = {} if reply.keep_pending else {"pending": None}
         return self._reply(stream, prep, human, reply.text, reply.end_reason, say=reply.say, state=state,
                            final_extra={"escalated": reply.end_reason == "escalated", "ticket": reply.ticket})

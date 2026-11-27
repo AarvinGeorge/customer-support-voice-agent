@@ -19,6 +19,7 @@ from contracts import limits
 from agent import assembly
 from agent.assembly import MIDDLEWARE_ORDER, build_agent, build_middleware, run_config
 from agent.middleware import stubs
+from agent.middleware.deadline_fault import DeadlineAndFaultMiddleware, model_retry_on
 from agent.prompt import SYSTEM_PROMPT
 from agent.state import SupportState
 
@@ -82,7 +83,7 @@ def test_builtin_middleware_settings():
     assert isinstance(retry, ModelRetryMiddleware)
     assert retry.max_retries == limits.MODEL_PRIMARY_RETRIES == 1
     assert retry.initial_delay == limits.MODEL_RETRY_BACKOFF_S and retry.on_failure == "error"
-    assert retry.retry_on is stubs.retry_on_placeholder
+    assert retry.retry_on is model_retry_on and retry.jitter is False
     assert isinstance(mws["ModelFallbackMiddleware"], ModelFallbackMiddleware)
     cache = mws["AnthropicPromptCachingMiddleware"]
     assert isinstance(cache, AnthropicPromptCachingMiddleware)
@@ -92,19 +93,13 @@ def test_builtin_middleware_settings():
 def test_every_stub_names_the_task_that_fills_it():
     fills = {m.name: getattr(m, "FILLED_BY", None) for m in build_middleware(fallback_model=fake("fb"))
              if m.name in stubs.STUB_NAMES}
-    assert fills == {
-        "DeadlineAndFaultMiddleware": "CS-E-07.S1.T2",
-        "GroundingMiddleware": "CS-E-02.S4.T2",
-    }
-    assert stubs.retry_on_placeholder.FILLED_BY == "CS-E-07.S1.T2"  # type: ignore[attr-defined]
+    assert fills == {"GroundingMiddleware": "CS-E-02.S4.T2"}
 
 
-def test_retry_placeholder_never_retries_so_the_fallback_is_never_retried():
-    # Spike 16: without the attempt_role check the fallback would be retried. Until CS-E-07.S1.T2
-    # adds the deadline-aware predicate, no attempt is retried.
-    from langchain_core.exceptions import ModelAPIError
-    assert stubs.retry_on_placeholder(ModelAPIError("5xx")) is False
-    assert stubs.retry_on_placeholder(TimeoutError()) is False
+def test_deadline_middleware_recognises_the_fallback_it_was_built_with():
+    fb = fake("fb")
+    mw = {m.name: m for m in build_middleware(fallback_model=fb)}["DeadlineAndFaultMiddleware"]
+    assert isinstance(mw, DeadlineAndFaultMiddleware) and mw.fallback_models == (fb,)
 
 
 def test_jump_capable_hooks_can_end_the_run():
@@ -188,15 +183,7 @@ async def test_stubs_are_pass_through(name: str):
     mw = {m.name: m for m in build_middleware(fallback_model=fake("fb"))}[name]
     if name == "GroundingMiddleware":
         assert await mw.aafter_model({"messages": []}, None) is None  # pyright: ignore[reportArgumentType]  # stub ignores runtime
-    if name == "DeadlineAndFaultMiddleware":
-        out = await mw.awrap_model_call("REQ", _echo)  # pyright: ignore[reportArgumentType]  # pass-through probe
-        assert out == ("handled", "REQ")
 
-
-async def _echo(x: Any) -> tuple[str, Any]:
-    """What: async handler that echoes. Use when: stub tests. Inputs: x. Output: tuple.
-    Side effects: none. Role: helper."""
-    return ("handled", x)
 
 
 def _closed_port_dsn() -> str:

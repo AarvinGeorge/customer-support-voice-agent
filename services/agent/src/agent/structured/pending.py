@@ -13,6 +13,7 @@ from typing import Any
 
 from contracts.core_api import PendingPublic
 from langchain_core.messages import AIMessage
+from pydantic import ValidationError
 
 CONFIRM_LABELS = {"refund": "Confirm refund", "billing_email": "Confirm email change"}
 SUBMIT_LABEL = "Send for approval"
@@ -30,18 +31,23 @@ def route_message_id(turn_id: str) -> str:
     return f"route-{turn_id}"
 
 
-def is_adjacent(values: dict[str, Any], pending: dict[str, Any]) -> bool:
-    """What: doc 07 s7.3 Adjacent (chat): state.pending names the current pending, readback_interrupted is false, and
-    the last assistant message in the thread is that read-back or a code re-prompt (the line written in the turn
-    recorded as readback_turn_id). Use when: a strict yes or no on typed text. Inputs: thread values, current
-    pending. Output: bool. Side effects: none. Role: rule; the voice clause (no later client user item) is
-    CS-E-05.S1.T1."""
+def is_adjacent(values: dict[str, Any], pending: dict[str, Any], previous: tuple[str, str] | None) -> bool:
+    """What: doc 07 s7.3 Adjacent (chat): state.pending names the current pending, readback_interrupted is false,
+    the thread's last message is that read-back or a code re-prompt (the line written in the turn recorded as
+    readback_turn_id), and that turn was delivered: it is the session's previous turn and its final row says
+    completed (fix round 1, I1). Use when: a strict yes or no on typed text. Inputs: thread values, current pending,
+    previous = (turn_id, status) of the session's previous turn, or None when unknown. Output: bool.
+    Side effects: none. Role: rule; fails closed (None, a failed or running read-back turn, or any later turn or
+    message means the read-back is shown again). The voice clause is CS-E-05.S1.T1."""
     ref = values.get("pending") or {}
     if ref.get("id") != pending.get("pending_action_id") or ref.get("readback_interrupted"):
         return False
     turn = ref.get("readback_turn_id")
-    last_ai = next((m for m in reversed(values.get("messages") or []) if isinstance(m, AIMessage)), None)
-    return bool(turn) and last_ai is not None and last_ai.id in (route_message_id(turn), ingress_message_id(turn))
+    if not turn or previous != (turn, "completed"):
+        return False
+    messages = values.get("messages") or []
+    last = messages[-1] if messages else None
+    return isinstance(last, AIMessage) and last.id in (route_message_id(turn), ingress_message_id(turn))
 
 
 def pending_ref(card: dict[str, Any], turn_id: str) -> dict[str, Any]:
@@ -56,12 +62,15 @@ def card_from_prepare(res: dict[str, Any], action_type: str) -> dict[str, Any] |
     """What: the confirmation card (PendingPublic) for an allowed or needs_approval PrepareResult: core's `card` when
     present (D-054), else built from the PrepareResult fields (title from the amount, reason_code the primary
     reason). Use when: prepare_refund sets route readback. Inputs: PrepareResult JSON, action type.
-    Output: validated PendingPublic dict, or None when declined or incomplete. Side effects: none.
+    Output: validated PendingPublic dict, or None when declined, incomplete or core's card is malformed. Side effects: none.
     Role: card fields for confirmation.required and FinalAnswer.pending_action (doc 07 s3.3 r4)."""
     if res.get("decision") not in ("allowed", "needs_approval") or not res.get("pending_action_id"):
         return None
-    if isinstance(res.get("card"), dict):
-        return PendingPublic.model_validate(res["card"]).model_dump(mode="json")
+    if isinstance(res.get("card"), dict):  # a malformed card after core prepared: no card, never a tool failure
+        try:
+            return PendingPublic.model_validate(res["card"]).model_dump(mode="json")
+        except ValidationError:
+            return None
     readback = res.get("readback") or {}
     details = res.get("details") or {}
     amount = details.get("amount_cents")

@@ -38,8 +38,9 @@ NOT_ACTIVE_LINE = "That request is no longer active, so nothing was changed. Ask
 RULES_CHANGED_TAIL = "Nothing was changed."
 STEP_UP_LINE = "That change needs your support PIN, which I can't take here, so nothing was changed."
 REFUSED_LINE = "I couldn't complete that, so nothing was changed."
-CANCEL_FAILED_LINE = ("I couldn't cancel that just now. Nothing has been changed, and the request expires on its own "
-                      "in a few minutes.")
+CANCEL_FAILED_LINE = "I couldn't cancel that just now. The request expires on its own in a few minutes."
+VERIFY_LAPSED_LINE = ("Your verification has expired, so nothing was changed. Please verify again in the secure card, "
+                      "then confirm.")
 COMMIT_FAILED_LEAD = "Our billing system didn't respond, so nothing was changed."
 SUBMIT_FAILED_LEAD = "I couldn't send this to our team just now, so nothing was sent."
 FAILED_TICKET = "I've opened a ticket, ending {short}."
@@ -132,6 +133,7 @@ class ActionReply:
     policy_refs: list[dict[str, Any]] = field(default_factory=list)
     repeat_readback: bool = False
     keep_pending: bool = False
+    needs_verification: bool = False
 
 
 def _line(text: str, outcome: str, changed: bool | None, end_reason: str = "answered", **kw: Any) -> ActionReply:
@@ -241,11 +243,14 @@ class Confirmer:
     @staticmethod
     def _success(op: str, body: Any) -> ActionReply:
         """What: commit or submit 200 (also replayed). Use when: a call returned. Inputs: op, body.
-        Output: committed or submitted reply with core's summary (chat) and summary_say (voice).
+        Output: committed or submitted reply with core's summary (chat) and summary_say (voice), "That went
+        through." when core sent none.
         Side effects: none. Role: outcome rows 1 and 2."""
+        text = body.get("summary") or COMMITTED_FROM_STATUS  # core committed: a missing summary is never an error
+        say = body.get("summary_say") or text
         if op == "commit":
-            return ActionReply("committed", True, body["summary"], body["summary_say"], "committed")
-        return ActionReply("submitted", True, body["summary"], body["summary_say"], "submitted", ticket=body.get("ticket"))
+            return ActionReply("committed", True, text, say, "committed")
+        return ActionReply("submitted", True, text, say, "submitted", ticket=body.get("ticket"))
 
     @staticmethod
     def _from_status(op: str, status: dict[str, Any]) -> ActionReply:
@@ -264,7 +269,8 @@ class Confirmer:
     def _client_error(op: str, err: ToolCallError, pending: dict[str, Any]) -> ActionReply:
         """What: map a 4xx from commit or submit. Use when: a non-retryable error. Inputs: op, error, pending.
         Output: reply. Side effects: none. Role: outcome rows RULES_CHANGED, PENDING_EXPIRED, PENDING_NOT_ACTIVE or
-        404, CONFIRMATION_REQUIRED (repeat the read-back), STEP_UP_REQUIRED; any other 4xx is a plain refusal.
+        404, CONFIRMATION_REQUIRED (repeat the read-back), SESSION_NOT_VERIFIED (D-055: keep the pending, ask for
+        verification), STEP_UP_REQUIRED; any other 4xx is a plain refusal.
         The caller sends a 4xx whose body does not say changed false to _failure (unconfirmed) instead."""
         code = err.code or ""
         if code == "RULES_CHANGED":
@@ -281,6 +287,9 @@ class Confirmer:
             return ActionReply("failed", False, str(pending.get("readback_text") or ""),
                                str(pending.get("readback_say") or pending.get("readback_text") or ""), "readback",
                                repeat_readback=True)
+        if code == "SESSION_NOT_VERIFIED":  # D-055: core kept the pending prepared; show the card again
+            return _line(VERIFY_LAPSED_LINE, "failed", False, "verification_requested", keep_pending=True,
+                         needs_verification=True)
         if code == "STEP_UP_REQUIRED":
             return _line(STEP_UP_LINE, "failed", False, keep_pending=True)
         return _line(REFUSED_LINE, "failed", False)
@@ -320,7 +329,7 @@ class Confirmer:
                 step.done("error", "Request was no longer active")
                 return _line(NOT_ACTIVE_LINE, "expired", False)
             step.done("timeout" if err.kind == "timeout" else "error", "Could not cancel the request")
-            return _line(CANCEL_FAILED_LINE, "failed", False, keep_pending=True)
+            return _line(CANCEL_FAILED_LINE, "failed", err.changed, keep_pending=True)  # changed as core last said
         step.done("ok", "Cancelled the request")
         if res.get("changed") is not False:  # never claim "haven't changed anything" without core saying so
             return _line("Okay, I've cancelled that request.", "cancelled", None, "cancelled")

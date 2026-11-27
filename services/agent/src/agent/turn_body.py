@@ -27,7 +27,8 @@ from agent.clients.core_agent import CoreAgentClient
 from agent.escalation import Escalator
 from agent.memory import MemoryRefresh, refresh_memory, repair_dangling
 from agent.prompt import TurnContext, build_turn_message
-from agent.sse import ModelUnavailable, TurnOutcome, TurnStream, stream_agent_turn
+from agent.deadline import TurnBudgetExhausted
+from agent.sse import TurnOutcome, TurnStream, stream_agent_turn
 from agent.turn_control import TURN_CONTROL, TurnControl, bind_turn_control, loop_clock
 
 
@@ -36,7 +37,10 @@ class SessionFlags(Protocol):
     Output: none. Side effects: database. Role: port (agent.sessions is the authority, doc 07 s2.4 Counting)."""
 
     async def set_awaiting_verification(self, session_id: str, awaiting: bool,
-                                        verified_user_id: str | None = None) -> None: ...
+                                        verified_user_id: str | None = None) -> None:
+        """What: set agent.sessions.awaiting_verification (and the verified user). Use when: verification asked, done or lapsed. Inputs: id, flag, user. Output: none.
+        Side effects: UPDATE. Role: port method."""
+        ...
 
 
 class PgSessionFlags:
@@ -155,8 +159,8 @@ class TurnRunner:
     async def _loop(self, stream: TurnStream, control: TurnControl, agent_input: dict[str, Any],
                     config: dict[str, Any]) -> TurnOutcome:
         """What: step 14 under the loop timeout (time left minus the 3 s reserve), then step 15 in the reserve:
-        a loop timeout takes the deadline path, a failed model node takes the s6.7 apology (or the deadline path
-        when no loop time is left), any other outcome is finished by the escalator (route and limit tickets).
+        a loop timeout takes the deadline path, a skipped model attempt takes the deadline path, a failed model node
+        (control.model_node_failed) takes the s6.7 apology (or the deadline path when no loop time is left), any other outcome is finished by the escalator (route and limit tickets).
         Use when: _run. Inputs: stream, control, agent input, config. Output: TurnOutcome.
         Side effects: the agent run; escalation tickets and events. Role: doc 07 s8.2 "tickets on failure paths
         get one attempt, created inside the 3 s reserve"."""
@@ -169,7 +173,11 @@ class TurnRunner:
             if not cm.expired():  # an inner timeout is an error, not the deadline
                 raise
             return await esc.deadline(stream, control, self.agent, config)
-        except ModelUnavailable:
+        except TurnBudgetExhausted:  # a model attempt was skipped by the clamp (doc 07 s8.2 deadline path)
+            return await esc.deadline(stream, control, self.agent, config)
+        except Exception:
+            if not control.model_node_failed:  # not a model failure: the internal error path
+                raise
             if control.remaining_s() - self.reserve_s <= 0:
                 return await esc.deadline(stream, control, self.agent, config)
             return await esc.model_unavailable(stream, control, self.agent, config)
