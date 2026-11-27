@@ -12,7 +12,7 @@
  *   states (Gate 2 hold, slow, retrying), error rows with Retry, decline notes, the Sources row,
  *   ticket chips, the escalation line and the fallback badge.
  */
-import { CircleAlert, Mic, RotateCcw } from "lucide-react";
+import { CircleAlert, Mic, PanelRight, RotateCcw } from "lucide-react";
 import type { StatusEvent } from "@contracts/contracts";
 import type { RefObject } from "react";
 import type { ConfirmInput, VerificationInput } from "@contracts/contracts";
@@ -47,6 +47,19 @@ import {
   TurnErrorRow,
 } from "./furniture";
 import { StepTrajectory } from "./step-trajectory";
+
+/**
+ * What: per-turn selection for the observability drawer.
+ * Use when: ConsoleShell passes it so each reply gets an Inspect button.
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: `selected` is the turn the open drawer shows (null when it is closed).
+ */
+export interface InspectActions {
+  onInspect: (turnId: string) => void;
+  selected: string | null;
+}
 
 /**
  * What: what the log needs to make the cards live.
@@ -136,8 +149,9 @@ const DECLINE_SUBJECT: Readonly<Record<string, string>> = Object.freeze({
  *   the held, slow or retrying state), decline notes, the cards, Sources, ticket chips, the
  *   escalation line, error rows and the footer with the fallback badge.
  * Use when: a turn thread item.
- * Inputs: { turn, conversation, index, cards, onResend? } (onResend is set when the customer's
- *   typed text for this turn is known, so a retryable error row can offer Retry).
+ * Inputs: { turn, conversation, index, cards, onResend?, inspect?, number } (onResend is set when
+ *   the customer's typed text for this turn is known, so a retryable error row can offer Retry;
+ *   inspect and the 1-based turn number add the footer's Inspect button).
  * Output: an <article>.
  * Side effects: none.
  * Role: assistant message; the order follows Figma S1 and States (receipts and the quoted
@@ -150,12 +164,16 @@ function AssistantMessage({
   index,
   cards,
   onResend,
+  inspect,
+  number,
 }: {
   turn: TurnView;
   conversation: ConversationState;
   index: CardIndex;
   cards: CardActions;
   onResend?: () => void;
+  inspect?: InspectActions;
+  number: number;
 }) {
   const latency = turn.completed ? `${(turn.completed.usage.latency_ms / 1000).toFixed(2)} s` : null;
   const verifyState = verificationCardState(conversation, turn.turnId, index);
@@ -216,7 +234,7 @@ function AssistantMessage({
       {errors.map((row) => (
         <TurnErrorRow key={row.key} row={row} onRetry={row.retryable && !cards.disabled ? onResend : undefined} />
       ))}
-      {(latency !== null || fallback !== null) && (
+      {(latency !== null || fallback !== null || inspect !== undefined) && (
         <div className="flex flex-wrap items-center gap-2.5">
           {fallback && <FallbackBadge notice={fallback} />}
           {latency !== null && (
@@ -224,6 +242,18 @@ function AssistantMessage({
               <span>{modeWord(turn.mode)}</span>
               <span> · {latency}</span>
             </p>
+          )}
+          {inspect && (
+            <button
+              type="button"
+              onClick={() => inspect.onInspect(turn.turnId)}
+              aria-label={`Inspect turn ${number}`}
+              aria-pressed={inspect.selected === turn.turnId}
+              className="inline-flex items-center gap-1 rounded-sm px-1 font-mono text-mono-sm text-muted hover:text-ink focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none aria-pressed:text-ink aria-pressed:underline underline-offset-4"
+            >
+              <PanelRight aria-hidden className="size-3" />
+              {inspect.selected === turn.turnId ? "Inspecting" : "Inspect"}
+            </button>
           )}
         </div>
       )}
@@ -266,7 +296,8 @@ function SendError({ item, onRetry }: { item: Extract<ThreadItem, { kind: "error
  * Use when: see module.
  * Inputs: { thread, conversation } from the turn store, the card actions, onRetry for send error
  *   rows, onResend for a retryable error inside the latest turn only (sends the customer's chat
- *   text again; an older error never resends out of order).
+ *   text again; an older error never resends out of order), inspect for the drawer's per-turn
+ *   selection.
  * Output: JSX.
  * Side effects: none.
  * Role: see module.
@@ -277,12 +308,14 @@ export function ConversationLog({
   cards = NO_ACTIONS,
   onRetry,
   onResend,
+  inspect,
 }: {
   thread: readonly ThreadItem[];
   conversation: ConversationState;
   cards?: CardActions;
   onRetry?: (errorId: string) => void;
   onResend?: (text: string) => void;
+  inspect?: InspectActions;
 }) {
   const turns = conversation.turns;
   const index = cardIndex(conversation);
@@ -308,7 +341,16 @@ export function ConversationLog({
         const latest = i === thread.length - 1;
         const resend = latest && typed !== null && onResend !== undefined ? () => onResend(typed) : undefined;
         return turn ? (
-          <AssistantMessage key={item.id} turn={turn} conversation={conversation} index={index} cards={cards} onResend={resend} />
+          <AssistantMessage
+            key={item.id}
+            turn={turn}
+            conversation={conversation}
+            index={index}
+            cards={cards}
+            onResend={resend}
+            inspect={inspect}
+            number={conversation.turnOrder.indexOf(turn.turnId) + 1}
+          />
         ) : null;
       })}
     </div>

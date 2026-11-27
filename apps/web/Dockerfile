@@ -21,6 +21,11 @@ COPY --from=deps /repo/apps/web/node_modules ./node_modules
 COPY apps/web/ ./
 # The app imports the generated contract types through the @contracts/* path alias.
 COPY packages/contracts/ts/ /repo/packages/contracts/ts/
+# Public, non-secret config inlined by Next.js at build time (the drawer's LangSmith link, CS-E-06.S3.T1).
+ARG NEXT_PUBLIC_LANGSMITH_PROJECT=""
+ARG NEXT_PUBLIC_LANGSMITH_PROJECT_URL=""
+ENV NEXT_PUBLIC_LANGSMITH_PROJECT=${NEXT_PUBLIC_LANGSMITH_PROJECT} \
+    NEXT_PUBLIC_LANGSMITH_PROJECT_URL=${NEXT_PUBLIC_LANGSMITH_PROJECT_URL}
 RUN pnpm build
 
 FROM ${NODE_IMAGE} AS runtime
