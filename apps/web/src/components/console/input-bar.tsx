@@ -3,15 +3,17 @@
  * What: the console input bar: a message field that sends on Enter, a send button, and a
  *   disabled mic placeholder (voice arrives with CS-E-05).
  * Use when: the bottom of the console.
- * Inputs: { onSend, busy, disabled }.
+ * Inputs: { onSend, busy, disabled, placeholder? }.
  * Output: JSX.
  * Side effects: calls onSend with the trimmed text and clears the field.
- * Role: CS-E-04.S5.T1 input bar (F1 s5.1, s5.4); the 2,000 limit counter and pending placeholder
- *   are CS-E-04.S5.T3.
+ * Role: CS-E-04.S5.T1 input bar (F1 s5.1, s5.4); CS-E-04.S5.T3 adds the 2,000 character counter
+ *   (shown from 1,800, blocks sending over the limit; doc 07 s2.3) and the placeholder from the
+ *   console (the pending-confirmation prompt).
  */
 import { ArrowUp, Mic } from "lucide-react";
-import { useState, type KeyboardEvent } from "react";
+import { useId, useState, type KeyboardEvent } from "react";
 
+import { messageLimit } from "@/lib/turns/furniture";
 import { cn } from "@/lib/utils";
 
 /**
@@ -20,12 +22,14 @@ import { cn } from "@/lib/utils";
  * Inputs: none (type).
  * Output: none (type).
  * Side effects: none.
- * Role: `busy` (a turn is in flight: Enter does nothing, text kept) and `disabled` (no session).
+ * Role: `busy` (a turn is in flight: Enter does nothing, text kept), `disabled` (no session) and
+ *   `placeholder` (the console's words for the current state; a default when absent).
  */
 export interface InputBarProps {
   onSend: (text: string) => void;
   busy: boolean;
   disabled: boolean;
+  placeholder?: string;
 }
 
 /**
@@ -36,9 +40,11 @@ export interface InputBarProps {
  * Side effects: see module.
  * Role: see module. Enter sends (ignored while an IME is composing); Shift+Enter is a newline.
  */
-export function InputBar({ onSend, busy, disabled }: InputBarProps) {
+export function InputBar({ onSend, busy, disabled, placeholder }: InputBarProps) {
   const [text, setText] = useState("");
-  const canSend = !busy && !disabled && text.trim() !== "";
+  const limit = messageLimit(text.trim());
+  const canSend = !busy && !disabled && text.trim() !== "" && !limit.over;
+  const counterId = useId();
 
   /**
    * What: sends the current text if allowed.
@@ -70,14 +76,21 @@ export function InputBar({ onSend, busy, disabled }: InputBarProps) {
 
   return (
     <div className="flex w-full flex-col items-center gap-2">
-      <div className="flex w-full items-center gap-2 rounded-lg border border-rule bg-raised py-2.5 pr-2.5 pl-4 transition-colors duration-150 ease-out-expo focus-within:border-ember">
+      <div
+        className={cn(
+          "flex w-full items-center gap-2 rounded-lg border border-rule bg-raised py-2.5 pr-2.5 pl-4 transition-colors duration-150 ease-out-expo focus-within:border-ember",
+          limit.over && "border-error focus-within:border-error",
+        )}
+      >
         <textarea
           aria-label="Message"
           rows={1}
           value={text}
           disabled={disabled}
           enterKeyHint="send"
-          placeholder={disabled ? "Start from the access page to open a session" : "Ask about billing, your account or a how-to"}
+          placeholder={placeholder ?? (disabled ? "Start from the access page to open a session" : "Ask about billing, your account or a how-to")}
+          aria-describedby={limit.show ? counterId : undefined}
+          aria-invalid={limit.over || undefined}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
           className="max-h-48 min-h-6 flex-1 resize-none bg-transparent text-body text-ink outline-none placeholder:text-muted max-sm:text-[16px]"
@@ -95,7 +108,7 @@ export function InputBar({ onSend, busy, disabled }: InputBarProps) {
           type="button"
           aria-label="Send"
           aria-disabled={!canSend}
-          title={busy ? "Finishing the current reply" : undefined}
+          title={busy ? "Finishing the current reply" : limit.over ? "Shorten your message to send" : undefined}
           onClick={send}
           className={cn(
             "flex size-9 shrink-0 items-center justify-center rounded-full bg-ink text-paper outline-none transition-[opacity,transform] duration-150 ease-out-expo focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-raised motion-safe:active:scale-[0.97]",
@@ -105,7 +118,14 @@ export function InputBar({ onSend, busy, disabled }: InputBarProps) {
           <ArrowUp aria-hidden className="size-[18px]" />
         </button>
       </div>
-      <p className="text-center text-caption text-muted">Answers come only from Quillstack help articles. Actions need your clear yes.</p>
+      {limit.show ? (
+        <p id={counterId} aria-live="polite" className={cn("text-center text-caption", limit.over ? "text-error" : "text-muted")}>
+          <span className="font-mono tabular">{limit.text}</span>
+          <span>{limit.over ? " characters. Shorten your message to send." : " characters"}</span>
+        </p>
+      ) : (
+        <p className="text-center text-caption text-muted">Answers come only from Quillstack help articles. Actions need your clear yes.</p>
+      )}
     </div>
   );
 }

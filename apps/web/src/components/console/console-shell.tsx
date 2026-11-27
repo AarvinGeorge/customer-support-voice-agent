@@ -19,6 +19,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import type { TurnView } from "@/lib/turns/reducer";
 import { turnStore, type ThreadItem, type TurnStoreState } from "@/lib/turns/store";
+import { inputPlaceholder } from "@/lib/turns/furniture";
 import { trailSummary } from "@/lib/turns/trail";
 
 import { ConversationLog, type CardActions } from "./conversation-log";
@@ -228,13 +229,18 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
         </header>
         <main className="mx-auto flex w-full max-w-[45rem] flex-1 flex-col px-4 pt-10 pb-6 sm:px-0">
           <div className="flex flex-1 flex-col">
-            <ConversationLog thread={thread} conversation={conversation} cards={cards} onRetry={retry} />
+            <ConversationLog thread={thread} conversation={conversation} cards={cards} onRetry={retry} onResend={send} />
             <div role="status" aria-live="polite" className="sr-only">
               {announcement(thread, conversation.turns)}
             </div>
           </div>
           <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
-            <InputBar onSend={send} busy={busy} disabled={sessionId === null} />
+            <InputBar
+              onSend={send}
+              busy={busy}
+              disabled={sessionId === null}
+              placeholder={inputPlaceholder(conversation, sessionId === null)}
+            />
           </div>
         </main>
       </div>
