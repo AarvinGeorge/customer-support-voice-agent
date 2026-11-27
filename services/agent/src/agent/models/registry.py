@@ -20,7 +20,7 @@ class ModelRegistry:
     """What: builds one chat model per role and costs usage.
     Use when: once per process; keep the instance.
     Inputs: ModelsConfig.
-    Output: methods build, cost, usage_of.
+    Output: methods build, cost, role_for_model, cost_for_model, usage_of.
     Side effects: none.
     Role: model registry.
     """
@@ -61,6 +61,21 @@ class ModelRegistry:
         if price is None:  # the config validator requires a price on every role
             raise ValueError(f"role {role}: price block is required")
         return cost_usd_est(usage, price)
+
+    def role_for_model(self, model_name: str) -> str | None:
+        """What: the role whose model id the provider-reported name starts with (longest match; providers may
+        append a dated suffix, for example gpt-5.4-mini-2026-03-17). Use when: costing a call by the name in
+        response_metadata. Inputs: model name. Output: role or None. Side effects: none. Role: lookup."""
+        hits = [(len(s.model), r) for r, s in self.config.roles.items()
+                if r in CHAT_ROLES and model_name and model_name.startswith(s.model)]
+        return max(hits)[1] if hits else None
+
+    def cost_for_model(self, model_name: str, usage: Usage) -> float:
+        """What: USD estimate for usage of the model a response names. Use when: stream_agent_turn(cost_of=...).
+        Inputs: provider model name, Usage. Output: float (0.0 for an unknown model, logged by the caller's
+        drawer as a zero cost rather than a crash). Side effects: none. Role: models.yaml price lookup."""
+        role = self.role_for_model(model_name)
+        return self.cost(role, usage) if role is not None else 0.0
 
     def usage_of(self, message: AIMessage) -> Usage:
         """What: normalized usage of a model message. Use when: after each model call.

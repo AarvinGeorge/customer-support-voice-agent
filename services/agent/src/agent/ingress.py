@@ -104,6 +104,7 @@ class TurnStore(Protocol):
     async def insert_turn(self, row: TurnRow) -> None: ...
     async def count_turn(self, session_id: str) -> None: ...
     async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None: ...
+    async def mark_events_incomplete(self, turn_ids: set[str]) -> None: ...
 
 
 class TurnLock(Protocol):
@@ -186,15 +187,17 @@ def _conflict() -> IngressError:
 
 class Ingress:
     """What: the callable ingress entry. Use when: one instance per app; handle() per request.
-    Inputs: store, lock, replica name, agent body, deadlines and reserve (overridable for tests), clock.
-    Output: handle(). Side effects: see module. Role: doc 07 s2.4 orchestration."""
+    Inputs: store, lock, replica name, agent body, deadlines and reserve (overridable for tests), clock,
+    trajectory writer. Output: handle(). Side effects: see module. Role: doc 07 s2.4 orchestration."""
 
     def __init__(self, store: TurnStore, lock: TurnLock, *, served_by: str, run_agent: AgentBody,
                  turn_deadline_s: dict[str, float] | None = None, reserve_s: float = limits.ESCALATION_RESERVE_S,
-                 now: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:
-        """What: wire dependencies. Use when: app start or tests. Inputs: see class. Output: none.
+                 now: Callable[[], datetime] = lambda: datetime.now(UTC), trajectory: Any = None) -> None:
+        """What: wire dependencies. Use when: app start or tests. Inputs: see class; trajectory is the
+        TrajectoryWriter (app.state.trajectory) or None (events are not persisted). Output: none.
         Side effects: none. Role: constructor."""
         self.store, self.lock, self.served_by, self.run_agent = store, lock, served_by, run_agent
+        self.trajectory = trajectory
         self.deadline_s = turn_deadline_s or TURN_DEADLINE_S
         self.reserve_s, self.now = reserve_s, now
 
@@ -263,7 +266,8 @@ class Ingress:
             await release(TurnOutcome.fixed("", end_reason="error"))
             return _conflict()
         await self.store.count_turn(inp.session_id)
-        stream = TurnStream(TurnMeta(inp.session_id, row.turn_id, inp.mode, self.served_by, inp.input_kind))
+        stream = TurnStream(TurnMeta(inp.session_id, row.turn_id, inp.mode, self.served_by, inp.input_kind),
+                            sink=self.trajectory.add if self.trajectory is not None else None)  # doc 07 s12 turn_events
         loop_budget = max(budget - self.reserve_s, 0.0)  # the reserve is kept for the escalation ticket
 
         async def body(s: TurnStream) -> TurnOutcome:
@@ -354,7 +358,7 @@ class RedisTurnLock:
 class PgTurnStore:
     """What: TurnStore over the agent_app psycopg pool (schema agent).
     Use when: production. Inputs: psycopg AsyncConnectionPool. Output: TurnStore methods.
-    Side effects: SQL on agent.sessions and agent.turns. Role: storage adapter."""
+    Side effects: SQL on agent.sessions and agent.turns (including events_complete). Role: storage adapter."""
 
     def __init__(self, pool: Any) -> None:
         """What: keep the pool. Use when: app start. Inputs: pool. Output: none. Side effects: none. Role: constructor."""
@@ -432,3 +436,13 @@ class PgTurnStore:
                 (outcome.status, outcome.end_reason, ended_at, json.dumps(outcome.final.model_dump(mode="json")),
                  json.dumps(outcome.usage.model_dump(mode="json")), json.dumps(error) if error else None,
                  outcome.model_used, outcome.fallback_used, turn_id))
+
+    async def mark_events_incomplete(self, turn_ids: set[str]) -> None:
+        """What: events_complete = false for turns whose turn_events rows were dropped.
+        Use when: TrajectoryWriter(on_incomplete=...). Inputs: turn ids. Output: none.
+        Side effects: one UPDATE on this store's pool (not the writer's). Role: doc 07 s12 events_complete."""
+        ids = [i for i in turn_ids if i]
+        if not ids:
+            return
+        async with self.pool.connection() as conn:
+            await conn.execute("UPDATE agent.turns SET events_complete = false WHERE turn_id = ANY(%s::uuid[])", (ids,))

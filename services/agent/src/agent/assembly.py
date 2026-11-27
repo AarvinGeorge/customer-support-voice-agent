@@ -4,7 +4,7 @@ thread_id = session_id.
 Use when: once per process (or per test) to build the compiled agent graph; per turn for run_config.
 Inputs: primary and fallback chat models (from ModelRegistry roles agent and agent_fallback), tools,
 a LangGraph checkpointer.
-Output: MIDDLEWARE_ORDER, build_middleware, build_agent, build_agent_from_registry, run_config,
+Output: MIDDLEWARE_ORDER, build_middleware, build_agent, build_agent_from_registry, run_config, turn_run_config,
 postgres_checkpointer_factory, memory_checkpointer_factory.
 Side effects: none at build time (no network); the Postgres factory opens a small connection pool when
 entered (the app lifespan enters it once and closes it on shutdown).
@@ -13,6 +13,7 @@ ToolCallLimitMiddleware is added.
 """
 from __future__ import annotations
 
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable, Sequence
 
@@ -113,6 +114,14 @@ def run_config(session_id: str, **extra: Any) -> dict[str, Any]:
     Role: doc 07 s2.6 thread_id = session_id.
     """
     return {"configurable": {"thread_id": str(session_id)}, **extra}
+
+
+def turn_run_config(session_id: str, turn_id: str, **extra: Any) -> dict[str, Any]:
+    """What: the RunnableConfig for one agent turn: thread_id = session_id and LangSmith root run id = turn_id.
+    Use when: every agent turn (stream_agent_turn). Inputs: session_id, turn_id (uuid7 string), extra keys.
+    Output: run_config(...) plus run_id (uuid.UUID of turn_id). Side effects: none.
+    Role: doc 07 s1.2 X-Trace-Id = turn_id = LangSmith root run id (spike 7 PASS)."""
+    return run_config(session_id, run_id=uuid.UUID(str(turn_id)), **extra)
 
 
 CHECKPOINTER_POOL_MAX = 4  # concurrent checkpoint reads and writes per replica (turns run in parallel)

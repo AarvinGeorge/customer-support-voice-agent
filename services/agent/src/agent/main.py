@@ -2,8 +2,8 @@
 Use when: uvicorn runs `agent.main:app` (Compose agent_a, agent_b); tests call create_app with fake probes.
 Inputs: Settings (env); optional probes dict (tests).
 Output: create_app(settings, probes) and the module-level ASGI `app`.
-Side effects: the lifespan opens a psycopg pool (agent_app), a Redis client and an httpx client and
-closes them on shutdown; nothing connects at import time.
+Side effects: the lifespan opens a psycopg pool (agent_app), the TrajectoryWriter (its own small pool), a Redis
+client and an httpx client and closes them on shutdown; nothing connects at import time.
 Role: composition root of the HTTP service: access gate, visitor routes, health. Turn and voice routes arrive in later tasks.
 """
 from __future__ import annotations
@@ -20,9 +20,11 @@ from fastapi.responses import JSONResponse
 from agent.access import install_access_gate, install_not_owned_handler
 from agent.api import install_api
 from agent.assembly import CheckpointerFactory, postgres_checkpointer_factory
+from agent.ingress import PgTurnStore
 from agent.readiness import Probe, build_probes, readiness
 from agent.sessions import PgSessionStore, SessionStore
 from agent.settings import Settings
+from agent.trajectory import TrajectoryWriter
 from agent.web import install_http
 
 log = logging.getLogger("agent.main")
@@ -76,11 +78,16 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
         http = httpx.AsyncClient(timeout=limits.CORE_READ_TIMEOUT_S)
         app.state.pg_pool, app.state.redis, app.state.http = pool, rds, http
         app.state.session_store = session_store or PgSessionStore(pool)
+        # doc 07 s12: turn_events go through their own small pool; a drop marks events_complete=false on this pool.
+        trajectory = TrajectoryWriter(cfg.agent_db_url, on_incomplete=PgTurnStore(pool).mark_events_incomplete)
+        await trajectory.start()
+        app.state.trajectory = trajectory
         app.state.probes = build_probes(pg_pool=pool, redis_client=rds, http=http, core_url=cfg.core_url,
                                         knowledge_url=cfg.knowledge_url)
         try:
             yield
         finally:
+            await trajectory.aclose()
             await http.aclose()
             await rds.aclose()
             await pool.close()
