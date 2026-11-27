@@ -140,6 +140,11 @@ class TurnStore(Protocol):
         """What: set events_complete false. Use when: trajectory writer drops. Inputs: turn ids. Output: none.
         Side effects: UPDATE. Role: port method."""
         ...
+    async def recent_answers(self, session_id: str, limit: int) -> list[str]:
+        """What: the final text and say of the session's latest finished turns. Use when: POST /transcript builds
+        the issued numbers for realtime assistant items (D-071). Inputs: session id, turn count. Output: strings.
+        Side effects: SELECT. Role: port method."""
+        ...
 
 
 class TurnLock(Protocol):
@@ -608,6 +613,17 @@ class PgTurnStore:
                 "ORDER BY started_at DESC, turn_id DESC LIMIT 1", (session_id, before_turn_id))
             r = await cur.fetchone()
         return (r[0], r[1]) if r else None
+
+    async def recent_answers(self, session_id: str, limit: int) -> list[str]:
+        """What: final text and say of the session's latest `limit` turns that have a final.
+        Use when: POST /transcript (D-071 provenance: numbers our agent said are ours, not the customer's).
+        Inputs: session id, turn count. Output: strings, newest turn first. Side effects: SELECT. Role: read."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT final->>'text', final->>'say' FROM agent.turns WHERE session_id = %s AND final IS NOT NULL "
+                "ORDER BY started_at DESC, turn_id DESC LIMIT %s", (session_id, limit))
+            rows = await cur.fetchall()
+        return [t for r in rows for t in r if t]
 
     async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None:
         """What: the final row. Use when: step 16. Inputs: id, outcome, end time. Output: none.

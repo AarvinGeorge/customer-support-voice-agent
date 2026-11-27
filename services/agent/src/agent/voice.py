@@ -282,6 +282,35 @@ def _redact_context(session: SessionRow) -> RedactContext:
                          verified=session.verified_user_id is not None)
 
 
+ISSUED_TURNS = 5  # the latest agent answers whose numbers a realtime assistant item may repeat
+
+
+async def _issued(deps: VoiceDeps, session_id: str) -> frozenset[str]:
+    """What: the numbers our agent issued in the session's latest answers (turns.final text and say).
+    Use when: POST /transcript has assistant items. Inputs: deps, session id. Output: digit strings; empty when no
+    Ingress is wired or the read fails (fail closed: every number is then scanned). Side effects: one SELECT.
+    Role: D-071 provenance for text from the realtime model, which heard the customer."""
+    if deps.ingress is None:
+        return frozenset()
+    try:
+        return redaction.issued_numbers(await deps.ingress.store.recent_answers(session_id, ISSUED_TURNS))
+    except Exception:  # noqa: BLE001 - fail closed: without the issued set the scanner masks every candidate
+        log.warning("issued numbers read failed session_id=%s", session_id, exc_info=True)
+        return frozenset()
+
+
+def _transcript_text(item: TranscriptItemIn, ctx: RedactContext, issued: frozenset[str]) -> str:
+    """What: the stored text of one posted transcript item, redacted by provenance (D-071 part 3).
+    Use when: POST /transcript. Inputs: item, session scanner context, issued numbers. Output: text.
+    Side effects: none. Role: a user item is customer speech: the s11.1 scanner with the session's context. An
+    assistant item is the realtime model speaking our agent's answer; that model also heard the customer (a spoken
+    PIN reaches it, doc 07 s11.1 limitation), so it is scanned too, but numbers our agent issued (ticket ending
+    8352) are kept: the agent model never sees a customer PIN, so its numbers are ours."""
+    if item.role == "user":
+        return redaction.redact(item.text, ctx)
+    return redaction.scan_text(item.text, ctx, issued)
+
+
 def _relay_ready(deps: VoiceDeps | None) -> bool:
     """What: whether voice/ask can run a turn: an Ingress with its call keys and transcript merge attached.
     Use when: voice/token (never mint for a dead relay, review M1) and voice/ask (never run voice without the
@@ -370,6 +399,7 @@ def install_voice(app: FastAPI) -> None:
         if vs is None or vs.session_id != sid:
             return error_response(request, 404, "not_found", "NOT_FOUND", "Not found.")
         ctx = _redact_context(session)
-        clean = [it.model_copy(update={"text": redaction.redact(it.text, ctx)}) for it in body.items]  # I1
+        issued = await _issued(deps, sid) if any(it.role == "assistant" for it in body.items) else frozenset()
+        clean = [it.model_copy(update={"text": _transcript_text(it, ctx, issued)}) for it in body.items]  # I1
         await deps.store.add_transcript_items(sid, vs.voice_session_id, clean)
         return Response(status_code=204)
