@@ -614,6 +614,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "psycopg", extra = ["binary", "pool"] },
     { name = "pydantic" },
+    { name = "pyyaml" },
     { name = "quillstack-contracts" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -629,6 +630,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.9" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "quillstack-contracts", directory = "../../packages/contracts" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
