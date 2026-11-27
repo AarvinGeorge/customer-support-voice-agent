@@ -21,7 +21,7 @@ from knowledge.ingest.parse import parse_article
 ROOT = Path(__file__).resolve().parents[3]
 GOLDEN = ROOT / "evals" / "golden"
 ARTICLES = ROOT / "data" / "articles"
-EM_DASH = "—"
+EM_DASH = chr(0x2014)  # built from its code point, so this file holds no literal em dash
 
 
 def _load_yaml(path: Path):
@@ -180,9 +180,8 @@ def test_retrieval_label_mix():
 
 
 def test_train_test_split():
-    """What: both splits are non-empty for cases and for every retrieval label; each case scenario and the
-    safety cases appear in test. Use when: CI. Inputs: none. Output: pass or fail. Side effects: none.
-    Role: doc G s2.3: train and test reported separately; the test split is never tuned on."""
+    """What: both splits are non-empty for cases and for every retrieval label; no test-split query is a calibration probe. Use when: CI. Inputs: none. Output: pass or fail. Side effects: none.
+    Role: doc G s2.3: train and test reported separately; the test split is never tuned on (no test query is a calibration probe)."""
     cases = _cases()
     assert {c["split"] for c in cases} == {"train", "test"}
     qs = _queries()
@@ -327,3 +326,60 @@ def test_dataset_files_state_their_purpose(name: str):
     head = (GOLDEN / name).read_text(encoding="utf-8")[:1500]
     for label in ("What:", "Use when:", "Role:"):
         assert label in head
+
+
+def test_verification_turn_continues_the_earlier_request():
+    """What: a verification turn that answers a verification_requested turn must not expect end_reason verified, and no
+    text turn may restate the request right after it. Use when: CI. Inputs: none. Output: pass or fail. Side effects: none.
+    Role: doc 07 s6.3 step 5: on success the agent loop runs once so the model continues the earlier request."""
+    for c in _cases():
+        turns = c["turns"]
+        for i, t in enumerate(turns):
+            if t["kind"] == "verification" and i > 0 and turns[i - 1].get("expect", {}).get("end_reason") == "verification_requested":
+                assert t.get("expect", {}).get("end_reason") not in (None, "verified"), f"{c['id']}: turn {i} must end where the request ends"
+                assert "07 s6.3" in c.get("notes", ""), f"{c['id']}: notes must cite 07 s6.3 step 5"
+
+
+def test_open_outcome_cases_use_a_deterministic_ticket_rule():
+    """What: no count_any_of; count_by_outcome keys are exactly the allowed outcomes. Use when: CI. Inputs: none.
+    Output: pass or fail. Side effects: none. Role: a ticket count is paired with the observed outcome, so
+    'answered and opened a ticket' cannot pass."""
+    for c in _cases():
+        tickets = c["expected"]["final_state"]["tickets"]
+        assert "count_any_of" not in tickets
+        if "count_by_outcome" in tickets:
+            assert set(tickets["count_by_outcome"]) == set(c["expected"]["outcome"]), c["id"]
+            assert "count" not in tickets
+        else:
+            assert len(c["expected"]["outcome"]) == 1 or c["id"] == "G-03", f"{c['id']}: open outcome needs count_by_outcome"
+
+
+def test_fixture_reads_like_a_plain_article():
+    """What: the visible text of the poisoned fixture does not say it is a test, fixture or attack. Use when: CI.
+    Inputs: none. Output: pass or fail. Side effects: none. Role: a self-labelled attack proves little; the test-only
+    marking lives in the file name, source_url and the dataset (doc 06 X14, doc G M3)."""
+    for c in _cases():
+        for f in c.get("fixtures", {}).get("articles", []):
+            article = parse_article((GOLDEN / f).read_text(encoding="utf-8"), Path(f).name)
+            visible = (article.title + "\n" + article.body).lower()
+            for word in ("fixture", "attack", "poison", "test ", "imitat"):
+                assert word not in visible, f"{f}: visible text says '{word}'"
+            assert "example.invalid" in article.source_url
+
+
+def test_no_test_split_query_is_a_calibration_probe():
+    """What: no test-split retrieval query equals a probe in scripts/probe_retrieval.py. Use when: CI. Inputs: none.
+    Output: pass or fail. Side effects: none. Role: probes set tau_high (D-052); the test split is never tuned on."""
+    src = (Path(__file__).resolve().parents[1] / "scripts" / "probe_retrieval.py").read_text(encoding="utf-8")
+    probes = {m.lower() for m in re.findall(r'\("(?:answerable|not_in_docs|off_topic)", "[^"]*", "[^"]*", "([^"]+)"', src)}
+    assert len(probes) >= 15, "could not read the probe list"
+    clash = [q["id"] for q in _queries() if q["split"] == "test" and q["query"].lower() in probes]
+    assert not clash, f"test-split queries that are calibration probes: {clash}"
+
+
+def test_gate_cases_require_search_kb():
+    """What: a case that grades the retrieval gate requires search_kb. Use when: CI. Inputs: none. Output: pass or fail.
+    Side effects: none. Role: a verdict and a decline can only follow a search (doc 07 s6.5)."""
+    for c in _cases():
+        if "gate" in c["expected"]:
+            assert "search_kb" in c["expected"]["tool_trajectory"]["required"], c["id"]
