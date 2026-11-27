@@ -31,3 +31,10 @@ def test_builtin_ids_match_doc_04_when_present():
     if doc is None:
         pytest.skip("planning-docs not reachable")
     assert chk.ids_in_list(doc.read_text()) == chk.SHOWCASE_IDS
+
+
+def test_heading_inside_a_code_fence_is_not_a_slot():
+    """What: a slot heading inside a fenced block does not count. Use when: always. Inputs: none.
+    Output: assert. Side effects: none. Role: closes the review gap (PR 21 M1)."""
+    text = "```\n#### 1.1 fake\n```\n"
+    assert chk.missing_slots(text, ["1.1"]) == ["1.1"]

@@ -32,7 +32,8 @@ def missing_slots(readme: str, ids: list[str]) -> list[str]:
     """What: find the ids that have no `#### <id> ` heading in the README.
     Use when: checking README completeness. Inputs: README text, expected ids.
     Output: the missing ids. Side effects: none. Role: the core check."""
-    have = set(re.findall(r"^#### (\d\.\d+) ", readme, flags=re.M))
+    outside_fences = re.sub(r"^```.*?^```", "", readme, flags=re.M | re.S)  # a heading inside a code block is not a slot
+    have = set(re.findall(r"^#### (\d\.\d+) ", outside_fences, flags=re.M))
     return [i for i in ids if i not in have]
 
 

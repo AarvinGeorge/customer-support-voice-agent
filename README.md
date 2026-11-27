@@ -34,8 +34,9 @@ python3 scripts/keys.py verify    # one read-only call per provider key
 docker compose up -d --build
 docker compose ps                 # wait until the long-running services show "healthy"
 
-# 3. Re-run migrations after you change a file under services/*/migrations.
-scripts/migrate.sh                # TODO CS-E-01.S3.T2: script is in review, not on main yet
+# 3. Migrations already ran in step 2 (the migrate_* jobs). After you change a file under services/*/migrations,
+#    run `docker compose up -d --build` again so the images rebuild and the jobs rerun.
+# TODO CS-E-01.S3.T2 (PR in review): scripts/migrate.sh, a one-command rerun, once it merges.
 
 # 4. Load the help articles into the knowledge service (needs a real OPENAI_API_KEY for embeddings).
 docker compose run --rm ingest_knowledge     # TODO CS-E-02.S1: ingest job is in review, not on main yet
@@ -44,15 +45,14 @@ docker compose run --rm ingest_knowledge     # TODO CS-E-02.S1: ingest job is in
 # TODO CS-E-09.S4.T1: reseed CLI is not built yet; command to be written here when it lands.
 
 # 6. Open the app.
-#    http://localhost:3000   (the local Caddy port; EDGE_PORT sets it once the Caddy PR lands)
-# TODO CS-E-01.S3.T3 and CS-E-04.S4.T1: Caddy and the web app are placeholders on main, so there is no page yet.
+#    http://localhost:3000   (Caddy; EDGE_PORT in .env sets the host port, keep SITE_ORIGIN in step with it)
 ```
 
-What a healthy stack looks like on this commit: `postgres`, `redis`, `core`, `knowledge`, `agent_a` and `agent_b` show `healthy` and the three `migrate_*` jobs show `Exited (0)`. On this commit the three Python services are stubs that answer `/readyz` without calling a provider, so dummy keys still reach healthy. Once the real agent lands, check that readiness still holds without a valid key before relying on this. `caddy` and `web` are placeholders under the compose profile `edge` and do not start by default.
+What a healthy stack looks like on this commit: `postgres`, `redis`, `core`, `knowledge`, `agent_a`, `agent_b` and `web` show `healthy`, `caddy` is running (it has no health check) and the three `migrate_*` jobs show `Exited (0)`. Through Caddy, `/` and `/console` answer 200 and `/api/readyz` answers 200. On this commit the three Python services are stubs that answer `/readyz` without calling a provider, so dummy keys still reach healthy. Once the real agent lands, check that readiness still holds without a valid key before relying on this.
 
-Running several stacks on one machine: set `COMPOSE_PROJECT_NAME` and a distinct `EDGE_SUBNET` (and the same value in `FORWARDED_ALLOW_IPS`) in `.env`, so networks do not collide.
+Running several stacks on one machine: give each its own `COMPOSE_PROJECT_NAME`, `EDGE_SUBNET` (and the same value in `FORWARDED_ALLOW_IPS`) and `EDGE_PORT` (with `SITE_ORIGIN=http://localhost:<EDGE_PORT>`) in `.env`, so networks and the host port do not collide.
 
-Local development adds `compose.override.yaml` automatically (source mounted, uvicorn reload). On the VM use `docker compose -f compose.yaml up -d` (TODO CS-E-08.S4.T2: deploy instructions).
+Local development adds `compose.override.yaml` automatically (source mounted, uvicorn reload). On the VM use `docker compose -f compose.yaml up -d` with `SITE_ADDRESS` set to the public domain (required there: an empty value makes Caddy refuse to start) and `SITE_ORIGIN=https://<domain>`. TODO CS-E-08.S4.T2: full deploy instructions.
 
 Repository layout:
 
@@ -61,17 +61,17 @@ Repository layout:
 | `services/agent`, `services/core`, `services/knowledge` | The three FastAPI services (Python 3.12+, one `pyproject.toml` each) |
 | `packages/contracts` | Typed wire contract shared by backend and frontend (Pydantic plus generated TypeScript types) |
 | `apps/web` | Next.js app: chat, voice panel, observability drawer |
-| `data/` | `policy.yaml` (rules), `models.yaml` (model registry), help articles, seeds |
+| `data/` | `policy.yaml` (rules), help articles; `models.yaml` (model registry) and seeds are TODO (CS-E-03.S8.T1, CS-E-09.S4.T1) |
 | `infra/`, `compose.yaml`, `scripts/` | Container build files, Postgres init, stack definition, helpers |
 
 ## Architecture
 
-The diagram shows the designed system. Under the thin-slice decision (D-035) some elements are **designed, not built**. They are tagged `[D]` in the diagram and listed after it. Everything else is in the build.
+The diagram shows the designed system. Under the thin-slice decision (D-035) some elements are **designed, not built**. They are tagged `[D]` in the diagram and listed after it; `[T]` marks a time-boxed item. Everything else is in the build.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ BROWSER  apps/web (Next.js 16.4, React 19.3, Zustand, shadcn/ui on Base UI); holds no secret   │
-│ Chat + step trajectory   |   Voice panel (orb + waveform strip)   |   Drawer (metrics + panel) │
+│ Chat + step trajectory   |   Voice panel (bars; [T] orb)   |   Drawer (metrics + panel)        │
 └────────────────────────────────────────────────────────────────────────────────────────────────┘
    │ HTTPS + SSE, same origin          │ WebRTC audio (client secret minted by the agent)
    │ qs_access cookie on /api/*        ▼
@@ -90,7 +90,7 @@ The diagram shows the designed system. Under the thin-slice decision (D-035) som
 │ AGENT SERVICE  FastAPI, stateless, replicas agent_a + agent_b               KARC: COORDINATE   │
 │ ingress code (verification, confirmation) -> create_agent loop + middleware                    │
 │   -> SSE adapter -> turn_events writer                                                         │
-│ also: voice token mint, voice/ask, transcript + voice usage posts, chunk proxy (/api/chunks)   │
+│ also: voice token mint, voice/ask, transcript post, chunk proxy; [D] voice usage post          │
 │ [D] ops router (/api/operator/*), [D] trace proxy (/api/traces/{trace_id}), [D] step-up        │
 └────────────────────────────────────────────────────────────────────────────────────────────────┘
 │ CORE_TOKEN_AGENT         │ CORE_TOKEN_COMMIT        │ [D] CORE_TOKEN_OPS  │ KNOWLEDGE_TOKEN_AGENT
@@ -98,12 +98,13 @@ The diagram shows the designed system. Under the thin-slice decision (D-035) som
 │ tool wrappers, ingress   │ ingress/confirm.py only  │ ops router only     │ search_kb wrapper,
 │ verification, escalation │ commit, submit, cancel,  │ + X-Operator-Token  │ chunk proxy
 │ code: reads, verify,     │ action status            │ approvals, tickets  │ search, chunks.read
-│ prepare, prefs, tickets  │                          │                     │
+│ prepare, tickets         │                          │                     │
+│ [D] prefs                │                          │                     │
 ▼                          ▼                          ▼                     ▼
 ┌──────────────────────────────────────────────────────────┐  ┌──────────────────────────────────┐
 │ CORE SERVICE  FastAPI, internal only          KARC: ACT  │  │ KNOWLEDGE SERVICE     KARC: KNOW │
 │ identity: verify, claims (session_claims)                │  │ FastAPI, internal only           │
-│ accounts + billing reads; notification prefs write       │  │ POST /v1/search: hybrid (vector  │
+│ accounts + billing reads; [D] notification prefs write   │  │ POST /v1/search: hybrid (vector  │
 │ policy rules read from data/policy.yaml                  │  │   + full-text, RRF), k = 5,      │
 │ actions: prepare, status, commit, submit, cancel         │  │   Gate 1 verdict                 │
 │   ([D] A2 billing email, [D] A4)                         │  │ GET /v1/chunks/{chunk_id}        │
@@ -133,7 +134,8 @@ Legend, designed but not built (D-035; each has a trigger in the [production pos
 
 - `[D]` ops router and `/api/operator/*`, operator page and Approvals tab, `CORE_TOKEN_OPS` and `X-Operator-Token`.
 - `[D]` trace proxy `/api/traces/{trace_id}`: the drawer uses our own SSE usage events plus a LangSmith link instead.
-- `[D]` A2 billing email change and step-up verification, A4, notification preferences.
+- `[D]` A2 billing email change and step-up verification, A4, notification preferences, the voice usage post.
+- `[T]` time-boxed: the voice panel ships with waveform bars first; the ElevenLabs orb is built only if time allows (90 minutes, cut at the Saturday 13:00 voice checkpoint).
 - Help articles are authored in Notion and exported once; there is no live Notion sync. Citations link to the public pages.
 - LLM judge and the model comparison (evals).
 
@@ -233,7 +235,7 @@ Written: see [Architecture](#architecture). Owner CS-E-08.S1.T1.
 TODO CS-E-08.S1.T2: heading-aware chunks.
 
 #### 3.3 Typed contracts
-One event schema shared by backend and frontend: `packages/contracts` holds the Pydantic models and the generated TypeScript types; the frozen wire contract is doc 07. Owner CS-E-08.S1.T1 (link to the schema file once the contracts PR is on main).
+One event schema shared by backend and frontend: `packages/contracts` holds the Pydantic models and the generated TypeScript types; the frozen wire contract is doc 07. Owner CS-E-08.S1.T1 See `packages/contracts/src/contracts/events.py` for the SSE events..
 
 #### 3.4 Descriptor on every function, CI-enforced
 TODO CS-E-01.S2.T1: the six labels (What, Use when, Inputs, Output, Side effects, Role) and the CI check.
@@ -242,7 +244,7 @@ TODO CS-E-01.S2.T1: the six labels (What, Use when, Inputs, Output, Side effects
 TODO CS-E-09.S2.T1: `data/policy.yaml` and the test that articles match it.
 
 #### 3.6 Test suite and CI gates
-TODO CS-E-01.S5.T1: lint, types, tests and secret scan; link to a CI run.
+CI is `.github/workflows/ci.yml` (ruff, pyright, pytest, web lint and tests, secret scan, contracts sync, import guard, compose config). TODO CS-E-01.S5.T1: link a green CI run on the freeze tag.
 
 ### Production readiness
 
@@ -256,7 +258,7 @@ TODO CS-E-07.S1.T4: fallback badge.
 TODO CS-E-07.S2.T1: table of limits.
 
 #### 4.4 Stateless service: state in Postgres, two replicas, survives a restart
-TODO CS-E-08.S4.T6: restart proof (two replicas already run in Compose).
+Built: all session state is in Postgres and Compose runs two agent replicas. Designed, not built: the restart proof on the VM (doc 09 s1.2); trigger: before real production traffic. TODO CS-E-08.S1.T2: this row goes in the production posture table.
 
 #### 4.5 Idempotent commits
 TODO CS-E-03.S2.T5: the test that a replayed commit never refunds twice.
