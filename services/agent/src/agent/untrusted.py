@@ -4,7 +4,7 @@ not-run tool calls.
 Use when: ToolGuard builds every ToolMessage the model sees; ingress step 10 repairs a dangling tool call
 (not_run_tool_message).
 Inputs: tool names, JSON-like results, chunk fields.
-Output: harden, harden_obj, wrap_result, wrap_search, unknown_result, not_run_tool_message, UNKNOWN_NOTE.
+Output: harden, harden_obj, escape_tags, wrap_result, wrap_search, unknown_result, not_run_tool_message, UNKNOWN_NOTE.
 Side effects: none.
 Role: every string inside a wrapper goes through harden and then the contracts escaper. harden also defeats
 tag look-alikes the contracts escaper leaves (review PR #4 minor 4): zero-width and other format characters
@@ -53,6 +53,16 @@ def harden(text: str) -> str:
     Output: text with format characters removed and every wrapper tag or look-alike opened with "&lt;".
     Side effects: none. Role: s5.3 escaper, hardened (idempotent: "&lt;" is never matched again)."""
     return _LOOKALIKE_RE.sub("&lt;", _strip_format_chars(text))
+
+
+def escape_tags(text: str, names: tuple[str, ...]) -> str:
+    """What: escape every opening or closing tag (and look-alike) whose name starts with one of `names`, with the
+    same rules as harden (format characters removed, fullwidth and small "<", slashes and spaces before the name).
+    Use when: a prompt uses its own delimiters (the Gate 2 verifier's <evidence> and <draft>) around text that
+    already holds wrapper tags which must stay readable. Inputs: text, tag names. Output: escaped text.
+    Side effects: none. Role: s5.3 escaper for extra delimiters (review PR #52 I3)."""
+    alt = "|".join(sorted((re.escape(n) for n in names), key=len, reverse=True))
+    return re.sub(rf"[<＜﹤](?=[\s/\\／]*(?:{alt}))", "&lt;", _strip_format_chars(text), flags=re.IGNORECASE)
 
 
 def harden_obj(obj: Any) -> Any:

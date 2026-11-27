@@ -8,6 +8,8 @@ Use when: in the create_agent stack (after_model hooks run in reverse order, so 
 Inputs: the agent state (messages, grounding_failures), the bound TurnControl, a GroundingVerifier, the optional
 open_ticket hook (the escalation module, CS-E-03.S4.T1; until then the line gives the turn reference).
 Output: GroundingMiddleware.
+The code rules (agent.gates.enforce_code_rules) run on every verifier reply: a claim backed only by an
+injection_suspect chunk or by no known source is unsupported, and zero claims on a policy draft fails closed.
 Side effects: one verifier call per checked draft; events; thread updates (RemoveMessage, fixed line,
 grounding_failures); TurnControl.grounding, citations, gate_message_id, route.
 Role: nothing streams before this decides (the adapter buffers every model message), so a failed draft is never
@@ -27,6 +29,7 @@ from agent.gates import (
     CLARIFY_LINE,
     GroundingVerifier,
     citations_for,
+    enforce_code_rules,
     evidence_text,
     needs_grounding,
     start_gate_step,
@@ -73,6 +76,8 @@ class GroundingMiddleware(AgentMiddleware):
             control.events.emit("status", kind="checking_policy", message=CHECKING_POLICY_LINE)
         step = start_gate_step(control, "grounding_gate", "Checking the answer against policy")
         result = await self.verifier.verify(control, text, evidence_text(turn))
+        tool_names = {str(m.name) for m in turn if isinstance(m, ToolMessage) and m.name and m.status != "error"}
+        result = enforce_code_rules(result, text, control.retrieval_chunks, tool_names=tool_names)
         failures = int(state.get("grounding_failures") or 0)
         claims = result.claims
         counts: dict[str, Any] = {"claims_total": len(claims), "claims_supported": sum(c["supported"] for c in claims),
@@ -91,7 +96,8 @@ class GroundingMiddleware(AgentMiddleware):
         else:
             reason = None
         decision = "clarify" if reason is None else "escalate"
-        step.finish(gate="grounding", verdict=result.verdict, decision=decision, title=_TITLES[decision],
+        verdict = "fail" if result.verdict == "pass" else result.verdict  # a commitment is never a pass (M7)
+        step.finish(gate="grounding", verdict=verdict, decision=decision, title=_TITLES[decision],
                     status="error" if result.verdict == "error" else "ok", **counts)
         removal = RemoveMessage(id=str(draft.id))
         if reason is None:
