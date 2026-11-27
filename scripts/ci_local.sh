@@ -6,10 +6,9 @@
 # Inputs: job names (none = all). Env: CI_DESCRIPTORS_BASE (default origin/main; ci.yml sets HEAD^ on a push to main,
 #   ci_gate.sh sets the main sha), CI_LOG_DIR (default .tmp/ci-local/<stamp>), CI_PG_PROJECT, CI_PG_SUBNET, CI_PG_PORT
 #   (the pg test stack; defaults cs-localci, 172.31.79.0/24, 55479; cs-demo is refused).
-# Output: one PASS, FAIL, WARN or SKIP row per step, a summary table, and the last line
-#   `ci_local: N passed, N failed, N warned, N skipped`. Exit 0 only when no step failed; 1 on any failure; 2 on bad usage.
-#   WARN is a soft step or a skip that ci.yml records with a reason (contracts test pyright, no lint script); a WARN
-#   never hides a hard check.
+# Output: one PASS, FAIL or SKIP row per step, a summary table, and the last line
+#   `ci_local: N passed, N failed, N skipped`. Exit 0 only when no step failed; 1 on any failure; 2 on bad usage.
+#   The only SKIP is the matrix rule ci.yml always had (no pyright on infra); every other step is hard.
 # Side effects: uv syncs, pnpm install and build in the checkout; the compose job writes .env from .env.example only
 #   when no other .env exists and removes it after; pg tests start and remove a throwaway Compose project; logs under
 #   CI_LOG_DIR; pinned tools (uv 0.8.22 shims, gitleaks 8.28.0) cached under ~/.cache/quillstack-ci.
@@ -29,6 +28,9 @@ NODE_MAJOR="22"
 GITLEAKS_VERSION="8.28.0"
 CACHE="${HOME}/.cache/quillstack-ci"
 
+# Appended to every pytest step: fail on any skipped test or on a run that passed nothing.
+SKIP_GATE='if grep -qE "[0-9]+ skipped" "$out"; then echo "FAIL: pytest skipped tests (must run or be deselected by marker)"; exit 1; fi
+    if ! grep -qE "[0-9]+ passed" "$out"; then echo "FAIL: pytest passed nothing"; exit 1; fi'
 PYTHON_PROJECTS=(packages/contracts services/agent services/core services/knowledge scripts evals infra)
 OTHER_JOBS=(repo-tests web gitleaks contracts-sync import-guard descriptors compose pg-tests)
 
@@ -44,19 +46,12 @@ all_jobs() {
   printf '%s\n' "${OTHER_JOBS[@]}"
 }
 
-# What: print a GitHub Actions annotation when running there, plain text otherwise. Use when: a soft step or a recorded skip.
-# Inputs: title, message. Output: one line. Side effects: none. Role: keeps ci.yml's warning annotations.
-warn() {
-  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then echo "::warning title=$1::$2"; else echo "WARN $1: $2"; fi
-}
-
-# What: run one step in its own `bash -euo pipefail`, record PASS, FAIL or WARN with its duration.
-# Use when: every check. Inputs: name, working dir, command string, mode (hard or soft). A hard step that exits 78 is a
-#   skip recorded with a reason (WARN), never a pass of a check that did not run silently.
+# What: run one step in its own `bash -euo pipefail`, record PASS or FAIL with its duration.
+# Use when: every check. Inputs: name, working dir, command string. Every step is hard (no soft or skip branches).
 # Output: a status line; on FAIL the last 60 log lines (locally; on Actions the full output is already streamed).
 # Side effects: writes $LOG_DIR/<name>.log. Role: the only place a step's exit code is read.
 run_step() {
-  local name="$1" dir="$2" cmd="$3" mode="${4:-hard}"
+  local name="$1" dir="$2" cmd="$3"
   local log="$LOG_DIR/$(echo "$name" | tr -c 'A-Za-z0-9._-' '_').log" start=$SECONDS rc=0 status
   echo "--- $name ($dir)"
   if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
@@ -64,12 +59,7 @@ run_step() {
   else
     (cd "$dir" && bash -euo pipefail -c "$cmd") >"$log" 2>&1 || rc=$?
   fi
-  if [ "$rc" -eq 0 ]; then status=PASS
-  elif [ "$mode" = soft ]; then status=WARN; warn "$name" "soft step failed (recorded reason in ci_local.sh); see $log"
-  elif [ "$rc" -eq 78 ]; then status=WARN
-  else status=FAIL
-  fi
-  [ "$status" = WARN ] && [ "$rc" -eq 78 ] && grep -h -m1 -E 'WARN|::warning' "$log" || true
+  if [ "$rc" -eq 0 ]; then status=PASS; else status=FAIL; fi
   if [ "$status" = FAIL ] && [ "${GITHUB_ACTIONS:-}" != "true" ]; then
     echo "    FAIL (exit $rc), last lines of $log:"; tail -n 60 "$log" | sed 's/^/    | /'
   fi
@@ -136,7 +126,7 @@ ensure_gitleaks() {
 # Role: per-service lint, types and unit tests. REQUIRE_ARTICLES=1 makes the article tests fail instead of skip.
 job_python() {
   local p="$1" target=""
-  case "$p" in packages/contracts) target=src ;; infra) target=skip ;; esac
+  case "$p" in infra) target=skip ;; esac
   export REQUIRE_ARTICLES=1
   run_step "python:$p sync" "$p" 'if [ -f pyproject.toml ]; then uv sync --frozen; else echo "no pyproject.toml here (stdlib scripts), nothing to sync"; fi'
   run_step "python:$p ruff" "$p" "uvx $RUFF check ."
@@ -146,14 +136,14 @@ job_python() {
   else
     run_step "python:$p pyright" "$p" "if [ -f pyproject.toml ]; then uv run --frozen --with $PYRIGHT pyright $target; else uvx $PYRIGHT_UVX .; fi"
   fi
-  if [ "$p" = packages/contracts ]; then
-    # SOFT, recorded reason: 26 known errors in tests/ (attribute access on the Envelope union in test_fixtures.py and
-    # test_events.py). They predate CI and the tests run green; lane B tracks the fix. Make this step hard then.
-    run_step "python:$p pyright tests (soft)" "$p" "uv run --frozen --with $PYRIGHT pyright tests" soft
-  fi
-  run_step "python:$p pytest" "$p" "if [ ! -f pyproject.toml ]; then uv run --no-project --with $PYTEST --with pyyaml pytest -q .;
-    elif [ -d tests ]; then uv run --frozen --with pytest pytest -q;
-    else echo 'WARN $p: no tests/ directory yet, pytest skipped on purpose (the owning lane adds tests)'; exit 78; fi"
+  # No quiet branches: a project without tests fails, and so does any skipped test (a skip is a green run that tested
+  # nothing; same rule as scripts/pg_tests.sh). Deselected markers (pg, real, e2e) are not skips. No -q: some projects
+  # set -q in addopts and two -q drop the summary line the checks read.
+  run_step "python:$p pytest" "$p" "out=\$(mktemp)
+    if [ ! -f pyproject.toml ]; then uv run --no-project --with $PYTEST --with pyyaml pytest -rs . 2>&1 | tee \"\$out\";
+    elif [ -d tests ]; then uv run --frozen --with pytest pytest -rs 2>&1 | tee \"\$out\";
+    else echo 'no tests/ directory: every python project must have tests'; exit 1; fi
+    $SKIP_GATE"
 }
 
 # What: the dispatcher from a job name to its steps. Use when: main loop. Inputs: job name. Output: step rows.
@@ -167,19 +157,19 @@ run_job() {
       ensure_uv; job_python "$p" ;;
     repo-tests)
       ensure_uv; export REQUIRE_ARTICLES=1
-      run_step "repo-tests" . "uv run --no-project --with $PYTEST --with pyyaml --with ./packages/contracts pytest -q tests scripts/test_keys.py" ;;
+      run_step "repo-tests" . "out=\$(mktemp)
+        uv run --no-project --with $PYTEST --with pyyaml --with ./packages/contracts pytest -q -rs -m 'not planning_docs' tests scripts/test_keys.py 2>&1 | tee \"\$out\"
+        $SKIP_GATE" ;;
     web)
       ensure_node; export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
       # `corepack pnpm` instead of ci.yml's old `corepack enable`: same pnpm (package.json packageManager), no global shims.
       run_step "web pnpm version" apps/web "corepack pnpm --version"
       run_step "web install" apps/web "corepack pnpm install --frozen-lockfile"
-      run_step "web lint" apps/web "if node -e \"process.exit(require('./package.json').scripts?.lint ? 0 : 1)\"; then corepack pnpm lint;
-        else echo 'WARN web lint: apps/web has no lint script yet; lint skipped on purpose (eslint is not set up)'; exit 78; fi"
+      run_step "web lint" apps/web "corepack pnpm lint"
       run_step "web vitest" apps/web "corepack pnpm test"
       run_step "web build" apps/web "corepack pnpm build"
       run_step "web typecheck" apps/web "corepack pnpm typecheck"
-      run_step "web test:bundle" apps/web "if node -e \"process.exit(require('./package.json').scripts?.['test:bundle'] ? 0 : 1)\"; then corepack pnpm test:bundle;
-        else echo 'WARN web bundle test: no test:bundle script on this branch'; exit 78; fi" ;;
+      run_step "web test:bundle" apps/web "corepack pnpm test:bundle" ;;
     gitleaks)
       local gl; gl="$(ensure_gitleaks)"
       run_step "gitleaks" . "'$gl' detect --source . --redact --verbose --exit-code 1" ;;
@@ -194,7 +184,9 @@ run_job() {
       ensure_uv
       run_step "import-guard" . "uv run --no-project --with $PYTEST pytest -q scripts/test_import_guard.py && python3 scripts/check_import_guard.py" ;;
     descriptors)
-      run_step "descriptors (base ${CI_DESCRIPTORS_BASE:-origin/main})" . "python3 scripts/check_descriptors.py --base '${CI_DESCRIPTORS_BASE:-origin/main}'" ;;
+      run_step "descriptors (base ${CI_DESCRIPTORS_BASE:-origin/main})" . "python3 scripts/check_descriptors.py --base '${CI_DESCRIPTORS_BASE:-origin/main}'"
+      # The full repo is at 0 gaps (backfill, PR #70), so any gap anywhere fails.
+      run_step "descriptors --all" . "python3 scripts/check_descriptors.py --all" ;;
     compose)
       run_step "compose config" . 'docker compose --env-file .env.example config -q
         docker compose --env-file .env.example -f compose.yaml config -q
@@ -220,14 +212,14 @@ run_job() {
 # Use when: the end of every run. Inputs: the recorded rows. Output: table plus `ci_local: ...` line.
 # Side effects: appends to $GITHUB_STEP_SUMMARY on Actions. Role: the evidence block ci_gate.sh quotes.
 summary() {
-  local i pass=0 fail=0 warnc=0 skip=0 table
+  local i pass=0 fail=0 skip=0 table
   table="$(printf '%-52s %-5s %6s\n' STEP STATUS SECS; for i in ${NAMES[@]+"${!NAMES[@]}"}; do printf '%-52s %-5s %6s\n' "${NAMES[$i]}" "${STATUSES[$i]}" "${SECS[$i]}"; done)"
   for i in ${STATUSES[@]+"${!STATUSES[@]}"}; do
-    case "${STATUSES[$i]}" in PASS) pass=$((pass+1)) ;; FAIL) fail=$((fail+1)) ;; WARN) warnc=$((warnc+1)) ;; SKIP) skip=$((skip+1)) ;; esac
+    case "${STATUSES[$i]}" in PASS) pass=$((pass+1)) ;; FAIL) fail=$((fail+1)) ;; SKIP) skip=$((skip+1)) ;; esac
   done
   echo; echo "===== ci_local summary (logs: $LOG_DIR) ====="; echo "$table"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then printf '```\n%s\n```\n' "$table" >> "$GITHUB_STEP_SUMMARY"; fi
-  echo "ci_local: $pass passed, $fail failed, $warnc warned, $skip skipped (${SECONDS}s)"
+  echo "ci_local: $pass passed, $fail failed, $skip skipped (${SECONDS}s)"
   [ "$fail" -eq 0 ]
 }
 

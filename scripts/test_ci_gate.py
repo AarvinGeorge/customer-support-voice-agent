@@ -14,7 +14,7 @@ SLUG = "AarvinGeorge/customer-support-voice-agent"
 STUB = """#!/usr/bin/env bash
 # What: stub ci_local.sh. Use when: gate tests. Inputs: file ci_result. Output: summary line. Side effects: none. Role: test double.
 rc="$(cat ci_result)"
-echo "ci_local: 1 passed, $rc failed, 0 warned, 0 skipped (0s)"
+echo "ci_local: 1 passed, $rc failed, 0 skipped (0s)"
 exit "$rc"
 """
 FAKE_GH = """#!/usr/bin/env bash

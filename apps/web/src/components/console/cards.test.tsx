@@ -104,6 +104,18 @@ function domText(): string {
 }
 
 describe("verification card", () => {
+  it("clears the typed Account ID when the session changes", () => {
+    const store = storeWith(c1);
+    const view = render(<ConsoleShell sessionId="s" store={store} />);
+    const field = () => within(screen.getByRole("region", { name: "Verify your account" })).getByLabelText("Account ID") as HTMLInputElement;
+    fireEvent.change(field(), { target: { value: "QS-10423" } });
+    expect(field().value).toBe("QS-10423");
+    view.rerender(<ConsoleShell sessionId="s" store={store} />);
+    expect(field().value).toBe("QS-10423");
+    view.rerender(<ConsoleShell sessionId="other" store={store} />);
+    expect(field().value).toBe("");
+  });
+
   it("opens on verification.required with the account ID field, a masked PIN field and attempts left", () => {
     render(<ConsoleShell sessionId="s" store={storeWith(c1)} />);
     const card = screen.getByRole("region", { name: "Verify your account" });

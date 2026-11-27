@@ -22,10 +22,13 @@ def test_check_can_fail():
     assert chk.missing_slots(text, chk.SHOWCASE_IDS) == ["2.3"]
 
 
+import pytest
+
+
+@pytest.mark.planning_docs
 def test_builtin_ids_match_doc_04_when_present():
     """What: built-in ids equal the ids in planning-docs/04 when that file is reachable. Use when: run inside the project checkout.
-    Inputs: none. Output: assert or skip. Side effects: none. Role: keeps the built-in list honest."""
-    import pytest
+    Inputs: none. Output: assert or skip. Side effects: none. Role: keeps the built-in list honest. CI deselects it (planning-docs is outside the repo); run it in the checkout with `pytest -m planning_docs`."""
     doc = next((p / "planning-docs" / "04_showcase_list_2026-11-26.md" for p in ROOT.parents
                 if (p / "planning-docs" / "04_showcase_list_2026-11-26.md").exists()), None)
     if doc is None:

@@ -78,4 +78,4 @@ def test_a_failing_step_turns_the_run_red(tmp_path: Path) -> None:
     r = subprocess.run(["bash", str(LOCAL), "descriptors"], capture_output=True, text=True, env=env)
     assert r.returncode == 1, r.stdout + r.stderr
     assert re.search(r"descriptors .* FAIL", r.stdout)
-    assert r.stdout.strip().splitlines()[-1].startswith("ci_local: 0 passed, 1 failed")
+    assert re.match(r"ci_local: \d+ passed, 1 failed", r.stdout.strip().splitlines()[-1])

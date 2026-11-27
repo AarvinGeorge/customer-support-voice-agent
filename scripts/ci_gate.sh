@@ -85,7 +85,7 @@ fi
 echo "ci_gate: PR #$PR head $HEAD_SHA merged onto main $MAIN_SHA in $WT; running ci_local.sh (log $LOG)"
 rc=0
 (cd "$WT" && CI_DESCRIPTORS_BASE="$MAIN_SHA" CI_LOG_DIR="$TOP/.tmp/ci-gate-logs/pr$PR-$STAMP" scripts/ci_local.sh) 2>&1 | tee -a "$LOG" || rc=$?
-SUMMARY="$(grep -E '^ci_local: ' "$LOG" | tail -1 | sed -E 's/^ci_local: //; s/ passed,/ pass/; s/ failed,/ fail/; s/ warned,/ warn/; s/ skipped/ skip/')"
+SUMMARY="$(grep -E '^ci_local: ' "$LOG" | tail -1 | sed -E 's/^ci_local: //; s/ passed,/ pass/; s/ failed,/ fail/; s/ skipped/ skip/')"
 [ -n "$SUMMARY" ] || SUMMARY="no summary line (ci_local.sh aborted, exit $rc)"
 if [ "$rc" -eq 0 ]; then
   post success "$SUMMARY; merged onto main $MAIN_SHA"
