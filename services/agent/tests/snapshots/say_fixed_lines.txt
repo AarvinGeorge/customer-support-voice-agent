@@ -53,7 +53,7 @@ router.tool_failure.search_kb.no_ticket: I couldn't search our help articles jus
 router.tool_failure.search_kb.ticket: I couldn't search our help articles just now, so I won't guess. I've opened a ticket for our team, ticket ending eight two one three.
 router.tool_failure.ticket: Our systems didn't respond, so nothing was changed. I've opened a ticket for our team, ticket ending eight two one three.
 router.verify: To look at your account I need to verify you. Please enter your account ID and support PIN in the secure card.
-router.verify_say: To look at your account I need to verify you. Please tell me your account ID and your four-digit support PIN, or type them into the card on screen.
+router.verify_say: To look at your account I need to verify you. Please enter your account ID and support PIN in the secure card on your screen. I can't take them by voice.
 verification.conflict: This conversation is already verified as someone else. Please start a new conversation to verify as another person.
 verification.failed: That account ID and PIN didn't match. You have two tries left.
 verification.locked: I couldn't verify you after three tries, so I've opened a ticket for our team, ticket ending eight two one three.
