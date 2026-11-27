@@ -35,6 +35,7 @@ from agent.structured.handler import StructuredInput
 from agent.tools.catalog import TOOL_NAMES
 from agent.turn_body import TurnRunner, voice_user_text
 from agent.voice import RedisCallKeys, TranscriptMerger, VoiceDeps, VoiceSessionRow
+from gate2_fakes import CitingVerifierModel
 from ingress_fakes import MemoryTurnLock, MemoryTurnStore
 from voice_fakes import FakeMinter, MemoryCallKeys, MemoryVoiceStore
 
@@ -172,9 +173,11 @@ class World:
     """What: an app whose /turns and voice/ask run the composed Ingress (TurnRunner, StructuredInput, Confirmer)
     over the real create_agent graph, with the contracts core stub behind the agent and commit clients.
     Use when: each test. Inputs: primary replies; wire (False: no Ingress, the route answers 503); verified (the stub
-    session starts verified); settings overrides. Output: attributes. Side effects: none. Role: test harness."""
+    session starts verified); registry (default FakeRegistry over the replies); settings overrides.
+    Output: attributes. Side effects: none. Role: test harness."""
 
-    def __init__(self, *replies: AIMessage, wire: bool = True, verified: bool = False, **cfg: Any) -> None:
+    def __init__(self, *replies: AIMessage, wire: bool = True, verified: bool = False,
+                 registry: "FakeRegistry | None" = None, **cfg: Any) -> None:
         """What: build. Use when: tests. Inputs: see class; settings overrides. Output: none. Side effects: none.
         Role: harness."""
         self.cfg = settings(**cfg)
@@ -193,7 +196,7 @@ class World:
         if verified:
             self.stub.state.verified.add(SID)
         self.http = httpx.AsyncClient(transport=Hosts(self.stub, knowledge))
-        self.registry = FakeRegistry(*replies)
+        self.registry = registry or FakeRegistry(*replies)
         self.runtime = composition.build_agent_runtime(self.cfg, http=self.http, checkpointer=InMemorySaver(),
                                                        registry=self.registry)
         self.flags = Flags()
@@ -278,7 +281,7 @@ async def test_text_turn_streams_contract_events_from_the_create_agent_graph() -
     assert "".join(e.text for e in evs if e.type == "token") == ANSWER
     done = evs[-1]
     assert done.final.text == ANSWER and done.end_reason == "answered" and done.replayed is False
-    assert done.usage.model_calls == 2 and done.usage.tool_calls == 1
+    assert done.usage.model_calls == 3 and done.usage.tool_calls == 1  # 2 agent calls plus the Gate 2 verifier
     assert done.usage.cost_usd_est == pytest.approx(0.002)  # cost_of reaches the adapter (registry prices)
     assert r.headers["x-trace-id"] == done.turn_id
     (req,) = w.knowledge_calls
@@ -395,6 +398,48 @@ async def s1_readback(w: World, c: httpx.AsyncClient) -> list[Any]:
     r = await c.post(f"/api/sessions/{SID}/turns", json={"client_turn_id": str(uuid.uuid4()),
                                                          "text": "Please refund the duplicate $96 charge from 21 November"})
     return events_of(r)
+
+
+class CitingRegistry(FakeRegistry):
+    """What: FakeRegistry whose grounding_verifier cites honestly (gate2_fakes.CitingVerifierModel): a claim is
+    supported only when its source id is in the evidence Gate 2 built. Use when: S1 with the real Gate 2 sources.
+    Inputs: verifier claims, agent replies. Output: registry. Side effects: records. Role: fake."""
+
+    def __init__(self, claims: list[tuple[str, str]], *replies: AIMessage) -> None:
+        """What: script both. Use when: tests. Inputs: claims, replies. Output: none. Side effects: none.
+        Role: constructor."""
+        super().__init__(*replies)
+        self.verifier = CitingVerifierModel(*claims)
+
+    def build(self, role: str) -> Any:
+        """What: the citing verifier for grounding_verifier, else as FakeRegistry. Use when: build_agent_from_registry.
+        Inputs: role. Output: model. Side effects: records. Role: fake."""
+        if role == "grounding_verifier":
+            self.roles.append(role)
+            return self.verifier
+        return super().build(role)
+
+
+async def test_s1_verification_turn_keeps_the_greeting_with_account_facts_then_reads_back() -> None:
+    # s5-fault-scripts-report concern: the verified context must be Gate 2 evidence, or every S1 to S5
+    # verification turn shows the clarify line.
+    draft = "Thanks, Priya. You're verified now. Your account is on the Pro plan with 12 seats."
+    claims = [("Priya is verified", "account_context"), ("The account is on the Pro plan", "account_context"),
+              ("The account has 12 seats", "account_context")]
+    w = World(registry=CitingRegistry(claims, AIMessage(content=draft),
+                                      AIMessage(content="", tool_calls=[PREPARE_CALL])))
+    async with w.client() as c:
+        v = await c.post(f"/api/sessions/{SID}/turns", json={"client_turn_id": str(uuid.uuid4()),
+                                                             "verification": {"account_id": "QS-10423",
+                                                                              "pin": ex.STUB_PIN}})
+        ve = events_of(v)
+        (gate,) = [e for e in ve if e.type == "gate" and e.gate == "grounding"]
+        assert gate.verdict == "pass" and ve[-1].end_reason != "clarify"
+        assert ve[-1].final.text == draft
+        r = await c.post(f"/api/sessions/{SID}/turns", json={"client_turn_id": str(uuid.uuid4()),
+                                                             "text": "Please refund the duplicate $96 charge"})
+    assert events_of(r)[-1].end_reason == "readback"
+    assert ve[-1].usage.model_calls == 2  # the agent call plus the Gate 2 verifier call
 
 
 async def test_s1_through_the_route_readback_card_then_confirm_press_commits_on_the_commit_token() -> None:

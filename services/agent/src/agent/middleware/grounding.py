@@ -31,7 +31,7 @@ from agent.gates import (
     GroundingVerifier,
     citations_for,
     enforce_code_rules,
-    evidence_text,
+    grounded_evidence,
     needs_grounding,
     start_gate_step,
     turn_messages,
@@ -76,9 +76,9 @@ class GroundingMiddleware(AgentMiddleware):
         if control.events is not None:
             control.events.emit("status", kind="checking_policy", message=CHECKING_POLICY_LINE)
         step = start_gate_step(control, "grounding_gate", "Checking the answer against policy")
-        result = await self.verifier.verify(control, text, evidence_text(turn))
-        tool_names = {str(m.name) for m in turn if isinstance(m, ToolMessage) and m.name and m.status != "error"}
-        result = enforce_code_rules(result, text, control.retrieval_chunks, tool_names=tool_names)
+        evidence, sources = grounded_evidence(state, messages[:-1])
+        result = await self.verifier.verify(control, text, evidence)
+        result = enforce_code_rules(result, text, control.retrieval_chunks, tool_names=sources)
         failures = int(state.get("grounding_failures") or 0)
         claims = result.claims
         counts: dict[str, Any] = {"claims_total": len(claims), "claims_supported": sum(c["supported"] for c in claims),
