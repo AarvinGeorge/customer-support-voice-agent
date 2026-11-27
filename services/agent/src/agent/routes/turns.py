@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request
 from agent.access import owned_session
 from agent.ingress import Ingress, IngressError, IngressInput, input_kind_of, parse_turn_request, to_response
 from agent.middleware.deadline_fault import demo_fault_from_header
+from agent.limits.ratelimit import canonical_sid, turn_counter
 from agent.web import error_response
 
 
@@ -38,6 +39,7 @@ def install_turns(app: FastAPI) -> None:
         Use when: the console sends text or a card press. Inputs: session id, TurnRequest JSON.
         Output: text/event-stream (doc 07 s6), or an envelope: 404, 409, 422, 503. Side effects: see module.
         Role: doc 07 s2.2 row POST /turns."""
+        sid = canonical_sid(sid)  # one spelling per session (rate-limit key, lock, thread); invalid is 404
         await owned_session(request.app.state.session_store, sid, request.state.visitor_id)
         ingress: Ingress | None = getattr(request.app.state, "ingress", None)
         if ingress is None:
@@ -54,5 +56,6 @@ def install_turns(app: FastAPI) -> None:
         result = await ingress.handle(IngressInput(
             session_id=sid, visitor_id=request.state.visitor_id, client_turn_id=str(req.client_turn_id),
             mode="chat", input_kind=input_kind_of(req), text=req.text, body=req,
-            demo_fault=request_demo_fault(request)))
+            demo_fault=request_demo_fault(request),
+            count_turn=turn_counter(request, sid)))
         return to_response(request, result)

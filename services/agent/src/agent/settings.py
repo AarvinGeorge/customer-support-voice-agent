@@ -2,7 +2,7 @@
 Use when: building the app (Settings.from_env) or tests (construct directly).
 Inputs: env SERVED_BY, AGENT_DB_URL, REDIS_URL, CORE_URL, KNOWLEDGE_URL, DEMO_FAULTS_ENABLED, SITE_ORIGIN,
 SESSION_SIGNING_KEY, DEMO_ACCESS_CODE, PERSONAS_PATH, OPENAI_API_KEY (voice mint), CORE_TOKEN_AGENT and
-KNOWLEDGE_TOKEN_AGENT (the tool clients, doc 07 s1.4).
+KNOWLEDGE_TOKEN_AGENT (the tool clients, doc 07 s1.4), FORWARDED_ALLOW_IPS (client IP for rate limits).
 Output: Settings.
 Side effects: from_env reads os.environ.
 Role: the one place that knows env names; nothing else reads os.environ for these.
@@ -35,6 +35,7 @@ class Settings:
     models_path: str = "/data/models.yaml"
     core_token_agent: str = ""      # empty: core answers 401 to every tool call (never logged)
     knowledge_token_agent: str = ""  # empty: knowledge answers 401 to search_kb (never logged)
+    forwarded_allow_ips: str = ""   # edge subnet (D-047); empty: X-Forwarded-For is never trusted (rate-limit IP key)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -54,4 +55,5 @@ class Settings:
                    personas_path=env.get("PERSONAS_PATH", "/data/seeds/personas.yaml"),
                    openai_api_key=env.get("OPENAI_API_KEY", ""),
                    core_token_agent=env.get("CORE_TOKEN_AGENT", ""),
-                   knowledge_token_agent=env.get("KNOWLEDGE_TOKEN_AGENT", ""))
+                   knowledge_token_agent=env.get("KNOWLEDGE_TOKEN_AGENT", ""),
+                   forwarded_allow_ips=env.get("FORWARDED_ALLOW_IPS", ""))
