@@ -200,8 +200,8 @@ def test_the_stream_names_the_checks_read_are_the_ones_the_agent_emits() -> None
     catalog = (AGENT_SRC / "tools" / "catalog.py").read_text()
     assert 'start_gate_step(control, "scope_gate"' in gates
     assert 'start_gate_step(control, "retrieval_gate"' in gates
-    assert grounding.count('start_gate_step(control, "grounding_gate"') >= 2
-    assert 'summary["reason"] = reason' in gates and 'reason=result.reason if error else None' in grounding
+    assert 'start_gate_step(control, "grounding_gate"' in grounding  # D-064: every model draft, no skip step
+    assert 'summary["reason"] = reason' in gates and "reason=result.reason" in grounding
     assert 'summary={"truncated": cuts}' in sse and 'kind="model"' in sse
     assert 'GroundingResult("error", reason="truncated")' in gates and 'reason="no_time"' in gates
     assert re.search(r'name\s*=\s*"search_kb"|"search_kb"', catalog)
