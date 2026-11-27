@@ -19,6 +19,7 @@ from contracts.stubs import examples as ex
 from contracts.stubs.core_stub import create_app as create_core_stub
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 
 from agent import composition
@@ -69,11 +70,29 @@ class Fake(GenericFakeChatModel):
 
 VERIFIER_PASS = ('{"claims": [{"text": "Pro refunds within 30 days", "supported": true, '
                  '"source_id": "refund-policy#2"}], "commitment": false}')
+VERIFIER_CONVERSATION = '{"claims": [], "commitment": false, "no_claims_reason": "conversation"}'
+
+
+class EvidenceVerifier(Fake):
+    """What: a grounding_verifier fake that reads its input: the refund claim (VERIFIER_PASS) when the evidence
+    holds refund-policy#2 (a search ran this turn), else zero claims with no_claims_reason "conversation".
+    Use when: FakeRegistry. Inputs: the verifier messages. Output: one AIMessage reply per call.
+    Side effects: appends to seen. Role: fake; since D-064 every model draft reaches the verifier, so a fake that
+    claimed a refund for a plain "Sure." would block it."""
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kw):  # type: ignore[override]
+        """What: reply by evidence. Use when: GroundingVerifier.verify. Inputs: messages. Output: ChatResult.
+        Side effects: records. Role: fake."""
+        self.seen.append(list(messages))
+        evidence = str(messages[-1].content).split("<draft>")[0]
+        reply = VERIFIER_PASS if "refund-policy#2" in evidence else VERIFIER_CONVERSATION
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(reply))])
 
 
 class FakeRegistry:
     """What: ModelRegistry stand-in: build(role) returns the scripted fake for agent, an empty fake for
-    agent_fallback, a verifier that passes a draft backed by refund-policy#2 (grounding_verifier) and a classifier
+    agent_fallback, an EvidenceVerifier (grounding_verifier: passes a draft backed by refund-policy#2, and a plain
+line with no evidence as conversation) and a classifier
     that answers ON (scope_classifier), since build_agent_from_registry wires both gates (CS-E-02.S4).
     Use when: build_agent_runtime in tests. Inputs: replies of the primary. Output: build. Side effects: records roles.
     Role: fake (the real registry is covered by test_registry)."""
@@ -89,9 +108,10 @@ class FakeRegistry:
         self.roles.append(role)
         if role == "agent":
             return self.primary
-        if role in ("grounding_verifier", "scope_classifier"):
-            reply = VERIFIER_PASS if role == "grounding_verifier" else "ON"
-            return Fake(messages=iter([AIMessage(reply) for _ in range(8)]), seen=[], disable_streaming=True)
+        if role == "grounding_verifier":
+            return EvidenceVerifier(messages=iter([]), seen=[], disable_streaming=True)
+        if role == "scope_classifier":
+            return Fake(messages=iter([AIMessage("ON") for _ in range(8)]), seen=[], disable_streaming=True)
         return Fake(messages=iter([]), seen=[])
 
     def cost_for_model(self, model_name: str, usage: Any) -> float:

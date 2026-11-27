@@ -196,17 +196,7 @@ def test_the_phrasing_table_is_large_enough():
     assert len(POLICY_DRAFTS) + len(CHAT_DRAFTS) >= 30 and len(CHAT_DRAFTS) >= 8
 
 
-# --- skipped -------------------------------------------------------------------------------------------------
-async def test_a_draft_that_needs_no_grounding_is_skipped_and_flushed_without_a_verifier_call():
-    ver = verifier()
-    h = Harness(ver, replies=[AIMessage("Hello! How can I help you today?")])
-    outcome, events, _ = await h.run()
-    g = grounding_gate(events)
-    assert (g.verdict, g.decision) == ("skipped", "skip")
-    assert not [e for e in events if e.type == "status" and e.kind == "checking_policy"]
-    assert outcome.final.text == "Hello! How can I help you today?" and outcome.end_reason == "answered"
-    assert outcome.final.confidence is not None and outcome.final.confidence.grounding == "skipped"
-    assert ver.model.seen == []
+# --- no skip for a model draft (D-064): see tests/test_gate2_every_draft.py -----------------------------------
 
 
 # --- pass ----------------------------------------------------------------------------------------------------
@@ -373,11 +363,13 @@ def suspect_body() -> dict[str, Any]:
     return body
 
 
-def claims_json(*claims: tuple[str, bool, str | None], commitment: bool = False) -> str:
+def claims_json(*claims: tuple[str, bool, str | None], commitment: bool = False,
+                no_claims_reason: str | None = None) -> str:
     """What: a verifier reply with the given claims. Use when: fakes. Inputs: (text, supported, source_id)
-    triples. Output: JSON text. Side effects: none. Role: fixture."""
+    triples, commitment, the zero-claims reason (VERIFIER_PROMPT step 4, D-064 floor). Output: JSON text.
+    Side effects: none. Role: fixture."""
     return json.dumps({"claims": [{"text": t, "supported": s, "source_id": i} for t, s, i in claims],
-                       "commitment": commitment})
+                       "commitment": commitment, "no_claims_reason": no_claims_reason})
 
 
 SUSPECT = {"bulk-export-tips-fixture#intro": {"chunk_id": "bulk-export-tips-fixture#intro",
@@ -424,11 +416,19 @@ async def test_x14_draft_cited_from_the_suspect_chunk_is_not_flushed_or_cited():
 
 
 async def test_zero_claims_after_a_search_pass_and_flush_the_draft_without_citations():
-    # D-059: zero extracted claims is the model's judgement that the draft states nothing to check.
-    h = Harness(verifier(claims_json()))
+    # D-059: zero extracted claims is the model's judgement that the draft states nothing to check; under the
+    # D-064 floor (a tool ran) that judgement must be explicit (no_claims_reason).
+    h = Harness(verifier(claims_json(no_claims_reason="conversation")))
     outcome, events, values = await h.run()
     assert (grounding_gate(events).verdict, outcome.end_reason) == ("pass", "answered")
     assert outcome.final.text == DRAFT and outcome.final.citations == []
+
+
+async def test_zero_claims_without_a_reason_after_a_search_fails_closed_under_the_floor():
+    h = Harness(verifier(claims_json()))
+    outcome, events, values = await h.run()
+    assert (grounding_gate(events).verdict, outcome.end_reason) == ("fail", "clarify")
+    assert DRAFT not in texts(values)
 
 
 def test_verifier_input_escapes_the_evidence_and_draft_tags_and_look_alikes():
@@ -497,7 +497,8 @@ def test_the_verifier_prompt_carries_the_d059_claim_rules():
 
 
 async def test_two_clarifying_questions_in_a_row_never_open_a_ticket():
-    h = Harness(verifier(claims_json(), claims_json()), replies=[AIMessage("Which plan are you on?")])
+    q = claims_json(no_claims_reason="clarifying_question")
+    h = Harness(verifier(q, q), replies=[AIMessage("Which plan are you on?")])
     first, events, values = await h.run()
     assert first.end_reason == "answered" and first.final.text == "Which plan are you on?"
     assert grounding_gate(events).verdict == "pass" and values.get("grounding_failures", 0) == 0
@@ -511,7 +512,8 @@ async def test_a_clarifying_question_after_a_weak_search_is_kept():
     search = AIMessage("", tool_calls=[{"name": "search_kb", "args": {"query": "refund"}, "id": "c1",
                                         "type": "tool_call"}])
     q = "Is the refund for the Pro plan charge from this month?"
-    h = Harness(verifier(claims_json()), replies=[search, AIMessage(q)], body=search_body("weak"))
+    h = Harness(verifier(claims_json(no_claims_reason="clarifying_question")), replies=[search, AIMessage(q)],
+                body=search_body("weak"))
     outcome, events, _ = await h.run()
     assert outcome.final.text == q and grounding_gate(events).verdict == "pass"
 

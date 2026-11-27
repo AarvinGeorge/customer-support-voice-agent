@@ -1,5 +1,5 @@
 """What: the D-059 real-model eval of Gate 2 claim extraction: the reviewers' adversarial lists run through the real
-grounding_verifier (small model from data/models.yaml, production timeout: 5 s in chat, D-061) and the code rules.
+grounding_verifier (small model from data/models.yaml, production timeout: 5 s in chat, D-061), the code rules and the D-064 floor.
 Use when: `uv run pytest -m real -s -o addopts="" tests/test_real_gate2_eval.py` (or `-k` one test) only; deselected
 in CI by the default addopts.
 Inputs: ANTHROPIC_API_KEY from the worktree .env (value never printed); tests/gate2_adversarial.py.
@@ -25,9 +25,10 @@ from dotenv import load_dotenv
 from gate2_adversarial import CLARIFYING_R2, CLARIFYING_R3, POLICY_IN_QUESTION_R2, POLICY_IN_QUESTION_R3
 
 from contracts.stubs import examples as ex
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
-from agent.gates import GroundingResult, GroundingVerifier, enforce_code_rules, grounded_evidence
+from agent.gates import (GroundingResult, GroundingVerifier, apply_floor, enforce_code_rules, grounded_evidence,
+                         needs_grounding)
 from agent.models import ModelRegistry, load_models_config
 from agent.turn_control import TurnControl
 
@@ -76,7 +77,8 @@ async def _judge(ver: GroundingVerifier, sem: asyncio.Semaphore, draft: str,
     async with sem:
         start = time.monotonic()
         raw = await ver.verify(TurnControl(session_id="eval", turn_id="eval"), draft, evidence)
-        return enforce_code_rules(raw, draft, {}, tool_names=sources), time.monotonic() - start
+        res = enforce_code_rules(raw, draft, {}, tool_names=sources)
+        return apply_floor(res, needs_grounding(draft, False)), time.monotonic() - start  # D-064, as the middleware
 
 
 def _verifier() -> GroundingVerifier:
@@ -262,7 +264,8 @@ async def test_real_gate_models_return_a_verdict_within_the_cap():
         start = time.monotonic()
         raw = await ver.verify(TurnControl(session_id="eval", turn_id="eval"), draft, evidence)
         secs = time.monotonic() - start
-        res = enforce_code_rules(raw, draft, chunks, tool_names=sources)
+        res = apply_floor(enforce_code_rules(raw, draft, chunks, tool_names=sources),
+                          needs_grounding(draft, any(isinstance(m, ToolMessage) for m in msgs)))  # D-064
         reply = rec.replies[-1] if rec.replies else None
         meta = getattr(reply, "response_metadata", {}) or {}
         usage = getattr(reply, "usage_metadata", {}) or {}
