@@ -48,9 +48,10 @@ def test_error_classes_count():
 
 
 def test_core_error_table_spot_checks():
-    """What: core code table has 21 rows with the doc's HTTP, retryable, changed.
+    """What: core code table has 22 rows (D-070 added REQUESTER_UNKNOWN) with the doc's HTTP, retryable, changed.
     Use when: CI. Inputs: none. Output: assertion. Side effects: none. Role: table guard."""
-    assert len(CORE_ERROR_CODES) == 21
+    assert len(CORE_ERROR_CODES) == 22
+    assert CORE_ERROR_CODES["REQUESTER_UNKNOWN"] == (403, False, False)  # D-070
     assert CORE_ERROR_CODES["TOOL_ERROR"] == (503, True, False)
     assert CORE_ERROR_CODES["INTERNAL"] == (500, True, None)
     assert CORE_ERROR_CODES["PENDING_EXPIRED"] == (410, False, False)

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from contracts import limits
-from contracts.redact import RedactContext, redact
+from contracts.redact import redact_system
 from contracts.tools import STATUS_ONE_ACTION_AT_A_TIME, STATUS_TOOL_NOT_AVAILABLE
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
@@ -139,7 +139,7 @@ class ToolGuardMiddleware(AgentMiddleware):
             return None, 0
         step_id = ev.next_step_id()
         ev.emit("step.started", step_id=step_id, kind="tool", name=name, label=spec.label,
-                args_redacted=redact(args, RedactContext(awaiting_verification=control.awaiting_verification)))
+                args_redacted=redact_system(args))  # D-071: model-written args (the model never had a PIN)
         return step_id, ev.ms()
 
     @staticmethod

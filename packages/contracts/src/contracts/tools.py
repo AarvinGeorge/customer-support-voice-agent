@@ -100,7 +100,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
 }
 
 VISIBILITY: dict[str, tuple[str, ...]] = {
-    "V0": ("create_ticket", "request_verification", "search_kb"),
+    "V0": ("request_verification", "search_kb"),  # D-070: no ticket without a verified requester
     "V1": ("create_ticket", "get_account_summary", "list_tickets", "prepare_refund", "search_kb"),
     "V2": ("create_ticket", "get_account_summary", "list_charges", "list_tickets", "prepare_refund",
            "search_kb"),

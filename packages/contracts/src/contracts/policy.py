@@ -204,18 +204,17 @@ class Identity(_Frozen):
 
 
 class TicketLimits(_Frozen):
-    """What: ticket caps. Use when: ticket create. Inputs: two ints. Output: model.
-    Side effects: none. Role: L1 s5 A3."""
+    """What: ticket caps. Use when: ticket create. Inputs: one int. Output: model.
+    Side effects: none. Role: L1 s5 A3 (D-070 removed the unverified per-session cap: no unverified tickets)."""
 
     verified_per_account_per_day: PositiveInt
-    unverified_per_session: PositiveInt
 
 
 class Tickets(_Frozen):
     """What: ticket priority, queue and cap rules. Use when: ticket create. Inputs: maps and lists.
     Output: model. Side effects: none. Role: L1 s5 A3."""
 
-    priority_by_tier: FrozenMap[Literal["free", "pro", "business", "enterprise", "unverified"], Priority]
+    priority_by_tier: FrozenMap[Literal["free", "pro", "business", "enterprise"], Priority]
     enterprise_blocking_priority: Priority
     target_label: FrozenMap[Literal["P1", "P2_enterprise", "P2", "P3", "P4"], str]
     queues: tuple[Queue, ...]

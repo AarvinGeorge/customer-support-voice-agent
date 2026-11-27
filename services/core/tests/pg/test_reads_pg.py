@@ -127,7 +127,6 @@ def build_world(c: psycopg.Connection) -> SimpleNamespace:
     w.t_pending = ticket(w.a, w.owner, "pending_approval", w.s_owner2, category="refund", pa=w.pa_approval, created=20)
     w.t_resolved = ticket(w.a, w.owner, "resolved", w.s_owner, category="access", created=30)
     w.t_b = ticket(w.b, w.other, "open", uuid.uuid4(), created=40)
-    w.t_anon = ticket(None, None, "open", w.s_anon, category="bug", verified=False, created=50)
     return w
 
 
@@ -282,7 +281,7 @@ def test_charges_ending_on_since_days_and_limit(world):
 
 def test_tickets_by_role_status_and_ending(world):
     """What: an owner sees the account's open and pending tickets (status=open), all four with status=all, one with
-    ending; a member sees their own only; an unverified session sees only its own session's tickets; other accounts
+    ending; a member sees their own only; an unverified session sees none (D-070: it can own no ticket); other accounts
     never appear; each item has the TicketView fields. Use when: always. Inputs: world. Output: assertions.
     Side effects: none. Role: doc 07 s3.2 /me/tickets."""
     opened = world.get(world.s_owner, "/v1/me/tickets").json()["tickets"]
@@ -297,8 +296,7 @@ def test_tickets_by_role_status_and_ending(world):
     assert set(one[0]) == keys and one[0]["category"] == "bug" and one[0]["display"] == f"ticket ending {world.t_old[-4:]}"
     member = world.get(world.s_member, "/v1/me/tickets?status=all").json()["tickets"]
     assert [t["ticket_id"] for t in member] == [world.t_member]
-    anon = world.get(world.s_anon, "/v1/me/tickets").json()["tickets"]
-    assert [t["ticket_id"] for t in anon] == [world.t_anon] and anon[0]["verified"] is False and anon[0]["priority"] == "P4"
+    assert world.get(world.s_anon, "/v1/me/tickets").json() == {"tickets": []}  # D-070: no ticket without a requester
     assert world.get(uuid.uuid4(), "/v1/me/tickets").json() == {"tickets": []}
 
 

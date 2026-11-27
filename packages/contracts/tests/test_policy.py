@@ -159,9 +159,8 @@ def test_numbers_equal_l1_s5_s6():
     assert (c.tiers.pro.price_cents_per_seat_month, c.tiers.business.price_cents_per_seat_month) == (800, 1600)
     assert c.identity.pin_digits == 4 and c.identity.max_failures_per_session == 3
     t = c.tickets
-    assert (t.limits.verified_per_account_per_day, t.limits.unverified_per_session) == (5, 2)
-    assert dict(t.priority_by_tier) == {"enterprise": "P2", "business": "P2", "pro": "P3", "free": "P4",
-                                  "unverified": "P4"}
+    assert t.limits.verified_per_account_per_day == 5
+    assert dict(t.priority_by_tier) == {"enterprise": "P2", "business": "P2", "pro": "P3", "free": "P4"}
     assert t.enterprise_blocking_priority == "P1"
     assert dict(t.target_label) == {"P1": "1 hour", "P2_enterprise": "4 hours", "P2": "8 hours",
                               "P3": "24 hours", "P4": "72 hours"}
@@ -230,7 +229,7 @@ def test_numbers_appear_in_staged_articles():
         "billing-invoices-payments": ["at most once per day", "7 days, once per 12 months",
                                       "14 days, once per 6 months"],
         "plans-pricing-contracts": ["$8 per seat per month", "$16 per seat per month"],
-        "support-and-escalation": ["5 tickets per day", "up to 2 tickets", "72 hours", "24 hours",
+        "support-and-escalation": ["5 tickets per day", "after 5 failed attempts", "72 hours", "24 hours",
                                    "8 hours", "4 hours", "1 hour"],
     }
     for article, phrases in facts.items():

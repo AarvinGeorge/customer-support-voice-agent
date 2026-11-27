@@ -26,7 +26,7 @@ SID, TID = "019a7c2e-5b10-7000-8000-00000000a001", "019a7c2e-5b20-7000-8000-0000
 
 # doc 07 s5.2, copied from the contract, and the designed-only tools of doc 09 s1.2.
 S52 = {
-    "V0": ["create_ticket", "request_verification", "search_kb"],
+    "V0": ["request_verification", "search_kb"],  # D-070 amends doc 07 s5.2: no create_ticket while unverified
     "V1": ["create_ticket", "get_account_summary", "list_tickets", "prepare_billing_email_change",
            "prepare_grace_extension", "prepare_refund", "search_kb", "update_notification_preferences"],
 }
