@@ -1,6 +1,7 @@
 # Quillstack policy: the one source of truth for limits (L1 s6, doc 07 s13.1).
 # Read by core (extra=forbid, frozen) and by knowledge at ingest ({policy.<key>} placeholders).
-# Values equal L1 s5 and s6. Designed only and not here: A2 field expansion, preferences beyond the keys below.
+# Values equal L1 s5 and s6. Designed only and not here: the A2 billing email and notification preference
+# blocks (doc 09 s1.2). Their EMAIL_* and NO_BILLING_ON_PLAN reason codes stay: doc 07 s13.1 freezes the 23-code list.
 version_label: "2026-11-27.1"
 timezone: "America/New_York"
 currency: "USD"
@@ -32,22 +33,6 @@ actions:
     readback_approval:
       chat: "I can't issue this refund myself, but I can send a request to refund {amount} for {charge_label} to our team for approval. Shall I send this to our team for approval?"
       voice: "I can't issue this refund myself, but I can send a request to refund {amount} for {charge_label_spoken} to our team for approval. Shall I send this to our team for approval?"
-  billing_email:
-    enabled: true
-    per_account_per_day: 1
-    step_up_required_tiers: [pro, business]
-    approval_tiers: [enterprise]
-    step_up_valid_seconds: 300
-    pending_ttl_seconds: 600
-    readback:
-      chat: "I'll change the billing contact email from {old_email_masked} to {new_email}. To confirm, enter your support PIN in the card and press Confirm."
-      voice: "I'll change the billing email to {new_email_spelled}. To confirm, please type your support PIN into the card on screen and press Confirm."
-    readback_approval:
-      chat: "I can't change the billing contact email myself, but I can send a request to change it from {old_email_masked} to {new_email} to our team for approval. Shall I send this to our team for approval?"
-      voice: "I can't change the billing email myself, but I can send a request to change it to {new_email_spelled} to our team for approval. Shall I send this to our team for approval?"
-  notification_prefs:
-    enabled: true
-    allowed_keys: [product_updates, billing_notices, incident_alerts, weekly_digest]
   grace_extension:
     enabled: false
     requires_status: past_due
