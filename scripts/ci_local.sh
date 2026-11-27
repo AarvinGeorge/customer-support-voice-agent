@@ -5,7 +5,7 @@
 #   and from ci.yml. `scripts/ci_local.sh --list` prints the job names.
 # Inputs: job names (none = all). Env: CI_DESCRIPTORS_BASE (default origin/main; ci.yml sets HEAD^ on a push to main,
 #   ci_gate.sh sets the main sha), CI_LOG_DIR (default .tmp/ci-local/<stamp>), CI_PG_PROJECT, CI_PG_SUBNET, CI_PG_PORT
-#   (the pg test stack; defaults cs-localci, 172.31.79.0/24, 55479; cs-demo is refused).
+#   (the pg test stack; defaults cs-localci, 172.31.79.0/24, 55479; the project must start with cs-localci).
 # Output: one PASS, FAIL or SKIP row per step, a summary table, and the last line
 #   `ci_local: N passed, N failed, N skipped`. Exit 0 only when no step failed; 1 on any failure; 2 on bad usage.
 #   The only SKIP is the matrix rule ci.yml always had (no pyright on infra); every other step is hard.
@@ -201,7 +201,8 @@ run_job() {
     pg-tests)
       ensure_uv
       local proj="${CI_PG_PROJECT:-cs-localci}"
-      [ "$proj" != cs-demo ] || { echo "refusing COMPOSE_PROJECT_NAME=cs-demo (the owner's demo stack)" >&2; exit 2; }
+      # pg_tests.sh ends with `down -v --remove-orphans`: only a cs-localci* project may be named, never cs-demo or a lane stack.
+      case "$proj" in cs-localci*) ;; *) echo "refusing CI_PG_PROJECT=$proj: it must start with cs-localci (down -v would remove that stack)" >&2; exit 2 ;; esac
       run_step "pg tests" . "COMPOSE_PROJECT_NAME='$proj' EDGE_SUBNET='${CI_PG_SUBNET:-172.31.79.0/24}' PG_TEST_PORT='${CI_PG_PORT:-55479}' scripts/pg_tests.sh"
       run_step "pg deploy restore" . "scripts/deploy/restore_pg_test.sh" ;;
     *) echo "unknown job: $1 (scripts/ci_local.sh --list)" >&2; exit 2 ;;

@@ -79,3 +79,24 @@ def test_a_failing_step_turns_the_run_red(tmp_path: Path) -> None:
     assert r.returncode == 1, r.stdout + r.stderr
     assert re.search(r"descriptors .* FAIL", r.stdout)
     assert re.match(r"ci_local: \d+ passed, 1 failed", r.stdout.strip().splitlines()[-1])
+
+
+def test_no_job_or_step_can_be_softened_in_the_workflow() -> None:
+    """What: no `continue-on-error` and no `if:` on any job or step (review M1), so a check cannot go quietly green.
+    Use when: CI. Inputs: none. Output: assertions. Side effects: none. Role: drift guard."""
+    for job_id, job in _workflow()["jobs"].items():
+        assert "continue-on-error" not in job and "if" not in job, job_id
+        for step in job["steps"]:
+            assert "continue-on-error" not in step and "if" not in step, f"{job_id}: {step}"
+
+
+def test_pg_project_outside_the_localci_namespace_is_refused(tmp_path: Path) -> None:
+    """What: CI_PG_PROJECT must start with cs-localci (review M4): cs-demo or a lane project (cs-a) is never taken down.
+    Use when: CI. Inputs: tmp log dir. Output: assertions. Side effects: none (refused before docker). Role: guard."""
+    import os
+
+    for proj in ("cs-demo", "cs-a"):
+        env = {**os.environ, "CI_LOG_DIR": str(tmp_path), "CI_PG_PROJECT": proj}
+        r = subprocess.run(["bash", str(LOCAL), "pg-tests"], capture_output=True, text=True, env=env)
+        assert r.returncode == 2 and "cs-localci" in r.stderr, r.stdout + r.stderr
+        assert "--- pg tests" not in r.stdout

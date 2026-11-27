@@ -14,12 +14,17 @@ SLUG = "AarvinGeorge/customer-support-voice-agent"
 STUB = """#!/usr/bin/env bash
 # What: stub ci_local.sh. Use when: gate tests. Inputs: file ci_result. Output: summary line. Side effects: none. Role: test double.
 rc="$(cat ci_result)"
+if [ "$rc" = abort ]; then echo "FAIL: node 22 is required" >&2; exit 3; fi
+if [ "$rc" = slow ]; then sleep 3; rc=0; fi
 echo "ci_local: 1 passed, $rc failed, 0 skipped (0s)"
 exit "$rc"
 """
 FAKE_GH = """#!/usr/bin/env bash
 # What: fake gh. Use when: gate tests. Inputs: argv. Output: PR info or nothing. Side effects: appends to $GH_LOG. Role: test double.
-if [ "$1" = pr ]; then echo "OPEN main $(git --git-dir="$FAKE_BARE" rev-parse "refs/pull/$3/head")"; exit 0; fi
+if [ "$1" = pr ]; then
+  head="${FAKE_HEAD:-$(git --git-dir="$FAKE_BARE" rev-parse "refs/pull/$3/head")}"
+  echo "${FAKE_STATE:-OPEN} ${FAKE_BASE:-main} $head ${FAKE_CROSS:-false}"; exit 0
+fi
 if [ "$1" = api ]; then printf '%s\\n' "$*" >> "$GH_LOG"; exit 0; fi
 exit 9
 """
@@ -71,6 +76,8 @@ def _world(tmp_path: Path) -> dict:
     pr(1, "a.txt", "base\nfrom pr1\n")
     pr(2, "a.txt", "conflicting pr2 line\n")
     pr(3, "ci_result", "1\n")
+    pr(4, "ci_result", "abort\n")
+    pr(5, "ci_result", "slow\n")
     (seed / "a.txt").write_text("main moved on\n")
     _git(seed, "commit", "-qam", "main moves", env=env)
     _git(seed, "push", "-q", "origin", "HEAD:refs/heads/main", env=env)
@@ -113,10 +120,13 @@ def test_clean_pass_posts_success_with_main_sha(tmp_path: Path) -> None:
     """What: PR 1 merges cleanly and the stub passes. Use when: CI. Inputs: fixture. Output: assertions.
     Side effects: none outside tmp. Role: the green path."""
     world = _world(tmp_path)
+    before = _git(world["main"], "status", "--porcelain", "--ignored", env=world["env"])
     r = _gate(world["lane"], world["env"], "1")
     assert r.returncode == 0, r.stdout + r.stderr
+    assert _git(world["main"], "status", "--porcelain", "--ignored", env=world["env"]) == before  # main checkout untouched
     head = _git(world["bare"], "rev-parse", "refs/pull/1/head", env=world["env"])
-    [call] = _posts(world)
+    pending, call = _posts(world)
+    assert "state=pending" in pending and world["main_sha"] in pending
     assert f"repos/{SLUG}/statuses/{head}" in call
     assert "state=success" in call and "context=local-ci" in call and world["main_sha"] in call
     _assert_clean(world)
@@ -128,7 +138,8 @@ def test_dirty_merge_posts_failure(tmp_path: Path) -> None:
     world = _world(tmp_path)
     r = _gate(world["lane"], world["env"], "2")
     assert r.returncode == 1, r.stdout + r.stderr
-    [call] = _posts(world)
+    pending, call = _posts(world)
+    assert "state=pending" in pending
     assert "state=failure" in call and "merge conflict" in call and world["main_sha"] in call
     _assert_clean(world)
 
@@ -139,7 +150,8 @@ def test_failing_check_posts_failure(tmp_path: Path) -> None:
     world = _world(tmp_path)
     r = _gate(world["lane"], world["env"], "3")
     assert r.returncode == 1, r.stdout + r.stderr
-    [call] = _posts(world)
+    pending, call = _posts(world)
+    assert "state=pending" in pending
     assert "state=failure" in call and "1 fail" in call and world["main_sha"] in call
     _assert_clean(world)
 
@@ -181,3 +193,119 @@ def test_held_lock_is_refused(tmp_path: Path) -> None:
     r = _gate(world["lane"], world["env"], "1")
     assert r.returncode == 2 and "another ci_gate run" in r.stderr
     assert lock.exists() and _posts(world) == []
+
+
+def test_aborted_check_run_posts_failure_over_pending(tmp_path: Path) -> None:
+    """What: ci_local.sh dies before its summary line (review I1). The gate posts pending, then failure naming the abort.
+    Use when: CI. Inputs: fixture. Output: exit 1. Side effects: none outside tmp. Role: a status always reflects the latest run."""
+    world = _world(tmp_path)
+    r = _gate(world["lane"], world["env"], "4")
+    assert r.returncode == 1, r.stdout + r.stderr
+    pending, call = _posts(world)
+    assert "state=pending" in pending
+    assert "state=failure" in call and "aborted" in call and world["main_sha"] in call
+    _assert_clean(world)
+
+
+def _refused(world: dict, needle: str, *, pr: str = "1", cwd: Path | None = None, **env: str) -> None:
+    """What: run the gate expecting a refusal: exit 2, the message, nothing posted, nothing left behind.
+    Use when: each refusal test. Inputs: world, expected stderr text, PR, cwd, extra env. Output: none (asserts).
+    Side effects: none outside tmp. Role: helper."""
+    r = _gate(cwd or world["lane"], {**world["env"], **env}, pr)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert needle in r.stderr, r.stderr
+    assert _posts(world) == []
+    _assert_clean(world)
+
+
+def test_fork_pr_is_refused(tmp_path: Path) -> None:
+    """What: a PR from another repository (fork) is refused before any code runs (review I2). Use when: CI."""
+    _refused(_world(tmp_path), "fork", FAKE_CROSS="true")
+
+
+def test_closed_pr_is_refused(tmp_path: Path) -> None:
+    """What: a PR that is not OPEN is refused. Use when: CI."""
+    _refused(_world(tmp_path), "not OPEN", FAKE_STATE="MERGED")
+
+
+def test_pr_not_on_main_is_refused(tmp_path: Path) -> None:
+    """What: a PR whose base is not main is refused. Use when: CI."""
+    _refused(_world(tmp_path), "not main", FAKE_BASE="release")
+
+
+def test_head_mismatch_is_refused(tmp_path: Path) -> None:
+    """What: the fetched head differs from GitHub's (a push in flight) and the gate refuses. Use when: CI."""
+    _refused(_world(tmp_path), "differs", FAKE_HEAD="0" * 40)
+
+
+def test_wrong_remote_is_refused(tmp_path: Path) -> None:
+    """What: a checkout whose origin is not this repo is refused. Use when: CI."""
+    w = _world(tmp_path)
+    _refused(w, "is not", CI_GATE_REPO="someone/else")
+
+
+def test_tmp_not_ignored_is_refused(tmp_path: Path) -> None:
+    """What: a checkout where .tmp/ is not git-ignored is refused (the worktree would be committable). Use when: CI."""
+    w = _world(tmp_path)
+    (w["lane"] / ".gitignore").write_text("")
+    _refused(w, "not git-ignored")
+
+
+def test_stale_lock_from_a_dead_run_is_reclaimed(tmp_path: Path) -> None:
+    """What: a lock whose pid is gone (review M3, a SIGKILLed run) is reclaimed and its leftover worktree swept.
+    Use when: CI. Inputs: fixture. Output: exit 0. Side effects: none outside tmp. Role: no manual lock surgery."""
+    w = _world(tmp_path)
+    lock = w["main"] / ".git" / "ci-gate.lock"
+    lock.mkdir()
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    (lock / "pid").write_text(f"{dead.pid}\n")
+    _git(w["lane"], "worktree", "add", "-q", "--detach", str(w["lane"] / ".tmp" / "ci-gate-pr9-old"), "HEAD", env=w["env"])
+    r = _gate(w["lane"], w["env"], "1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    _assert_clean(w)
+
+
+def test_status_helper_validates_and_posts(tmp_path: Path) -> None:
+    """What: scripts/lib/commit_status.sh (shared with the live-smoke gate) rejects a bad state or sha and posts one
+    `gh api` call with the context and a description cut to 140 characters. Use when: CI. Inputs: fixture.
+    Output: assertions. Side effects: none outside tmp. Role: the one status writer."""
+    w = _world(tmp_path)
+    lib = GATE.parent / "lib" / "commit_status.sh"
+    sha = "a" * 40
+
+    def call(*args: str) -> subprocess.CompletedProcess:
+        """What: source the helper and call commit_status. Use when: this test. Inputs: args. Output: process.
+        Side effects: fake gh log. Role: helper."""
+        return subprocess.run(["bash", "-c", f'source "{lib}"; commit_status "$@"', "x", *args], env=w["env"], capture_output=True, text=True)
+
+    assert call(sha, "green", "ctx", "d").returncode == 2
+    assert call("abc", "success", "ctx", "d").returncode == 2
+    assert call(sha, "success", "", "d").returncode == 2
+    assert _posts(w) == []
+    r = call(sha, "success", "live-smoke", "x" * 200)
+    assert r.returncode == 0, r.stderr
+    [posted] = _posts(w)
+    assert f"repos/{SLUG}/statuses/{sha}" in posted and "context=live-smoke" in posted and "x" * 141 not in posted
+
+
+def test_signal_mid_run_posts_failure_over_pending(tmp_path: Path) -> None:
+    """What: SIGTERM while ci_local.sh runs: the EXIT trap posts failure (not a stale pending or success) and cleans up.
+    Use when: CI. Inputs: fixture (PR 5 stub sleeps 3s). Output: exit 143. Side effects: none outside tmp.
+    Role: proves the trap path, separate from the explicit result branches."""
+    import time
+
+    world = _world(tmp_path)
+    proc = subprocess.Popen(["bash", str(GATE), "5"], cwd=world["lane"], env=world["env"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.time() + 30
+    while not any("state=pending" in c for c in _posts(world)):
+        assert time.time() < deadline and proc.poll() is None, "gate never posted pending"
+        time.sleep(0.1)
+    time.sleep(0.5)
+    proc.terminate()
+    proc.communicate(timeout=60)
+    assert proc.returncode == 143
+    pending, call = _posts(world)
+    assert "state=pending" in pending
+    assert "state=failure" in call and "aborted (exit 143)" in call and world["main_sha"] in call
+    _assert_clean(world)
