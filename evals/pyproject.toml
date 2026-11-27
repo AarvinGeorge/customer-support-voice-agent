@@ -27,6 +27,7 @@ quillstack-contracts = { path = "../packages/contracts", editable = false }
 pythonpath = [".."]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["e2e: end to end on a running Compose stack with real model calls; skipped unless EVALS_E2E=1 (tests/test_s5_faults_e2e.py)"]
 
 [tool.pyright]
 extraPaths = [".."]

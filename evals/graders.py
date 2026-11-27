@@ -470,15 +470,17 @@ def g_raw_ids(ctx: Ctx) -> list[Check]:
 def _commit_ids(events: list[Event]) -> list[str | None]:
     """What: the pending ids committed or submitted in one turn. Use when: commit rules. Inputs: events of a turn.
     Output: distinct ids; [None] when a commit-like event names none; [] when nothing committed. Side effects: none.
-    Role: action.result and commit or submit steps; a step with no id borrows the id of the same turn's action.result."""
+    Role: action.result and commit or submit steps; a step with no id borrows the id of the same turn's action.result,
+    whatever its outcome (a faulted commit attempt ends in outcome failed and still names the pending it tried)."""
     ids: list[str | None] = []
     anonymous = False
+    tried = [e.get("pending_action_id") for e in events if e.get("type") == "action.result" and e.get("pending_action_id")]
     for e in events:
         pa = None
         if e.get("type") == "action.result" and e.get("outcome") in COMMIT_OUTCOMES:
             pa = e.get("pending_action_id")
         elif e.get("type") == "step.started" and e.get("kind") in ("commit", "submit"):
-            pa = (e.get("args_redacted") or {}).get("pending_action_id")
+            pa = (e.get("args_redacted") or {}).get("pending_action_id") or (tried[0] if tried else None)
         else:
             continue
         if pa is None:

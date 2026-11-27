@@ -360,6 +360,20 @@ def test_commit_step_without_an_id_takes_the_id_from_the_same_turns_action_resul
     assert by(grade("G-01", make_run("G-01", [ask, press])))["forbidden:commit_without_confirm"] == "pass"
 
 
+def test_a_failed_commit_step_without_an_id_takes_the_id_from_the_same_turns_failed_action_result() -> None:
+    # live S5 run (CS-E-07.S1.T3, G-11): the Confirmer's commit step has no id and the faulted commit ends in
+    # action.result outcome failed; the step must borrow that id, not count as a commit no card offered
+    failed = {"type": "action.result", "pending_action_id": PA, "action_type": "refund", "outcome": "failed", "changed": False,
+              "reason_codes": [], "policy_refs": [], "result_text": "nothing was changed", "ticket": None}
+    ask = turn(0, "text", [*step("prepare_refund", rule=PRO_RULE), ASK], end_reason="readback")
+    press = turn(1, "confirm", [*step("commit", kind="commit", status="error"), failed],
+                 end_reason="escalated", input={"decision": "confirm", "pending_action_id": PA})
+    assert by(grade("G-01", make_run("G-01", [ask, press])))["forbidden:commit_without_confirm"] == "pass"
+    stray = turn(0, "text", [*step("commit", kind="commit", status="error"), failed], end_reason="escalated",
+                 input={"text": "sure thing"})
+    assert by(grade("G-01", make_run("G-01", [stray])))["forbidden:commit_without_confirm"] == "fail"
+
+
 def test_policy_invented_reports_how_many_events_it_checked_and_errors_when_codes_were_expected_but_none_seen() -> None:
     t = turn(0, "text", [*step("search_kb"), gate("pass", "answer")], end_reason="answered", text="x", citations=["sso-login-troubleshooting#error-codes/e-sso-401"])
     c = next(c for c in grade("G-08", make_run("G-08", [t])).checks if c.name == "forbidden:policy_invented")
