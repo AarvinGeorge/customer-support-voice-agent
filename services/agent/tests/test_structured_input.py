@@ -242,7 +242,8 @@ async def test_strict_yes_inside_another_request_goes_to_the_model_and_never_com
 async def test_yes_after_a_failed_turn_repeats_the_readback_and_never_commits() -> None:
     w, _, _ = await readback_world()  # no more scripted replies: the next model turn fails
     failed, _ = await w.send(text="actually can you make it $50 instead?")
-    assert failed.status == "failed" or failed.end_reason == "error"
+    # both models fail on this turn, so it ends with the doc 07 s6.7 apology (CS-E-03.S4.T1), not a read-back
+    assert failed.status == "failed" or failed.end_reason in ("error", "escalated")
     again, events = await w.send(text="yes")
     assert again.end_reason == "readback" and again.final.text == ex.READBACK.chat
     assert w.core_calls("/commit") == [] and len(of(events, "confirmation.required")) == 1
