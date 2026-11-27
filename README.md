@@ -147,7 +147,7 @@ Key choices behind the diagram:
 - Core and knowledge are on an internal network; Caddy is the only public service.
 - Every model is a role in `data/models.yaml`, so models can change without code changes.
 
-TODO CS-E-08.S1.T2: chunking choices (showcase 3.2) and the production posture table.
+Chunking choices are in [showcase 3.2](#32-chunking-choices-and-why). What is designed but not built, with the trigger for each, is in the [Production posture](#production-posture) table.
 
 ## Why one agent, not many
 
@@ -232,7 +232,17 @@ TODO CS-E-06.S3.T1: chat first-status time and voice time to first audio (p50) f
 Written: see [Architecture](#architecture). Owner CS-E-08.S1.T1.
 
 #### 3.2 Chunking choices and why
-TODO CS-E-08.S1.T2: heading-aware chunks.
+Chunks follow the help articles' own structure instead of a fixed window. The chunker (`services/knowledge/src/knowledge/ingest/chunker.py`) works in this order:
+
+- Split by heading: the intro, each H2 body and each H3 section become candidate chunks. A section is one idea an agent can quote, so a citation points at one section (with its source link), not at a slice that starts mid-sentence.
+- Merge small sections, within limits. The rule (`_merge` in the chunker): a section under 50 tokens joins the previous section only if both sit under the same H2 and apply to the same tiers; with no previous section it joins the next one. It never merges across two H2 sections or across tiers. Most articles are flat lists of H2 sections, so most small sections stay on their own: 13 of the 81 chunks are under 50 tokens (for example `refund-policy#free-plan`, 14 tokens, a heading with one short line).
+- Keep a section whole when it is 150 to 400 tokens. Split only a section over 500 tokens, at paragraph or list boundaries and up to 400 tokens; one block over 500 tokens fails the ingest instead of being cut. No overlap between chunks.
+- Add a short context header to the text that is embedded (article path, tiers the section applies to, updated date), so a chunk that says "Step 3" still knows which article it belongs to. The header is not counted in the body size.
+- Tokens are counted with the cl100k_base encoding. Chunk ids are deterministic, so a re-ingest of an unchanged article changes nothing.
+
+Why 150 to 400: below about 150 tokens a chunk often lacks the condition that makes a rule apply (a tier, a day limit); above 400 one chunk covers several rules and the embedding blurs them. The range is the target, not a padding rule.
+
+What the chunker produced from the 10 articles in `data/articles` (counted from the ingest code, body tokens): 81 chunks; smallest 14 tokens, median 69, mean 79, largest 203 tokens; 5 chunks are in the 150 to 400 band, 76 are under 150, none is over 400. So most chunks are below the target: the articles are short and are written one rule per section, and the chunker keeps a section whole rather than gluing unrelated sections together to reach 150. The practical effect is precise citations; the cost is that a question needing two rules retrieves two chunks. The provisional Gate 1 thresholds are computed on these chunks (D-052, D-053). Merging sections up to the band would be the change to test if the golden set shows answers missing a neighbouring rule.
 
 #### 3.3 Typed contracts
 One event schema shared by backend and frontend: `packages/contracts` holds the Pydantic models and the generated TypeScript types; the frozen wire contract is doc 07. Owner CS-E-08.S1.T1 See `packages/contracts/src/contracts/events.py` for the SSE events..
@@ -258,7 +268,7 @@ TODO CS-E-07.S1.T4: fallback badge.
 TODO CS-E-07.S2.T1: table of limits.
 
 #### 4.4 Stateless service: state in Postgres, two replicas, survives a restart
-Built: all session state is in Postgres and Compose runs two agent replicas. Designed, not built: the restart proof on the VM (doc 09 s1.2); trigger: before real production traffic. TODO CS-E-08.S1.T2: this row goes in the production posture table.
+Built: all session state is in Postgres and Compose runs two agent replicas. Designed, not built: the restart proof on the VM (doc 09 s1.2); trigger: before real production traffic. The restart proof is a row in the [Production posture](#production-posture) table.
 
 #### 4.5 Idempotent commits
 TODO CS-E-03.S2.T5: the test that a replayed commit never refunds twice.
@@ -273,8 +283,50 @@ TODO CS-E-06.S1.T1: pass rate with N, raw escalation counts, judge agreement.
 TODO CS-E-06.S3.T1: numbers from LangSmith.
 
 #### 4.9 Designed but not built, each with its trigger
-TODO CS-E-08.S1.T2: see [Production posture](#production-posture).
+Written: see the [Production posture](#production-posture) table. Each item has a design reference and the event that would make it worth building.
 
 ## Production posture
 
-TODO CS-E-08.S1.T2: table of every "designed, not built" row from the build plan (section 1.2), each with its trigger.
+Built is the thin slice (D-035). The rows below are designed and not built, so each one has a trigger: the observation that would justify the work. "Designed in" points at the contract (07), the architecture (06), the scope (L1) or a decision (D-nnn) that holds the design.
+
+| Item | Designed in | Trigger |
+|---|---|---|
+| Approvals UI (`/operator` page) | 07 s2.2 operator rows | A real approver queue exists, or a reviewer asks to see the operator step |
+| Ops router and core operator endpoints (login, approvals, approve, reject, resolve, close) | 07 s3.5, s2.2 | Same as the approvals UI |
+| A2 billing email change and step-up PIN | 07 s3.1 step-up, s3.3; L1 s5 A2 | Next build window after the Loom; needed before any account-takeover-sensitive action ships |
+| A4 grace extension | L1 s5 A4; D-018 | `FEATURE_A4` after a green build window |
+| Notification preferences (act alone) | 07 s3.2 | Customers ask for preference changes in support volume |
+| Live Notion sync, weekly scheduler, Sync now, policy drift check | 07 s16; D-034 | Articles change more than once a week, or a second author edits them |
+| LangSmith detail tab and `/api/traces` proxy | 07 s2.2, s2.3 `TraceDetail` | The drawer needs per-run detail beyond our SSE usage events (the observability drawer is in the build plan, doc 09 s1.1, and is not on main yet) |
+| LLM judge and model comparison matrix | 06 s19; doc 08 | Free-text cases the code graders cannot score, or a model switch decision |
+| Mocked-model load test | 06 s14 | Before real traffic, or to size replicas; the demo is sized for 1 to 2 concurrent conversations (a target, not measured) |
+| Mobile layouts | D-031 cut order | Phone users in the audience |
+| Spoken verification (rule V, spike 18) | 07 s7.3 rule V, s14 row 18 | Spike 18 passes on real recordings; until then voice is planned to use the verification card (the contract fallback; the voice client is not on main yet) |
+| Gate 2 re-ask (spike 2) | 07 s6.4, s14 row 2 | Golden-set evidence that a re-ask helps; the slice is planned to use a fixed clarifying line instead (the grounding middleware is a stub on main) |
+| First-token timeout (spike 5) | 07 s6.4, s14 row 5 | First-token stalls observed in real use |
+| Turn drop recovery UI | 07 s2.2, s8.1 | Dropped streams observed in real use |
+| Page-refresh rehydrate (`GET /api/turns`, `GET /api/sessions/{sid}` snapshot) | 07 s2.2, s2.3 | Dropped streams or refreshes observed in real use |
+| Push-to-talk fallback | 06 s17; 07 s2.2 | Voice activity detection misfires in real rooms |
+| Voice usage post (`/voice/usage`) | 06 s17; 07 s2.2 | Server-side voice metrics are needed |
+| Admission semaphore (8 per replica) | 07 s9 last row | Concurrency above a few users |
+| Worst-case timing arithmetic tests (07 s8.3) | 07 s8.3 | Before production traffic |
+| Two-replica restart proof on the VM | 07 s8.3 | Before production traffic. Built: all session state is in Postgres and Compose runs two agent replicas |
+| Reranker | 06 s14 | The gold chunk is outside the top 3 in more than 2 answerable test cases |
+| Multi-document retrieval (query rewriting, GraphRAG) | 06 s14 | 3 or more golden cases that need two articles fail |
+| Evaluator-optimizer loop | 06 s14 | A spike plus golden-set evidence that it helps |
+| Sub-agents (supervisor with specialists) | 06 s11, s14 | More than about 15 tools, tool-selection errors above 5 percent in the golden set, or a new domain with conflicting instructions |
+| Circuit breakers and a spend-cap flag | 06 s14 | Sustained provider errors |
+| Voice sideband (server-side channel to the realtime call) | 06 s14 | Server-enforced voice caps, server-trusted telemetry, or detecting ungrounded realtime speech |
+| Conversation summarization | 06 s14 | Sessions near the 40-turn cap or about 80k input tokens |
+| Chat turn resume beyond replay | 06 s14 | Dropped streams that replay does not cover (proposed) |
+| Voice reconnect | 06 s14 | Voice calls dropping in real use (proposed) |
+| In progress and Waiting on customer ticket stages | 06 s14; D-018 | Support staff need to track work in flight (proposed) |
+| SLA timers | 06 s14 | A response-time promise is made to customers (proposed) |
+| App-level daily budget counter | 06 s14 | Provider spend caps alone are not enough (proposed) |
+| Event log retention job | 06 s14 | The event tables grow beyond what the demo needs (proposed) |
+| Approval withdrawal (customer withdraws a submitted approval) | 06 s14 | Customers ask to retract a request after submitting it (proposed) |
+
+Triggers marked (proposed) are this README's wording: the architecture doc names the item as deferred but gives no trigger.
+
+Cut order if the build runs behind (06 s14): A4, the approvals button (ticket shown as pending), the LangSmith detail tab, mobile layouts.
+
