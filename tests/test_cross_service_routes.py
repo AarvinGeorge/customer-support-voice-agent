@@ -123,3 +123,55 @@ def test_every_path_an_agent_client_calls_is_served_with_a_scope_the_token_holds
             elif scope not in scopes[caller]:
                 problems.append(f"{source.name}: {call[0]} {call[1]} needs scope {scope}, token {caller} lacks it")
     assert not problems, "\n".join(problems)
+
+
+# ---- fix round 1: the guard must not be silent, hand-listed or fooled by 501 stubs (review of PR 79) ----
+
+import pytest  # noqa: E402
+
+
+def _client_file(tmp_path: Path, body: str) -> Path:
+    """What: write a tiny client module. Use when: probing the extractor. Inputs: tmp dir, the method body lines.
+    Output: its path. Side effects: writes a file. Role: synthetic client."""
+    f = tmp_path / "extra.py"
+    f.write_text("class C:\n    async def m(self, control):\n" + body)
+    return f
+
+
+def test_a_call_whose_url_is_a_variable_is_resolved_or_fails_loudly(tmp_path):
+    """What: a url held in a local variable is followed to its f-string; one that cannot be resolved raises.
+    Use when: CI. Inputs: tmp_path. Output: assertions. Side effects: none. Role: review F1, never skip silently."""
+    ok = _client_file(tmp_path, '        url = f"{self._base}/v1/me/tickets"\n        return await call_json(self._http, "GET", url, {})\n')
+    assert client_calls(ok) == {("GET", "/v1/me/tickets")}
+    bad = _client_file(tmp_path, '        return await call_json(self._http, "GET", self.make_url(), {})\n')
+    with pytest.raises(AssertionError, match="cannot resolve"):
+        client_calls(bad)
+    dyn = _client_file(tmp_path, '        return await call_json(self._http, self.verb, f"{self._base}/v1/x", {})\n')
+    with pytest.raises(AssertionError, match="cannot resolve"):
+        client_calls(dyn)
+
+
+def test_every_module_that_calls_the_http_helper_is_covered(tmp_path):
+    """What: discovery finds every agent module calling call_json*, and one that is not in the covered list is reported.
+    Use when: CI. Inputs: tmp_path. Output: assertions. Side effects: none. Role: review F2, no hand-written file list."""
+    (tmp_path / "clients").mkdir()
+    (tmp_path / "clients" / "new_client.py").write_text("async def f():\n    return await call_json_within(1, h, 'GET', u, {})\n")
+    (tmp_path / "clients" / "http.py").write_text("async def call_json(): ...\n")
+    (tmp_path / "other.py").write_text("x = 1\n")
+    assert [p.name for p in discover_clients(tmp_path)] == ["new_client.py"]
+    assert [p.name for p in uncovered(tmp_path, [])] == ["new_client.py"]
+    assert uncovered(tmp_path, [tmp_path / "clients" / "new_client.py"]) == []
+    real = {p.resolve() for p, _, _ in CLIENTS}
+    assert {p.resolve() for p in discover_clients(AGENT)} == real
+
+
+def test_a_listed_route_without_a_built_handler_is_not_served(tmp_path):
+    """What: a SLICE_ROUTES row with no handler in register_routes (it answers 501) is left out of the served table.
+    Use when: CI. Inputs: tmp_path. Output: assertions. Side effects: none. Role: review F3."""
+    (tmp_path / "routes.py").write_text(
+        'SLICE_ROUTES = [("GET", "/v1/a", "s.a", "a"), ("GET", "/v1/b", "s.b", "b")]\n'
+        "def register_routes(app, overrides=None):\n"
+        '    built = {"a": a, **(overrides or {})}\n')
+    (tmp_path / "auth.py").write_text('CALLER_SCOPES = {"x": frozenset({"s.a"})}\n')
+    routes, _ = core_table(tmp_path)
+    assert routes == {("GET", "/v1/a"): "s.a"}
