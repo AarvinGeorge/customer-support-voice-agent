@@ -10,6 +10,14 @@
  * Role: config; `NEXT_PUBLIC_*` never holds a secret (doc 07 s15.2). The property accesses are
  *   literal so Next.js can inline them.
  */
+/**
+ * What: the frozen public config object.
+ * Use when: importing deploy config values in client code.
+ * Inputs: the two NEXT_PUBLIC_LANGSMITH_* variables described in the module header.
+ * Output: { langsmithProject, langsmithProjectUrl }, each "" when unset.
+ * Side effects: none (reads process.env once at load).
+ * Role: config constant.
+ */
 export const publicConfig = Object.freeze({
   langsmithProject: process.env.NEXT_PUBLIC_LANGSMITH_PROJECT ?? "",
   langsmithProjectUrl: process.env.NEXT_PUBLIC_LANGSMITH_PROJECT_URL ?? "",

@@ -204,6 +204,14 @@ const ANSWER_REHYPE = (["sanitize", "harden"] as const).map((name) => {
 
 const MARKDOWN_ELEMENTS = ["p", "br", "ul", "ol", "li", "strong", "em", "del", "code", "a", "span"] as const;
 
+/**
+ * What: renders a model answer as sanitized Markdown (images dropped, links restricted to safe hrefs).
+ * Use when: showing an assistant answer, streaming or final.
+ * Inputs: { text, streaming }.
+ * Output: JSX.
+ * Side effects: none (links open in a new tab with noopener).
+ * Role: the answer renderer behind the ANSWER_REHYPE sanitizer (doc 07 s5.3).
+ */
 export function AnswerMarkdown({ text, streaming }: { text: string; streaming: boolean }) {
   return (
     <div className="answer-markdown max-w-[70ch] text-body text-ink">

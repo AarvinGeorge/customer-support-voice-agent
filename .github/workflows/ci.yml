@@ -209,12 +209,14 @@ jobs:
         run: |
           set -euo pipefail
           # Changed files only (D-015). On a pull request the base is origin/main; on a push to main it is the previous
-          # commit (a merge commit's first parent, so the whole PR). Backlog of older files: `python3 scripts/check_descriptors.py --all`.
+          # commit (a merge commit's first parent, so the whole PR). Full-repo check below.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             python3 scripts/check_descriptors.py --base origin/main
           else
             python3 scripts/check_descriptors.py --base HEAD^
           fi
+          # Full repo is at 0 gaps (backfill), so keep it strict: any gap anywhere fails the job.
+          python3 scripts/check_descriptors.py --all
 
   compose:
     name: compose config
