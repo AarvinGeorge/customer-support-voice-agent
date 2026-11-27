@@ -4,9 +4,9 @@
  *   .next/server and the standalone app tree (node_modules excluded).
  * Use when: `pnpm build && pnpm test:bundle` (CI runs it after the build).
  * Inputs: the .next directory from `next build`; PINs from src/dev-mock/fixtures.ts plus, when
- *   present, `pin:` values in data/seeds/personas.yaml at the repo root (lane A's real seeds).
- * Output: vitest results; fails loudly if .next is missing or the matcher cannot find a PIN in
- *   a positive control.
+ *   present, data/seeds/personas.yaml at the repo root (lane A's real seeds; see build-check/pins.ts).
+ * Output: vitest results; fails loudly if .next is missing, if the seeds file yields no PIN, if
+ *   there is no PIN at all, or if the matcher misses a PIN in the positive control.
  * Side effects: reads files only.
  * Role: guard that PINs reach the browser only from GET /api/demo/personas at runtime.
  */
@@ -14,6 +14,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { collectPins, findLeaks } from "@/build-check/pins";
 import { MOCK_PINS } from "@/dev-mock/fixtures";
 
 /**
@@ -45,34 +46,6 @@ const NEXT_DIR = path.join(WEB_ROOT, ".next");
 const SEEDS = path.join(WEB_ROOT, "..", "..", "data", "seeds", "personas.yaml");
 
 /**
- * What: the PINs to look for: fixtures plus seeded values.
- * Use when: building the matcher.
- * Inputs: none.
- * Output: unique 4-digit strings.
- * Side effects: reads the seeds file when present.
- * Role: helper.
- */
-function pinsToFind(): string[] {
-  const pins = new Set(MOCK_PINS);
-  if (existsSync(SEEDS)) {
-    for (const m of readFileSync(SEEDS, "utf8").matchAll(/\bpin:\s*["']?(\d{4})["']?/g)) pins.add(m[1]!);
-  }
-  return [...pins];
-}
-
-/**
- * What: a matcher for a PIN as a standalone token (no digit, letter, underscore or dot on either side).
- * Use when: scanning a file's text.
- * Inputs: the PIN.
- * Output: a RegExp.
- * Side effects: none.
- * Role: helper; the dot exclusion avoids hits inside decimals such as 0.4821.
- */
-function pinPattern(pin: string): RegExp {
-  return new RegExp(`(?<![0-9A-Za-z_.])${pin}(?![0-9A-Za-z_.])`);
-}
-
-/**
  * What: lists files under a directory, skipping node_modules and the build cache.
  * Use when: collecting files to scan.
  * Inputs: a directory.
@@ -92,40 +65,35 @@ function walk(dir: string): string[] {
 }
 
 /**
- * What: files whose text contains any PIN.
- * Use when: the scan and the positive control.
- * Inputs: file paths, PINs.
- * Output: "file: pin" strings for each hit.
+ * What: reads files as {name relative to apps/web, text}.
+ * Use when: handing files to findLeaks.
+ * Inputs: absolute paths.
+ * Output: file records.
  * Side effects: reads files.
- * Role: the measurement.
+ * Role: helper.
  */
-function findPins(files: readonly string[], pins: readonly string[]): string[] {
-  const hits: string[] = [];
-  for (const file of files) {
-    const text = readFileSync(file, "latin1");
-    for (const pin of pins) if (pinPattern(pin).test(text)) hits.push(`${path.relative(WEB_ROOT, file)}: ${pin}`);
-  }
-  return hits;
+function load(files: readonly string[]): { name: string; text: string }[] {
+  return files.map((f) => ({ name: path.relative(WEB_ROOT, f), text: readFileSync(f, "latin1") }));
 }
 
 describe("production build output", () => {
-  const pins = pinsToFind();
+  const pins = collectPins(MOCK_PINS, existsSync(SEEDS) ? readFileSync(SEEDS, "utf8") : null);
 
   it("exists (run `pnpm build` first; a missing build is a failure, not a skip)", () => {
     expect(existsSync(path.join(NEXT_DIR, "static")), `${NEXT_DIR}/static is missing`).toBe(true);
     expect(existsSync(path.join(NEXT_DIR, "server")), `${NEXT_DIR}/server is missing`).toBe(true);
   });
 
-  it("positive control: the matcher finds every PIN in the fixture source and in minified-looking text", () => {
+  it("positive control: the matcher finds every fixture PIN in the fixture source and every PIN in minified-looking text", () => {
     const fixture = path.join(WEB_ROOT, "src", "dev-mock", "fixtures.ts");
-    expect(findPins([fixture], MOCK_PINS)).toHaveLength(MOCK_PINS.length);
-    for (const pin of pins) expect(pinPattern(pin).test(`{pin:"${pin}",account_id:"QS-1"}`)).toBe(true);
+    expect(findLeaks(load([fixture]), MOCK_PINS)).toHaveLength(MOCK_PINS.length);
+    for (const pin of pins) expect(findLeaks([{ name: "x", text: `{pin:"${pin}",account_id:"QS-1"}` }], [pin])).toHaveLength(1);
   });
 
   it("contains no persona PIN in static chunks, server output or the standalone app", () => {
     const files = walk(NEXT_DIR);
     const jsInStatic = files.filter((f) => f.includes(`${path.sep}static${path.sep}`) && f.endsWith(".js"));
     expect(jsInStatic.length, "no JS chunks found; the scan would prove nothing").toBeGreaterThan(0);
-    expect(findPins(files, pins)).toEqual([]);
+    expect(findLeaks(load(files), pins)).toEqual([]);
   });
 });

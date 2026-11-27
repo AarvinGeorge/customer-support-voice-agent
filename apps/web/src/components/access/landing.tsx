@@ -10,7 +10,7 @@
  */
 import type { Persona } from "@contracts/contracts";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -18,7 +18,7 @@ import { consolePath, createSession, listPersonas } from "@/lib/api/access";
 import { ApiError } from "@/lib/api/client";
 
 import { AccessGate } from "./access-gate";
-import { BrandMark, RecordingNotice, VoiceHint, useCountdown } from "./parts";
+import { BrandMark, RecordingNotice, VoiceHint, formatWait, useCountdown } from "./parts";
 import { PersonaList } from "./persona-list";
 
 /**
@@ -45,6 +45,10 @@ export function Landing() {
   const [startingIndex, setStartingIndex] = useState<number | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   const startCountdown = useCountdown();
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const focusHeading = useRef(false);
+  const starting = useRef(false);
+  const lastRemaining = useRef(0);
 
   /**
    * What: loads the personas; a 401 means the visitor still needs the gate.
@@ -67,6 +71,21 @@ export function Landing() {
     void load();
   }, [load]);
 
+  // After a granted code the gate unmounts; move focus to the list heading so keyboard and
+  // screen-reader users land on the new content (review PR #8 I-2). Not on a cold load.
+  useEffect(() => {
+    if (view.kind === "personas" && focusHeading.current) {
+      focusHeading.current = false;
+      headingRef.current?.focus();
+    }
+  }, [view.kind]);
+
+  // When a Start rate-limit countdown ends, clear its message (review PR #8 M-2).
+  useEffect(() => {
+    if (lastRemaining.current > 0 && startCountdown.remaining === 0) setStartError(null);
+    lastRemaining.current = startCountdown.remaining;
+  }, [startCountdown.remaining]);
+
   /**
    * What: creates a session and opens the console.
    * Use when: a Start button is pressed.
@@ -76,12 +95,15 @@ export function Landing() {
    * Role: Start handler.
    */
   async function start(index: number) {
+    if (starting.current) return;
+    starting.current = true;
     setStartingIndex(index);
     setStartError(null);
     try {
       const created = await createSession();
       router.push(consolePath(created.session_id));
     } catch (err) {
+      starting.current = false;
       setStartingIndex(null);
       if (err instanceof ApiError && err.status === 401) {
         setView({ kind: "gate" });
@@ -105,7 +127,14 @@ export function Landing() {
   }
 
   if (view.kind === "gate") {
-    return <AccessGate onGranted={() => void load()} />;
+    return (
+      <AccessGate
+        onGranted={() => {
+          focusHeading.current = true;
+          void load();
+        }}
+      />
+    );
   }
 
   if (view.kind === "unreachable") {
@@ -134,7 +163,9 @@ export function Landing() {
       </header>
       <main className="mx-auto flex w-full max-w-[60rem] flex-col px-4 pt-10 pb-16 md:px-0 md:pt-14">
         <div className="flex max-w-[45rem] flex-col gap-2">
-          <h1 className="text-title text-ink">Choose who you are</h1>
+          <h1 ref={headingRef} tabIndex={-1} className="text-title text-ink outline-none">
+            Choose who you are
+          </h1>
           <p className="text-body text-muted">
             Each persona is a seeded Quillstack customer. When the agent asks you to verify, use that persona&apos;s
             account ID and support PIN. PINs are shown here on purpose; they are demo data.
@@ -151,7 +182,7 @@ export function Landing() {
         {startError && (
           <p role="alert" className={limited ? "mt-4 text-body-sm text-info" : "mt-4 text-body-sm text-error"}>
             {startError}
-            {limited ? ` Try again in ${startCountdown.remaining} s.` : ""}
+            {limited ? ` Try again in ${formatWait(startCountdown.remaining)}.` : ""}
           </p>
         )}
         <div className="mt-7 flex flex-col gap-7">

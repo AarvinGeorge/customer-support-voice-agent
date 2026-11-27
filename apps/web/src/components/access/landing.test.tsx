@@ -46,12 +46,12 @@ function errorResponse(status: number, cls: string, code: string, message: strin
 /**
  * What: a fake agent for the four landing routes, with an optional 429 for /api/access.
  * Use when: each test installs it as global fetch.
- * Inputs: { accessRateLimitedFor?: seconds }.
+ * Inputs: { accessRateLimitedFor?, sessionsRateLimitedFor?: seconds }.
  * Output: { fetch mock, calls list }.
  * Side effects: none outside the returned objects.
  * Role: test double for the lane B endpoints (CS-E-04.S1.T3) not yet built.
  */
-function fakeAgent(opts: { accessRateLimitedFor?: number } = {}) {
+function fakeAgent(opts: { accessRateLimitedFor?: number; sessionsRateLimitedFor?: number } = {}) {
   let authed = false;
   const calls: { method: string; path: string; body: unknown }[] = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -74,6 +74,9 @@ function fakeAgent(opts: { accessRateLimitedFor?: number } = {}) {
       return new Response(JSON.stringify(MOCK_PERSONAS), { status: 200 });
     }
     if (method === "POST" && path === "/api/sessions") {
+      if (opts.sessionsRateLimitedFor !== undefined) {
+        return errorResponse(429, "rate_limited", "IP_SESSIONS", "Too many new sessions.", opts.sessionsRateLimitedFor);
+      }
       return new Response(JSON.stringify({ session_id: "0193a7c2-0000-7000-8000-000000000001", created_at: "2026-11-27T12:00:00Z" }), {
         status: 201,
       });
@@ -201,5 +204,67 @@ describe("Landing", () => {
 
     expect(await navigator.clipboard.readText()).toBe("1937");
     expect(await within(marcus).findByText("Copied")).toBeTruthy();
+  });
+
+  it("moves focus to the persona heading after the code is accepted, not on a cold load", async () => {
+    const { fetchMock } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const first = render(<Landing />);
+    await user.type(await screen.findByLabelText("Access code"), MOCK_ACCESS_CODE);
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+    const heading = await screen.findByRole("heading", { name: "Choose who you are" });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    first.unmount();
+
+    render(<Landing />);
+    const again = await screen.findByRole("heading", { name: "Choose who you are" });
+    expect(document.activeElement).not.toBe(again);
+  });
+
+  it("two Start clicks in one batch create one session", async () => {
+    const { fetchMock, calls } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Landing />);
+    await user.type(await screen.findByLabelText("Access code"), MOCK_ACCESS_CODE);
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+    await screen.findByRole("heading", { name: "Choose who you are" });
+
+    const start = within(screen.getByRole("listitem", { name: /Sam Rivera/ })).getByRole("button", { name: /start/i });
+    act(() => {
+      start.click();
+      start.click();
+    });
+    await waitFor(() => expect(push).toHaveBeenCalledTimes(1));
+    expect(calls.filter((c) => c.path === "/api/sessions")).toHaveLength(1);
+  });
+
+  it("clears the Start rate-limit message when its countdown ends", async () => {
+    const { fetchMock } = fakeAgent({ sessionsRateLimitedFor: 2 });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Landing />);
+    await user.type(await screen.findByLabelText("Access code"), MOCK_ACCESS_CODE);
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+    await screen.findByRole("heading", { name: "Choose who you are" });
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.click(within(screen.getByRole("listitem", { name: /Dana Okafor/ })).getByRole("button", { name: /start/i }));
+    expect(await screen.findByText(/Too many new sessions\. Try again in 2 s/)).toBeTruthy();
+    expect(push).not.toHaveBeenCalled();
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(screen.queryByText(/Too many new sessions/)).toBeNull();
+  });
+
+  it("shows long waits in minutes", async () => {
+    const { fetchMock } = fakeAgent({ accessRateLimitedFor: 3540 });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<Landing />);
+    fireEvent.change(await screen.findByLabelText("Access code"), { target: { value: "anything" } });
+    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+    expect(await screen.findByText(/Try again in 59 min/)).toBeTruthy();
   });
 });

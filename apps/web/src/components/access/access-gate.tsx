@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { submitAccessCode } from "@/lib/api/access";
 import { ApiError } from "@/lib/api/client";
 
-import { BrandMark, RecordingNotice, useCountdown } from "./parts";
+import { BrandMark, RecordingNotice, formatWait, useCountdown } from "./parts";
 
 /**
  * What: the most characters an access code may have (doc 07 s2.2 AccessRequest code 1..64).
@@ -130,7 +130,7 @@ export function AccessGate({ onGranted }: { onGranted: () => void }) {
           )}
           {waiting && (
             <p id={messageId} role="status" className="text-body-sm text-info">
-              {limited} Try again in {countdown.remaining} s.
+              {limited} Try again in {formatWait(countdown.remaining)}.
             </p>
           )}
         </div>

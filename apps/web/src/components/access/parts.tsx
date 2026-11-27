@@ -96,3 +96,15 @@ export function useCountdown(): { remaining: number; start: (seconds: number | n
   const start = (seconds: number | null) => setUntil(seconds === null ? null : Date.now() + seconds * 1000);
   return { remaining, start };
 }
+
+/**
+ * What: a wait in words: seconds up to a minute, then whole minutes rounded up.
+ * Use when: showing a 429 countdown (ACCESS_ATTEMPTS can be close to an hour).
+ * Inputs: seconds (whole, 1 or more).
+ * Output: "42 s" or "59 min".
+ * Side effects: none.
+ * Role: formatter (review PR #8 M-3).
+ */
+export function formatWait(seconds: number): string {
+  return seconds > 60 ? `${Math.ceil(seconds / 60)} min` : `${seconds} s`;
+}
