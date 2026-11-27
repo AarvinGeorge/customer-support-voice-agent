@@ -434,13 +434,18 @@ def test_daily_limit_follows_the_new_york_business_day(app_conn):
     """What: five tickets at 18:00 New York, a sixth at 19:30 New York (00:30 UTC next day) is refused and the
     stored created_date is the New York date; at 00:01 New York next day it is created, and that day starts at zero.
     Use when: always. Inputs: app_conn. Output: assertions. Side effects: rolled back.
-    Role: review I2; kills 'count ignores the date' and 'date from UTC' mutations."""
+    Role: review I2 and re-review; kills 'count ignores the date', 'count date from UTC' and 'created_date from UTC'."""
     w = World(app_conn)
     sid = w.add_session(verified=True, expires_in=timedelta(days=2))  # claims must outlive the evening
     evening = datetime(2026, 11, 27, 18, 0, tzinfo=NY)
-    for i, c in enumerate(CATEGORIES[:5]):
-        make(app_conn, sid, c, clk=FixedClock(evening + timedelta(seconds=i)))
-    late = FixedClock(datetime(2026, 11, 27, 19, 30, tzinfo=NY))
+    # three at 18:00 (same date in New York and UTC), then 19:30 and 21:00 New York, which are already the next date
+    # in UTC: only creates in that window can tell a New York created_date from a UTC one
+    when = [evening + timedelta(seconds=i) for i in range(3)] + [datetime(2026, 11, 27, 19, 30, tzinfo=NY),
+                                                                 datetime(2026, 11, 27, 21, 0, tzinfo=NY)]
+    for t, c in zip(when, CATEGORIES[:5], strict=True):
+        assert t.astimezone(ZoneInfo("UTC")).date().isoformat() == ("2026-11-28" if t.hour >= 19 else "2026-11-27")
+        assert make(app_conn, sid, c, clk=FixedClock(t)).created
+    late = FixedClock(datetime(2026, 11, 27, 22, 0, tzinfo=NY))
     assert late.now().astimezone(ZoneInfo("UTC")).date().isoformat() == "2026-11-28"  # UTC is already tomorrow
     with pytest.raises(CoreError) as exc:
         make(app_conn, sid, CATEGORIES[5], clk=late)
