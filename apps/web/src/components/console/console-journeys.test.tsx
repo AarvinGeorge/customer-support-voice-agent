@@ -11,6 +11,7 @@
  * Role: CS-E-03.S1.T9 (web half) acceptance tests.
  */
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SseEvent } from "@contracts/contracts";
 
@@ -111,6 +112,47 @@ describe("a console tab opened from the landing page", () => {
     expect(calls.some((c) => c.path === "/api/demo/personas")).toBe(false);
   });
 
+  it("under Strict Mode a sessionless tab still makes exactly one session request (single-flight guard)", async () => {
+    nav.query = "as=QS-10423";
+    const { fetchMock, calls } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <StrictMode>
+        <ConsoleRoute />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(nav.replace).toHaveBeenCalled());
+    await act(async () => {});
+    expect(calls.filter((c) => c.path === "/api/sessions")).toHaveLength(1);
+    expect(nav.replace).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed session start shows a lasting error with Try again, and Try again starts the session", async () => {
+    nav.query = "";
+    let refuse = true;
+    const { fetchMock: ok, calls } = fakeAgent();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (refuse && String(input) === "/api/sessions") {
+          const error = { class: "rate_limited", code: "IP_SESSIONS", message: "Too many new sessions.", retryable: true, changed: false, retry_after_s: 30, fault_injected: false, trace_id: null, details: {} };
+          return new Response(JSON.stringify({ error }), { status: 429, headers: { "content-type": "application/json" } });
+        }
+        return ok(input, init);
+      }),
+    );
+    render(<ConsoleRoute />);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Couldn't start a conversation.");
+    expect(alert.textContent).toContain("Too many new sessions.");
+    expect(nav.replace).not.toHaveBeenCalled();
+    refuse = false;
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Try again" })));
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`/console?session=${SID}`));
+    expect(calls.filter((c) => c.path === "/api/sessions")).toHaveLength(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("a 401 while creating the session returns to the access page", async () => {
     nav.query = "";
     vi.stubGlobal(
@@ -191,15 +233,54 @@ describe("the verification card and the display-only hint", () => {
   });
 });
 
+describe("the hint goes stale (review PR #81 M-2)", () => {
+  it("a changed ?as= to an unknown id drops the old name in the same mount", async () => {
+    nav.query = `session=${SID}&as=${PRIYA.account_id}`;
+    const { fetchMock } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    const { rerender } = render(<ConsoleRoute />);
+    sendMessage("I was charged twice");
+    await screen.findByRole("region", { name: `Verify as ${PRIYA.name}` });
+    nav.query = `session=${SID}&as=QS-99999`;
+    rerender(<ConsoleRoute />);
+    // Gone at once (keyed on ?as=), and still gone after the persona list answered with no match.
+    expect(screen.queryByRole("region", { name: `Verify as ${PRIYA.name}` })).toBeNull();
+    await act(async () => {});
+    expect(screen.queryByRole("region", { name: `Verify as ${PRIYA.name}` })).toBeNull();
+  });
+
+  it("once the session is verified the hint no longer names anyone on a later card", async () => {
+    nav.query = `session=${SID}&as=${PRIYA.account_id}`;
+    const { fetchMock } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ConsoleRoute />);
+    sendMessage("I was charged twice");
+    await screen.findByRole("region", { name: `Verify as ${PRIYA.name}` });
+    const base = c1[0]!;
+    const env = (seq: number) => ({ v: 1 as const, seq, session_id: SID, turn_id: "tv-verified", trace_id: base.trace_id, ts: base.ts, mode: "chat" as const });
+    act(() => {
+      turnStore.getState().apply({ ...env(1), type: "turn.started" } as SseEvent);
+      turnStore.getState().apply({
+        ...env(2),
+        type: "verification.result",
+        status: "verified",
+        person: { display_name: "Dana Okafor", role: "owner", tier: "business", contract_status: "active", account_id: "QS-20117" },
+      } as SseEvent);
+      turnStore.getState().apply({ ...env(3), type: "verification.required", reason: "account_lookup", prompt_text: "p", attempts_left: 3, fields: ["account_id", "pin"] } as SseEvent);
+    });
+    expect(screen.queryByRole("region", { name: `Verify as ${PRIYA.name}` })).toBeNull();
+  });
+});
+
 describe("New conversation in the console header (D-075)", () => {
-  it("opens a fresh session in the same tab and keeps the display-only hint", async () => {
+  it("opens a fresh session in the same tab and drops the display-only hint", async () => {
     nav.query = `session=${SID}&as=${PRIYA.account_id}`;
     const NEW = "019a7c2e-9999-7000-8000-00000000b001";
     const { fetchMock, calls } = fakeAgent({ sessionId: NEW });
     vi.stubGlobal("fetch", fetchMock);
     render(<ConsoleRoute />);
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "New conversation" })));
-    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`/console?session=${NEW}&as=${PRIYA.account_id}`));
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`/console?session=${NEW}`));
     expect(calls.filter((c) => c.path === "/api/sessions")).toEqual([{ method: "POST", path: "/api/sessions", body: {}, headers: expect.any(Object) }]);
   });
 });

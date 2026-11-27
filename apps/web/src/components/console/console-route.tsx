@@ -6,21 +6,23 @@
  * Use when: rendered by src/app/console/page.tsx inside Suspense (useSearchParams).
  * Inputs: the URL query.
  * Output: ConsoleShell bound to the app turn store, with the Demo controls in the drawer slot.
- * Side effects: a tab without ?session= makes one POST /api/sessions and replaces the URL (a 401
- *   returns to the access page, other failures show a toast); with ?as= one GET /api/demo/personas;
- *   store reset on a session change (review PR #16, M5); New conversation makes one
- *   POST /api/sessions and replaces the URL; a failure shows a toast.
+ * Side effects: a tab without ?session= makes one POST /api/sessions and replaces the URL, keeping
+ *   the hint (a 401 returns to the access page; any other failure shows a lasting error line with
+ *   Try again, review PR #81 M-3); with ?as= one GET /api/demo/personas; store reset on a session
+ *   change (review PR #16, M5); New conversation makes one POST /api/sessions and replaces the
+ *   URL without the hint (a new conversation starts signed out, review PR #81 M-2).
  * Role: route glue between the landing links (consoleStartPath, D-076) and the console shell. The
  *   hint is display-only: it is never sent to the server, and identity still comes only from the
  *   typed account id plus PIN that core verifies.
  */
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
 
 import { consolePath, createSession, listPersonas } from "@/lib/api/access";
 import { ACCESS_GATE_PATH, ApiError } from "@/lib/api/client";
 import { turnStore } from "@/lib/turns/store";
+
+import { Button } from "@/components/ui/button";
 
 import { ConsoleShell, type VerifyHint } from "./console-shell";
 import { DemoControls } from "./demo-controls";
@@ -39,7 +41,11 @@ export function ConsoleRoute() {
   const sessionId = params.get("session");
   const as = params.get("as");
   const starting = useRef(false);
-  const [hint, setHint] = useState<VerifyHint | null>(null);
+  // The resolved hint is keyed on the ?as= value it was resolved for, so a changed or removed
+  // ?as= never shows an old name (review PR #81 M-2).
+  const [resolved, setResolved] = useState<{ as: string; hint: VerifyHint | null } | null>(null);
+  const hint = as !== null && resolved?.as === as ? resolved.hint : null;
+  const [startError, setStartError] = useState<string | null>(null);
 
   useEffect(() => {
     const current = turnStore.getState().conversation.sessionId;
@@ -47,33 +53,36 @@ export function ConsoleRoute() {
   }, [sessionId]);
 
   /**
-   * What: creates a fresh session and opens it in this tab, keeping the hint in the URL.
-   * Use when: the tab opened without a session, and the New conversation button.
-   * Inputs: none.
+   * What: creates a fresh session and opens it in this tab.
+   * Use when: the tab opened without a session (keepHint true), Try again, and the New
+   *   conversation button (keepHint false: the new conversation starts without the hint).
+   * Inputs: keepHint.
    * Output: none.
    * Side effects: POST /api/sessions (empty body), store reset, URL replace; a 401 returns to the
-   *   access page; any other failure shows a toast.
+   *   access page; any other failure sets the lasting error line.
    * Role: handler; a second call while one is starting is ignored (also covers the Strict Mode
    *   double effect, since refs survive it).
    */
-  const newConversation = async () => {
+  const newConversation = (keepHint: boolean) => {
     if (starting.current) return;
     starting.current = true;
-    try {
-      const created = await createSession();
-      turnStore.getState().reset();
-      router.replace(consolePath(created.session_id, as));
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) router.replace(ACCESS_GATE_PATH);
-      else toast.error(err instanceof ApiError ? err.body.message : "Couldn't start a new conversation. Try again in a moment.");
-    } finally {
-      starting.current = false;
-    }
+    createSession()
+      .then((created) => {
+        turnStore.getState().reset();
+        router.replace(consolePath(created.session_id, keepHint ? as : null));
+      })
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 401) router.replace(ACCESS_GATE_PATH);
+        else setStartError(err instanceof ApiError ? err.body.message : "The demo service did not answer.");
+      })
+      .finally(() => {
+        starting.current = false;
+      });
   };
 
   // A tab opened from the landing page has no session yet: every click starts a fresh one (D-076).
   useEffect(() => {
-    if (sessionId === null) void newConversation();
+    if (sessionId === null) newConversation(true);
     // newConversation reads only refs, the router and `as`; run once per missing session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
@@ -85,7 +94,7 @@ export function ConsoleRoute() {
     listPersonas()
       .then((personas) => {
         const p = personas.find((x) => x.account_id === as);
-        if (!ignore && p !== undefined) setHint({ name: p.name, accountId: p.account_id });
+        if (!ignore) setResolved({ as, hint: p === undefined ? null : { name: p.name, accountId: p.account_id } });
       })
       .catch(() => undefined);
     return () => {
@@ -96,8 +105,27 @@ export function ConsoleRoute() {
   return (
     <ConsoleShell
       sessionId={sessionId}
-      hint={as === null || as === "" ? null : hint}
-      onNewConversation={() => void newConversation()}
+      hint={hint}
+      onNewConversation={() => {
+        setStartError(null);
+        newConversation(false);
+      }}
+      notice={
+        startError === null ? null : (
+          <div role="alert" className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-rule bg-raised px-4 py-3">
+            <p className="text-body-sm text-ink">
+              {"Couldn't start a conversation."} <span className="text-muted">{startError}</span>
+            </p>
+            <Button variant="quiet" size="sm" onClick={() => {
+                setStartError(null);
+                newConversation(true);
+              }}
+            >
+              Try again
+            </Button>
+          </div>
+        )
+      }
       demoControls={<DemoControls store={turnStore} />}
     />
   );

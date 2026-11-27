@@ -183,15 +183,17 @@ describe("Landing", () => {
 
     for (const p of MOCK_PERSONAS) {
       const row = screen.getByRole("listitem", { name: new RegExp(p.name) });
-      const start = within(row).getByRole("link", { name: `Start as ${p.name}` });
+      const start = within(row).getByRole("link", { name: `Start as ${p.name} (opens in a new tab)` });
       expect(start.getAttribute("href")).toBe(`/console?as=${encodeURIComponent(p.account_id)}`);
       expect(start.getAttribute("target")).toBe("_blank");
       expect(start.getAttribute("rel")).toContain("noopener");
+      // Review PR #81 M-4: a visible new-tab cue (icon) next to the words.
+      expect(start.querySelector('[data-icon="new-tab"]')).not.toBeNull();
     }
     // The table stays a reference sheet: account ID, PIN, plan and Try this are all still there.
     const dana = screen.getByRole("listitem", { name: /Dana Okafor/ });
     expect(within(dana).getByText(MOCK_PERSONAS.find((p) => p.name === "Dana Okafor")!.account_id)).toBeTruthy();
-    await user.click(within(dana).getByRole("link", { name: "Start as Dana Okafor" }));
+    await user.click(within(dana).getByRole("link", { name: "Start as Dana Okafor (opens in a new tab)" }));
     expect(push).not.toHaveBeenCalled();
     expect(calls.some((c) => c.path === "/api/sessions")).toBe(false);
   });
@@ -205,11 +207,12 @@ describe("Landing", () => {
     await user.click(screen.getByRole("button", { name: /continue/i }));
     await screen.findByRole("heading", { name: "Choose who you are" });
 
-    const top = screen.getAllByRole("link", { name: "Start a conversation" });
+    const top = screen.getAllByRole("link", { name: "Start a conversation (opens in a new tab)" });
     expect(top).toHaveLength(1);
     expect(top[0]!.getAttribute("href")).toBe("/console");
     expect(top[0]!.getAttribute("target")).toBe("_blank");
     expect(top[0]!.getAttribute("rel")).toContain("noopener");
+    expect(top[0]!.querySelector('[data-icon="new-tab"]')).not.toBeNull();
     // It sits above the persona table.
     const table = screen.getAllByRole("listitem")[0]!;
     expect(top[0]!.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

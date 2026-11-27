@@ -11,7 +11,7 @@
  * Role: persona chooser.
  */
 import type { Persona } from "@contracts/contracts";
-import { Check, ChevronRight, Copy } from "lucide-react";
+import { ArrowUpRight, Check, Copy } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
 import { buttonVariants } from "@/components/ui/button";
@@ -181,7 +181,7 @@ export function PersonaList({ personas }: { personas: readonly Persona[] }) {
   return (
     <div className="overflow-hidden rounded-lg border border-rule bg-raised">
       <span id={newTabId} hidden>
-        Opens the console in a new tab with this account ID filled in. You still enter the PIN.
+        The console opens with this account ID filled in. You still enter the PIN.
       </span>
       <HeaderRow />
       <ul className="divide-y divide-rule">
@@ -236,12 +236,12 @@ export function PersonaList({ personas }: { personas: readonly Persona[] }) {
                   href={consoleStartPath(p.account_id)}
                   target="_blank"
                   rel="noopener"
-                  aria-label={`Start as ${p.name}`}
+                  aria-label={`Start as ${p.name} (opens in a new tab)`}
                   aria-describedby={newTabId}
                   className={buttonVariants({ variant: isRecommended ? "primary" : "quiet", size: "sm", className: "h-9 px-3.5" })}
                 >
                   {isRecommended ? `Start as ${firstName}` : "Start"}
-                  <ChevronRight aria-hidden className="size-3.5" />
+                  <ArrowUpRight aria-hidden data-icon="new-tab" className="size-3.5" />
                 </a>
               </div>
             </li>

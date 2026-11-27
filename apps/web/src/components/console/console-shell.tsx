@@ -170,6 +170,8 @@ export interface ConsoleShellProps {
   demoControls?: ReactNode;
   /** The display-only signed-in hint, or null for the signed-out journey. */
   hint?: VerifyHint | null;
+  /** A lasting line above the conversation (the route's failed session start, with Try again). */
+  notice?: ReactNode;
   /** A stand-in voice controller (tests, the dev replay); the default is useVoice for the session. */
   voice?: VoiceController;
 }
@@ -188,7 +190,8 @@ export function ConsoleShell({
   onNewConversation,
   langsmithProjectUrl = publicConfig.langsmithProjectUrl,
   demoControls,
-  hint = null,
+  hint: hintProp = null,
+  notice = null,
   voice: voiceOverride,
 }: ConsoleShellProps) {
   const thread = useStore(store, (s) => s.thread);
@@ -206,6 +209,8 @@ export function ConsoleShell({
   // Adjusting state while rendering when a value changed, instead of an effect (react.dev, "You
   // Might Not Need an Effect": Adjusting some state when a prop changes). A turn starting clears
   // the note; a new notice id announces the wait once, from retry_after_s (not the ticking clock).
+  // A verified session has its identity; the hint no longer names anyone (review PR #81 M-2).
+  const hint = person === null ? hintProp : null;
   const hintId = hint?.accountId ?? null;
   const [seen, setSeen] = useState<{ busy: boolean; limitId: number | null; sessionId: string | null; hintId: string | null }>({
     busy: false,
@@ -424,6 +429,7 @@ export function ConsoleShell({
         <div className="flex flex-1">
         <main className="mx-auto flex w-full min-w-0 max-w-[45rem] flex-1 flex-col px-4 pt-10 pb-6 sm:px-0">
           <div className="flex flex-1 flex-col">
+            {notice}
             <ConversationLog
               thread={thread}
               conversation={conversation}

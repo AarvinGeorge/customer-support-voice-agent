@@ -11,7 +11,7 @@
  * Role: CS-E-04.S1.T1 page controller (doc 07 s2.1, s2.2, s9).
  */
 import type { Persona } from "@contracts/contracts";
-import { ChevronRight } from "lucide-react";
+import { ArrowUpRight } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -146,7 +146,7 @@ export function Landing() {
             Choose who you are
           </h1>
           <p className="text-body text-muted">
-            Each persona is a seeded Quillstack customer. Start as one to arrive signed in: the verification card
+            Each persona is a seeded Quillstack customer. Start as one (in a new tab) to arrive signed in: the verification card
             names them and fills in the account ID. Or start a conversation signed out and verify with any account ID
             and support PIN below. PINs are shown here on purpose; they are demo data.
           </p>
@@ -160,7 +160,8 @@ export function Landing() {
             className={buttonVariants({ variant: "ink", className: "h-10" })}
           >
             Start a conversation
-            <ChevronRight aria-hidden className="size-3.5" />
+            <span className="sr-only"> (opens in a new tab)</span>
+            <ArrowUpRight aria-hidden data-icon="new-tab" className="size-3.5" />
           </a>
           <span id={startHelpId} className="text-body-sm text-muted">
             Opens in a new tab, signed out. Each start is a new conversation.
