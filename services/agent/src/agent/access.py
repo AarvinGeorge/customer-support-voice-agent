@@ -142,7 +142,11 @@ class SessionLookup(Protocol):
     """What: the one store method the ownership check needs. Use when: typing owned_session.
     Inputs: session id. Output: SessionRow or None. Side effects: none. Role: structural type."""
 
-    async def get_session(self, session_id: str) -> SessionRow | None: ...
+    async def get_session(self, session_id: str) -> SessionRow | None:
+        """What: read one session by id. Use when: owned_session checks ownership.
+        Inputs: session id. Output: SessionRow or None. Side effects: none in the protocol; implementations read the store.
+        Role: structural method signature."""
+        ...
 
 
 async def owned_session(store: SessionLookup, session_id: str, visitor_id: str) -> SessionRow:
