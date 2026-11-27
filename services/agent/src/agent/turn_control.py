@@ -37,17 +37,17 @@ class EventSink(Protocol):
     Inputs: see methods. Output: see methods. Side effects: events on the turn stream. Role: port."""
 
     def emit(self, type_: str, **fields: Any) -> Any:
-        """What: emit one event. Use when: a step, route or escalation event. Inputs: type, fields.
-        Output: the event. Side effects: queues the event. Role: port method."""
+        """What: emit one turn event. Use when: a tool, gate or the router reports progress. Inputs: event type,
+        its fields. Output: the event (unused). Side effects: one event on the stream. Role: port method."""
         ...
 
     def next_step_id(self) -> str:
-        """What: the next step id. Use when: a step starts. Inputs: none. Output: id. Side effects: counter.
-        Role: port method."""
+        """What: the next step id of this turn. Use when: before step.started. Inputs: none. Output: id.
+        Side effects: advances the counter. Role: port method."""
         ...
 
     def ms(self) -> int:
-        """What: milliseconds since the turn started. Use when: step timings. Inputs: none. Output: int.
+        """What: milliseconds since the turn started. Use when: step durations. Inputs: none. Output: int.
         Side effects: none. Role: port method."""
         ...
 
@@ -79,6 +79,9 @@ class TurnControl:
     (default loop_clock). `ticket` is the one ticket opened this turn (model tool or escalation code), so a later
     escalation in the same turn reuses it instead of opening a second one (CS-E-03.S4.T1).
     Output: the object. Side effects: none.
+    Gate fields (retrieval, retrieval_chunks, scope_check, grounding, citations, gate_message_id) are written by
+    agent.gates and GroundingMiddleware and read by the router,
+    GroundingMiddleware and the SSE adapter.
     Role: D-048 counters live here (executed tool calls only; incremented before the first await); the model
     attempt fields (attempt_role, model_attempts, fallback_used, primary_error, primary_model, fault_fired) are written by
     DeadlineAndFaultMiddleware and read by the retry predicate and the usage builder.
@@ -105,6 +108,16 @@ class TurnControl:
     failures: dict[str, int] = field(default_factory=dict)
     awaiting_verification: bool = False
     verify_attempts_left: int = 3
+    # Gate 1 (agent.gates, doc 07 s6.5): the last search's verdict facts, the relevant chunks the model saw (for
+    # citations), and a pending scope check (verdict none) that RouterMiddleware runs before the next model call.
+    retrieval: dict[str, Any] | None = None
+    retrieval_chunks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    scope_check: bool = False
+    # Gate 2 (agent.middleware.grounding, doc 07 s6.4): result for FinalConfidence.grounding, the citations of a
+    # passed draft, and the id of the fixed clarifying line written after a fail.
+    grounding: str = "not_run"
+    citations: list[dict[str, Any]] = field(default_factory=list)
+    gate_message_id: str | None = None
     ticket: dict[str, Any] | None = None
     model_node_failed: bool = False  # the agent model node raised (primary and fallback failed or skipped), s6.7
     clock: Callable[[], float] = loop_clock

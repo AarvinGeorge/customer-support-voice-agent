@@ -66,8 +66,14 @@ class Fake(GenericFakeChatModel):
         return self._generate(messages, stop=stop, run_manager=None, **kw)
 
 
+VERIFIER_PASS = ('{"claims": [{"text": "Pro refunds within 30 days", "supported": true, '
+                 '"source_id": "refund-policy#2"}], "commitment": false}')
+
+
 class FakeRegistry:
-    """What: ModelRegistry stand-in: build(role) returns the scripted fake for agent and agent_fallback.
+    """What: ModelRegistry stand-in: build(role) returns the scripted fake for agent, an empty fake for
+    agent_fallback, a verifier that passes a draft backed by refund-policy#2 (grounding_verifier) and a classifier
+    that answers ON (scope_classifier), since build_agent_from_registry wires both gates (CS-E-02.S4).
     Use when: build_agent_runtime in tests. Inputs: replies of the primary. Output: build. Side effects: records roles.
     Role: fake (the real registry is covered by test_registry)."""
 
@@ -80,7 +86,12 @@ class FakeRegistry:
         """What: model for a role. Use when: build_agent_from_registry. Inputs: role. Output: Fake.
         Side effects: records. Role: fake."""
         self.roles.append(role)
-        return self.primary if role == "agent" else Fake(messages=iter([]), seen=[])
+        if role == "agent":
+            return self.primary
+        if role in ("grounding_verifier", "scope_classifier"):
+            reply = VERIFIER_PASS if role == "grounding_verifier" else "ON"
+            return Fake(messages=iter([AIMessage(reply) for _ in range(8)]), seen=[], disable_streaming=True)
+        return Fake(messages=iter([]), seen=[])
 
     def cost_for_model(self, model_name: str, usage: Any) -> float:
         """What: a fixed price per model call. Use when: stream_agent_turn(cost_of=...). Inputs: name, usage.
@@ -420,7 +431,9 @@ def test_structured_input_requires_last_turn() -> None:
 # ---- voice/ask through the same Ingress ----
 
 async def test_voice_ask_returns_a_say_from_the_same_agent() -> None:
-    w = World(AIMessage(content="You can ask for a refund within 30 days."))
+    # Not a policy line: with no search this turn the fake verifier's claim has no source, so Gate 2 blocks a policy
+    # draft (review PR #52 I2). The spoken-form rewrite is covered by tests/test_say.py.
+    w = World(AIMessage(content="Sure, let me look into that for you."))
     w.vstore.voice["vs-1"] = VoiceSessionRow("vs-1", SID, w.voice.now(), w.voice.now())
     body = {"client_turn_id": str(uuid.uuid4()), "voice_session_id": "vs-1", "realtime_call_id": "call_1",
             "question": "How long is the refund window?", "user_item_id": "item_u1",
@@ -431,7 +444,7 @@ async def test_voice_ask_returns_a_say_from_the_same_agent() -> None:
     assert r.status_code == 200, r.text
     done = events_of(r)[-1]
     assert done.type == "turn.completed" and done.mode == "voice"
-    assert done.final.say == "You can ask for a refund within thirty days."  # spoken form (CS-E-05.S2.T1)
+    assert done.final.say == "Sure, let me look into that for you."
     human = [m for m in w.registry.primary.seen[0] if isinstance(m, HumanMessage)][-1]
     assert "mode: voice" in str(human.content) and "How long is the refund window?" in str(human.content)
     assert "how long is the refund window" in str(human.content)
@@ -463,11 +476,11 @@ async def test_merged_transcript_goes_before_the_turn_message() -> None:
 
 # ---- the production wiring ----
 
-def test_build_agent_runtime_uses_both_registry_roles_all_tools_and_the_token_split() -> None:
+def test_build_agent_runtime_uses_all_four_registry_roles_all_tools_and_the_token_split() -> None:
     reg = FakeRegistry()
     rt = composition.build_agent_runtime(settings(), http=httpx.AsyncClient(), checkpointer=InMemorySaver(),
                                          registry=reg)
-    assert sorted(reg.roles) == ["agent", "agent_fallback"]
+    assert sorted(reg.roles) == ["agent", "agent_fallback", "grounding_verifier", "scope_classifier"]
     assert tuple(t.name for t in rt.tools) == TOOL_NAMES
     assert (rt.core._base, rt.core._token) == ("http://core.test:8000", "core-agent-tok")
     assert (rt.knowledge._base, rt.knowledge._token) == ("http://knowledge.test:8000", "knowledge-agent-tok")
@@ -686,11 +699,25 @@ def test_assert_wired_raises_naming_the_gap() -> None:
         composition.assert_wired(app)
 
 
-def test_gate_2_is_named_pending_exactly_while_the_grounding_stub_is_in_the_stack() -> None:
-    from agent.middleware.stubs import STUB_NAMES
+def test_the_production_agent_has_the_real_gate_2_verifier_so_gate_2_is_not_pending() -> None:
+    # PR #52 merged with #58: the stub is gone; the registry wiring attaches the grounding_verifier role.
     _, pending = composition.wiring_gaps(wired_state())
-    named = any(p.startswith("Gate 2 verifier") for p in pending)
-    assert named == ("GroundingMiddleware" in STUB_NAMES), pending
+    assert not any(p.startswith("Gate 2 verifier") for p in pending), pending
+    assert composition.gate2_wired(wired_state().state.ingress.run_agent.agent) is True
+
+
+def test_gate_2_is_named_pending_when_the_agent_has_no_verifier_or_cannot_be_inspected() -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from agent.assembly import build_agent
+    off = build_agent(FakeRegistry().build("agent"), fallback_model=FakeRegistry().build("agent_fallback"),
+                      checkpointer=InMemorySaver(), grounding_verifier=None)
+    assert composition.gate2_wired(off) is False
+    assert composition.gate2_wired(object()) is False  # unknown shape fails closed: pending
+    app = wired_state()
+    app.state.ingress.run_agent.agent = off
+    _, pending = composition.wiring_gaps(app)
+    assert any(p.startswith("Gate 2 verifier") for p in pending), pending
 
 
 def test_the_pin_scanner_is_named_pending_when_its_module_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:

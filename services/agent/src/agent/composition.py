@@ -7,7 +7,7 @@ are open, then assert_wired; tests call build_agent_runtime and build_ingress wi
 Inputs: Settings (CORE_URL, KNOWLEDGE_URL, CORE_TOKEN_AGENT, KNOWLEDGE_TOKEN_AGENT, models path, replica name, fault
 flag), the commit token (read only inside CoreCommitClient.from_env), app.state (pg_pool, redis, http, checkpointer,
 trajectory, voice).
-Output: AgentRuntime, build_agent_runtime, build_ingress, wire_app, pending_safety, wiring_gaps, assert_wired.
+Output: AgentRuntime, build_agent_runtime, build_ingress, wire_app, gate2_wired, pending_safety, wiring_gaps,\nassert_wired.
 Side effects: wire_app sets app.state.ingress and app.state.voice.ingress; reads models.yaml; nothing connects.
 Role: wiring only (CS-E-03.S7 composition, CS-E-08.S5 wiring parts 1 and 2). CS-E-03.S7.T9: Ingress runs
 the step 9a PIN scan before any body, and the typed-PIN refusal (TypedPinRefusal) is wired here.
@@ -38,8 +38,8 @@ log = logging.getLogger("agent.composition")
 # Safety pieces still pending by design until their PRs merge (pending_safety detects each one from the code, so the
 # line disappears by itself when the real piece lands). Local dev logs them as warnings; production config
 # (Settings.production) fails startup on them: block the shared URL, not the lanes' local stacks (review PR #58 I4).
-GATE2_PENDING = ("Gate 2 verifier: GroundingMiddleware is the pass-through stub (CS-E-02.S4.T2, PR #52); drafts "
-                 "stream with no grounding check")
+GATE2_PENDING = ("Gate 2 verifier: the agent's GroundingMiddleware has no grounding verifier (CS-E-02.S4.T2); "
+                 "drafts would stream with no grounding check")
 PIN_PENDING = ("PIN scanner: step 9a is {state} (CS-E-03.S7.T9, PR #57); a typed PIN would reach the thread, "
                "turn_events and LangSmith")
 _PIN_PROBE = "my PIN is 4821"
@@ -149,12 +149,26 @@ def _pin_scan_state() -> str | None:
     return None if text is not None and "4821" not in text else "a no-op"
 
 
-def pending_safety() -> list[str]:
-    """What: name each safety piece that is still a placeholder: the Gate 2 verifier (GroundingMiddleware stub) and
-    the step 9a PIN scanner (module absent or a no-op). Use when: wiring_gaps. Inputs: none.
+def gate2_wired(agent: Any) -> bool:
+    """What: true when the compiled agent runs the real GroundingMiddleware with a grounding verifier attached.
+    Reads the graph node "GroundingMiddleware.after_model" and the middleware bound to it.
+    Use when: pending_safety. Inputs: the compiled agent (or anything). Output: bool; False for any shape it cannot
+    read, so an unknown agent counts as pending (fail closed). Side effects: none. Role: Gate 2 detector."""
+    from agent.middleware.grounding import GroundingMiddleware
+    try:
+        node = agent.nodes["GroundingMiddleware.after_model"]
+        mw = getattr(getattr(node.bound, "afunc", None), "__self__", None)
+    except Exception:  # noqa: BLE001 - an agent this code cannot inspect is treated as not wired
+        return False
+    return isinstance(mw, GroundingMiddleware) and mw.verifier is not None
+
+
+def pending_safety(agent: Any = None) -> list[str]:
+    """What: name each safety piece that is not live: the Gate 2 verifier (the agent's GroundingMiddleware has no
+    verifier, or the agent cannot be inspected) and the step 9a PIN scanner (module absent or a no-op).
+    Use when: wiring_gaps. Inputs: the compiled agent of the turn body (None: Gate 2 counts as pending).
     Output: messages (empty when both are real). Side effects: imports. Role: detector (review PR #58 I4)."""
-    from agent.middleware.stubs import STUB_NAMES
-    out = [GATE2_PENDING] if "GroundingMiddleware" in STUB_NAMES else []
+    out = [] if gate2_wired(agent) else [GATE2_PENDING]
     pin = _pin_scan_state()
     if pin is not None:
         out.append(PIN_PENDING.format(state=pin))
@@ -208,7 +222,7 @@ def wiring_gaps(app: Any) -> tuple[list[str], list[str]]:
                 gaps.append("session flags: the TurnRunner has no flags, awaiting_verification would never be set")
             if body.cost_of is None:
                 gaps.append("cost_of: the TurnRunner has no price lookup, cost_usd_est would stay 0")
-    return gaps, pending_safety()
+    return gaps, pending_safety(getattr(getattr(ingress, "run_agent", None), "agent", None))
 
 
 def assert_wired(app: Any) -> None:

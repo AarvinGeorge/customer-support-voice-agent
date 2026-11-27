@@ -21,7 +21,7 @@ from typing import Any, AsyncGenerator, Awaitable, Callable
 
 from contracts import VERSION, limits
 from contracts.errors import ErrorBody
-from contracts.events import KEEPALIVE, Envelope, FinalAnswer, FinalConfidence, Usage, format_sse, parse_event
+from contracts.events import KEEPALIVE, Citation, Envelope, FinalAnswer, FinalConfidence, Usage, format_sse, parse_event
 from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 
 from agent.middleware.router import route_reply
@@ -264,6 +264,16 @@ def _tool_messages(result: Any) -> int:
     return 0
 
 
+def final_confidence(control: TurnControl | None) -> FinalConfidence:
+    """What: FinalAnswer.confidence for a turn with a model draft: the last Gate 1 verdict and scores, and the
+    Gate 2 result (TurnControl.grounding: pass, fail, skipped, or not_run when Gate 2 did not run). Use when: classify_final.
+    Inputs: the turn's control or None. Output: FinalConfidence. Side effects: none. Role: doc 07 s6.2."""
+    r = (control.retrieval if control is not None else None) or {}
+    return FinalConfidence(retrieval_verdict=r.get("verdict"), top_cosine=r.get("top_cosine"),
+                           tau_low=r.get("tau_low"), tau_high=r.get("tau_high"),
+                           grounding=control.grounding if control is not None else "not_run")  # type: ignore[arg-type]
+
+
 def route_outcome(stream: TurnStream, control: TurnControl, usage: Usage, model_used: str | None) -> TurnOutcome:
     """What: the outcome of a turn the router ended: its fixed line, say and end_reason; a verify route also
     emits verification.required (doc 07 s6.3 step 3); a readback route with a card emits confirmation.required and
@@ -291,7 +301,8 @@ def classify_final(stream: TurnStream, messages: list[Any], model_ids: set[str],
     Use when: end of stream_agent_turn. Inputs: stream, final messages, ids of messages written by node
     `model`, accumulated usage, last model id, the turn's control (router lines).
     Output: TurnOutcome.
-    Side effects: token events for a model draft only. Role: doc 07 s6.4 flush rule and s2.4 step 15
+    Side effects: token events for a model draft only (with the citations Gate 2 recorded); the Gate 2
+    clarifying line ends "clarify" with no tokens. Role: doc 07 s6.4 flush rule and s2.4 step 15
     (the model-call limit line is never an answer); a router line ends with its route's end_reason."""
     usage = usage or token_usage()
     last = messages[-1] if messages else None
@@ -301,14 +312,21 @@ def classify_final(stream: TurnStream, messages: list[Any], model_ids: set[str],
     if control is not None and control.route is not None and last.id == control.route_message_id:
         return route_outcome(stream, control, usage, model_used)
     text = last.text if isinstance(last.text, str) else str(last.content)
+    if control is not None and control.gate_message_id is not None and last.id == control.gate_message_id:
+        # Gate 2 first fail: the fixed clarifying line replaced the draft (doc 07 s6.4); written by code, no tokens.
+        final = FinalAnswer(text=text, say=text, citations=[], escalated=False, confidence=final_confidence(control))
+        return TurnOutcome(final=final, usage=usage, end_reason="clarify", model_used=model_used)
     if text.startswith(LIMIT_PREFIX):
         return replace(TurnOutcome.fixed(LIMIT_LINE, end_reason="limit_reached"), usage=usage, model_used=model_used)
     if last.id in model_ids and not last.tool_calls:
         for piece in chunk_text(text):
             stream.emit("token", text=piece)
-        final = FinalAnswer(text=text, say=text, citations=[], escalated=False,
-                            confidence=FinalConfidence(grounding="not_run"))
-        return TurnOutcome(final=final, usage=usage, end_reason="answered", model_used=model_used)
+        cites = [Citation.model_validate(c) for c in (control.citations if control is not None else [])]
+        final = FinalAnswer(text=text, say=text, citations=cites, escalated=False, confidence=final_confidence(control))
+        # Gate 1 row 2: a first weak turn ends with the model's one clarifying question.
+        clarify = control is not None and (control.retrieval or {}).get("decision") == "clarify"
+        return TurnOutcome(final=final, usage=usage, end_reason="clarify" if clarify else "answered",
+                           model_used=model_used)
     # Another hook-written line (Gate 2): deterministic, no tokens.
     return replace(TurnOutcome.fixed(text, end_reason="answered"), usage=usage, model_used=model_used)
 

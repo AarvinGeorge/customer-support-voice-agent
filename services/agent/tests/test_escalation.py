@@ -114,6 +114,12 @@ class _Gate2(AgentMiddleware):
 
     reason = "grounding_failed"
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """What: accept and ignore the GroundingMiddleware arguments (verifier, open_ticket). Use when: the double
+        replaces GroundingMiddleware in build_middleware. Inputs: any. Output: none. Side effects: none.
+        Role: constructor of the double."""
+        super().__init__()
+
     @hook_config(can_jump_to=["end"])
     async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         """What: escalate on a final draft. Use when: after each model call. Inputs: state. Output: update.
