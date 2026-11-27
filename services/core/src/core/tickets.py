@@ -287,3 +287,13 @@ def session_lockout_ticket(conn: Any, session_id: uuid.UUID | str) -> TicketRef 
     row = conn.execute(f"SELECT {_REF_COLS} FROM tickets WHERE session_id = %s AND verified = false AND origin = 'core' "
                        "AND category = 'access' ORDER BY created_at DESC, id DESC LIMIT 1", (session_id,)).fetchone()
     return _ref(row) if row else None
+
+
+REF_COLUMNS = _REF_COLS
+
+
+def ticket_ref(row: Sequence[Any]) -> TicketRef:
+    """What: build a TicketRef from a row selected with REF_COLUMNS. Use when: a read path lists tickets.
+    Inputs: a row (id, stage, priority, queue, target_label, verified). Output: TicketRef. Side effects: none.
+    Role: public name for the one place that builds the ticket display text."""
+    return _ref(row)
