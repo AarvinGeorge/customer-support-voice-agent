@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quillstack.example/evals/golden/case.schema.json",
+  "title": "Golden end-to-end case",
+  "description": "What: one scenario case (L1 s4, S1 to S5 plus rule cases). Use when: the golden runner (CS-E-06.S1.T1) drives /api turns and grades the outcome. Role: the dataset contract; tests/test_golden_set.py validates every case. Placeholders {persona.account_id} and {persona.pin} in text are resolved by the runner; the dataset never holds a PIN.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "scenario", "split", "persona", "mode", "source", "turns", "expected"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^G-[0-9]{2}$"},
+    "title": {"type": "string", "minLength": 5, "maxLength": 120},
+    "scenario": {"enum": ["S1", "S2", "S3", "S4", "S5", "rules"]},
+    "split": {"enum": ["train", "test"]},
+    "persona": {"type": "string", "minLength": 1, "description": "name in data/seeds/personas.yaml"},
+    "mode": {"enum": ["chat", "voice", "chat_then_voice"]},
+    "source": {"type": "string", "minLength": 3, "description": "doc and section the expectations come from"},
+    "notes": {"type": "string"},
+    "fixtures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["articles"],
+      "properties": {
+        "articles": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^fixtures/[a-z0-9-]+\\.md$"}}
+      },
+      "description": "test-only articles ingested for this case's run only; never in data/articles or Notion (doc 06 X14)"
+    },
+    "turns": {"type": "array", "minItems": 1, "maxItems": 12, "items": {"$ref": "#/$defs/turn"}},
+    "expected": {"$ref": "#/$defs/expected"}
+  },
+  "$defs": {
+    "tool": {"enum": ["search_kb", "request_verification", "get_account_summary", "list_charges", "list_tickets", "prepare_refund", "prepare_billing_email_change", "prepare_grace_extension", "update_notification_preferences", "create_ticket"]},
+    "endReason": {"enum": ["answered", "clarify", "readback", "verification_requested", "verified", "committed", "submitted", "cancelled", "escalated", "declined_off_topic", "cap_reached", "limit_reached", "deadline", "error", "swept"]},
+    "chunkId": {"type": "string", "pattern": "^[a-z0-9-]+#[a-z0-9-]+(/[a-z0-9-]+)?(~[0-9]+)?$"},
+    "turnExpect": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "end_reason": {"$ref": "#/$defs/endReason"},
+        "forbidden_tools": {"type": "array", "items": {"$ref": "#/$defs/tool"}, "uniqueItems": true},
+        "cites_any": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/chunkId"}}
+      }
+    },
+    "turn": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "text"],
+          "properties": {
+            "kind": {"const": "text"},
+            "text": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "fault": {"enum": ["tool_error", "llm_429"], "description": "sent as X-Demo-Fault on this turn only (doc 07 s10)"},
+            "expect": {"$ref": "#/$defs/turnExpect"}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "credentials"],
+          "properties": {
+            "kind": {"const": "verification"},
+            "credentials": {"enum": ["persona", "wrong_pin"], "description": "the masked card submit; the runner reads the persona's account id and PIN"},
+            "expect": {"$ref": "#/$defs/turnExpect"}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "decision"],
+          "properties": {
+            "kind": {"const": "confirm"},
+            "decision": {"enum": ["confirm", "cancel"], "description": "the Confirm or Cancel press on the pending action card (ConfirmInput)"},
+            "fault": {"enum": ["tool_error", "llm_429"]},
+            "expect": {"$ref": "#/$defs/turnExpect"}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "question", "user_transcript"],
+          "properties": {
+            "kind": {"const": "voice"},
+            "question": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "user_transcript": {"type": "string", "minLength": 1},
+            "last_assistant_interrupted": {"type": "boolean", "default": false},
+            "expect": {"$ref": "#/$defs/turnExpect"}
+          }
+        }
+      ]
+    },
+    "ticketItem": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "queue": {"enum": ["billing", "technical", "account", "approvals"]},
+        "category": {"enum": ["billing", "refund", "access", "sso", "integration", "bug", "account_change", "commitment", "human_requested", "other"]},
+        "stage": {"enum": ["open", "pending_approval", "resolved", "closed"]},
+        "priority": {"enum": ["P1", "P2", "P3", "P4"]},
+        "origin": {"enum": ["model", "code", "core"]}
+      }
+    },
+    "expected": {
+      "type": "object", "additionalProperties": false,
+      "required": ["outcome", "final_state", "tool_trajectory", "forbidden"],
+      "properties": {
+        "outcome": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["answer", "action", "escalate", "decline"]}, "description": "allowed outcome buckets (doc G s2.3); more than one only where the gate decides"},
+        "end_reason": {"$ref": "#/$defs/endReason", "description": "end_reason of the last turn"},
+        "final_state": {
+          "type": "object", "additionalProperties": false,
+          "required": ["committed_refunds", "tickets"],
+          "properties": {
+            "pending_actions": {
+              "type": "array",
+              "items": {
+                "type": "object", "additionalProperties": false, "required": ["action_type", "state"],
+                "properties": {
+                  "action_type": {"enum": ["refund", "billing_email", "grace_extension"]},
+                  "charge_id": {"type": "string", "pattern": "^CH-[0-9]{8}$"},
+                  "amount_cents": {"type": "integer", "minimum": 1},
+                  "state": {"enum": ["prepared", "awaiting_customer", "awaiting_approval", "committed", "cancelled", "expired", "superseded", "rejected", "rules_changed"]}
+                }
+              },
+              "description": "every pending_actions row the case leaves for its session (declines leave none)"
+            },
+            "committed_refunds": {"type": "integer", "minimum": 0, "description": "new refund rows in core action_history"},
+            "tickets": {
+              "type": "object", "additionalProperties": false, "required": ["count"],
+              "properties": {
+                "count": {"type": "integer", "minimum": 0, "maximum": 5},
+                "items": {"type": "array", "items": {"$ref": "#/$defs/ticketItem"}}
+              }
+            }
+          }
+        },
+        "reason_codes": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Z_]+$"}, "description": "primary first (doc 07 s13.1)"},
+        "policy_refs": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9-]+#[a-z0-9-]+$"}},
+        "escalation_reason": {"enum": ["not_in_docs", "grounding_failed", "retrieval_unavailable", "tool_failure", "limit_reached", "deadline", "verify_locked", "needs_commitment", "customer_asked_human", "model_unavailable", null], "description": "null when the case must not escalate by agent code"},
+        "ticket_offered": {"type": "boolean"},
+        "gate": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "retrieval_verdict_any_of": {"type": "array", "minItems": 1, "items": {"enum": ["pass", "weak", "none", "error", "uncalibrated"]}},
+            "decision": {"enum": ["answer", "clarify", "escalate", "decline", "skip"]}
+          }
+        },
+        "tool_trajectory": {
+          "type": "object", "additionalProperties": false, "required": ["required", "allowed"],
+          "properties": {
+            "required": {"type": "array", "items": {"$ref": "#/$defs/tool"}, "uniqueItems": true, "description": "all must be called (superset check)"},
+            "allowed": {"type": "array", "items": {"$ref": "#/$defs/tool"}, "uniqueItems": true, "description": "no tool outside this set may be called; order is free except under ordering"},
+            "forbidden": {"type": "array", "items": {"$ref": "#/$defs/tool"}, "uniqueItems": true},
+            "ordering": {
+              "type": "array",
+              "items": {"type": "object", "additionalProperties": false, "required": ["before", "after"], "properties": {"before": {"$ref": "#/$defs/tool"}, "after": {"$ref": "#/$defs/tool"}}},
+              "description": "only safety-relevant orderings (first call of before precedes first call of after)"
+            },
+            "max_calls": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}, "propertyNames": {"$ref": "#/$defs/tool"}}
+          }
+        },
+        "citations": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "must_cite_any": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/chunkId"}},
+            "must_not_cite": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/chunkId"}}
+          }
+        },
+        "retrieval_must_include": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/chunkId"}, "description": "chunk ids that must appear in a search_kb result during the case (proves a fixture was in play)"},
+        "must_mention": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": false, "required": ["any_of"], "properties": {"any_of": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 2}}}},
+          "description": "each group needs at least one phrase (case-insensitive) in the final assistant text"
+        },
+        "forbidden_strings": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 4}, "description": "must never appear in any assistant output (canaries)"},
+        "fallback": {
+          "type": "object", "additionalProperties": false, "required": ["used"],
+          "properties": {"used": {"type": "boolean"}, "reason": {"enum": ["rate_limit", "timeout", "5xx", "spend_cap", "auth", "fault_llm_429"]}}
+        },
+        "forbidden": {
+          "type": "array", "uniqueItems": true,
+          "items": {"enum": ["policy_invented", "pin_echoed", "commit_without_confirm", "commit_same_turn", "injection_followed", "false_nothing_changed", "unneeded_ticket", "tier_content_leak"]},
+          "description": "behaviours a code grader checks on rows and turn_events; never graded by a model"
+        }
+      }
+    }
+  }
+}
