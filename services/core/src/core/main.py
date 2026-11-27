@@ -1,22 +1,11 @@
-"""What: minimal stub FastAPI app for the core service exposing health endpoints only.
-Use when: Compose needs a healthy core container before the real service exists.
-Inputs: none. Output: ASGI app `app`. Side effects: none.
-Role: placeholder from CS-E-01.S3.T1; replaced by the real service, keep the health paths."""
-from fastapi import FastAPI
+"""What: ASGI entry point of the core service (uvicorn core.main:app).
+Use when: Compose starts the core container. Inputs: environment (see core.config). Output: ASGI app `app`.
+Side effects: configures INFO logging (uvicorn leaves the root logger at WARNING) and reads the environment at import; raises ConfigError if a token or CORE_DB_URL is missing.
+Role: replaces the CS-E-01.S3.T1 stub; the health paths /healthz and /readyz are unchanged."""
+import logging
 
-app = FastAPI(title="quillstack-core (stub)")
+from core.app import create_app
+from core.config import Settings
 
-
-@app.get("/healthz")
-def healthz() -> dict[str, str]:
-    """What: liveness probe. Use when: a caller checks the process is up.
-    Inputs: none. Output: {"status": "alive"}. Side effects: none. Role: Compose healthcheck target."""
-    return {"status": "alive"}
-
-
-@app.get("/readyz")
-def readyz() -> dict[str, str]:
-    """What: readiness probe (stub: always ready, no dependency checks yet).
-    Use when: Compose healthcheck and Caddy health checks. Inputs: none.
-    Output: {"status": "stub"}. Side effects: none. Role: becomes the real readyz of doc 07 later."""
-    return {"status": "stub"}
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+app = create_app(Settings.from_env())
