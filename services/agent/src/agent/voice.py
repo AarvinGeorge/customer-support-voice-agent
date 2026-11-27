@@ -36,6 +36,7 @@ from agent.models.config import RoleSpec
 from agent.prompt import _escape_frame  # pyright: ignore[reportPrivateUsage]  (the frame-tag escaper, M5)
 from agent.realtime import MintedSecret, MintError, SessionSummary, build_session_config, render_instructions, \
     summary_from_thread
+from agent.routes.turns import request_demo_fault
 from agent.web import error_response
 
 log = logging.getLogger("agent.voice")
@@ -82,17 +83,24 @@ class VoiceStore(Protocol):
     Inputs: see methods. Output: see methods. Side effects: database. Role: storage port."""
 
     async def create_voice_session(self, row: VoiceSessionRow) -> None:
-        """What: insert a voice session row. Use when: voice/token minted. Inputs: row. Output: none. Side effects: one INSERT. Role: port method."""
+        """What: insert one voice_sessions row. Use when: typing. Inputs: see signature. Output: see signature.
+        Side effects: see the adapter. Role: port method."""
         ...
+
     async def get_voice_session(self, voice_session_id: str) -> VoiceSessionRow | None:
-        """What: look up a voice session. Use when: step 3 of ingress and transcript posts. Inputs: voice session id. Output: row or None. Side effects: one read. Role: port method."""
+        """What: read one voice_sessions row. Use when: typing. Inputs: see signature. Output: see signature.
+        Side effects: see the adapter. Role: port method."""
         ...
+
     async def add_transcript_items(self, session_id: str, voice_session_id: str,
                                    items: list[TranscriptItemIn]) -> int:
-        """What: store client-reported transcript items. Use when: POST /transcript. Inputs: session id, voice session id, items. Output: count stored. Side effects: INSERTs (re-posts ignored). Role: port method."""
+        """What: store client transcript items, re-posts ignored. Use when: typing. Inputs: see signature. Output: see signature.
+        Side effects: see the adapter. Role: port method."""
         ...
+
     async def take_unmerged(self, session_id: str, turn_id: str, covered: CoveredItem | None) -> list[MergedItem]:
-        """What: claim unmerged transcript items for a turn. Use when: ingress step 12. Inputs: session id, turn id, covered item. Output: items to fold in. Side effects: UPDATE marks them merged. Role: port method."""
+        """What: claim unmerged items for a turn (step 12). Use when: typing. Inputs: see signature. Output: see signature.
+        Side effects: see the adapter. Role: port method."""
         ...
 
 
@@ -101,7 +109,8 @@ class Minter(Protocol):
     Side effects: provider call. Role: port (OpenAIRealtimeMinter in production)."""
 
     async def mint(self, session: dict[str, Any]) -> MintedSecret:
-        """What: mint a Realtime client secret. Use when: voice/token. Inputs: session config. Output: MintedSecret. Side effects: one provider call. Role: port method."""
+        """What: mint one Realtime client secret. Use when: typing. Inputs: see signature. Output: see signature.
+        Side effects: see the adapter. Role: port method."""
         ...
 
 
@@ -347,7 +356,8 @@ def install_voice(app: FastAPI) -> None:
         result = await deps.ingress.handle(IngressInput(
             session_id=sid, visitor_id=request.state.visitor_id, client_turn_id=str(body.client_turn_id),
             mode="voice", input_kind="voice", text=body.question, realtime_call_id=body.realtime_call_id,
-            body=body, redact_context=_redact_context(owned), count_turn=turn_counter(request, sid)))
+            body=body, redact_context=_redact_context(owned), demo_fault=request_demo_fault(request),
+            count_turn=turn_counter(request, sid)))
         return to_response(request, result)
 
     @app.post("/api/sessions/{sid}/transcript", status_code=204, dependencies=[Depends(limit_session_post)])

@@ -19,6 +19,7 @@ from langchain_core.messages import AIMessage
 from agent import composition
 from agent.assembly import run_config
 from agent.pin_guard import TYPED_PIN_LINE
+from agent.structured.confirm import CoreCommitClient
 from agent.voice import TranscriptMerger, VoiceSessionRow
 from test_turns_route import SID, World, events_of
 
@@ -35,7 +36,8 @@ class Flags:
         """What: keep the world. Use when: tests. Inputs: world. Output: none. Side effects: none. Role: fake."""
         self.w, self.calls = w, []
 
-    async def set_awaiting_verification(self, session_id: str, awaiting: bool) -> None:
+    async def set_awaiting_verification(self, session_id: str, awaiting: bool,
+                                        verified_user_id: str | None = None) -> None:
         """What: record and apply. Use when: the refusal. Inputs: id, flag. Output: none. Side effects: row.
         Role: fake."""
         self.calls.append((session_id, awaiting))
@@ -48,8 +50,9 @@ def guarded(*replies: AIMessage) -> tuple[World, Flags]:
     Inputs: scripted replies. Output: world and flags. Side effects: none. Role: harness."""
     w = World(*replies)
     flags = Flags(w)
-    w.ingress = composition.build_ingress(w.runtime.agent, store=w.turns, lock=w.lock, served_by="agent_a",
-                                          call_keys=w.keys, merge_transcript=TranscriptMerger(w.vstore), flags=flags)
+    w.ingress = composition.build_ingress(w.runtime, store=w.turns, lock=w.lock, served_by="agent_a",
+                                          call_keys=w.keys, merge_transcript=TranscriptMerger(w.vstore), flags=flags,
+                                          commit=CoreCommitClient(w.cfg.core_url, "commit-tok", http=w.http))
     w.app.state.ingress = w.ingress
     w.voice.ingress = w.ingress
     return w, flags

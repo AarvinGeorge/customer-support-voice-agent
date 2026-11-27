@@ -51,7 +51,7 @@ class RoleSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
     provider: Literal["anthropic", "openai"]
     model: str
-    effort: Literal["low", "medium", "high"] | None = None
+    effort: Literal["none", "low", "medium", "high"] | None = None  # "none": OpenAI only (tools on chat completions)
     attempt_timeout_s: float | None = None
     first_token_timeout_s: float | None = None
     max_tokens: int | None = None
@@ -75,6 +75,8 @@ class ModelsConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_roles(self) -> "ModelsConfig":
+        """What: require every role and the chat roles' timeouts. Use when: pydantic validation of models.yaml.
+        Inputs: self. Output: self; ValueError on a missing role or timeout. Side effects: none. Role: validator."""
         missing = [r for r in REQUIRED_ROLES if r not in self.roles]
         if missing:
             raise ValueError(f"missing roles: {', '.join(missing)}")
