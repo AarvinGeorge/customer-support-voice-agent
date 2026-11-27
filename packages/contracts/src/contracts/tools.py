@@ -203,7 +203,8 @@ ASK_SUPPORT_AGENT_TOOL: dict[str, Any] = {
     "name": "ask_support_agent",
     "description": ("Ask the Quillstack support agent. Use for anything about Quillstack, the customer's "
                     "account, billing, policies, tickets or actions, and whenever the customer answers a "
-                    "question the agent asked (yes, no, account ID, PIN)."),
+                    "question the agent asked (for example yes or no). Verification happens only in the secure card on "
+                    "the customer's screen: never ask the customer for a PIN, and never ask them to say one."),
     "parameters": {
         "type": "object", "additionalProperties": False, "required": ["question"],
         "properties": {"question": {"type": "string", "maxLength": 2000,

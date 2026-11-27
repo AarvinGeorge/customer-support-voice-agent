@@ -2,6 +2,7 @@
 Use when: CI. Inputs: none. Output: pass or fail. Side effects: none.
 Role: proves secrets present in the input are absent from the output."""
 from contracts.redact import RedactContext, mask_email, redact
+from pin_probe import leaks
 
 
 def test_card_pins_dropped_and_email_masked():
@@ -14,7 +15,7 @@ def test_card_pins_dropped_and_email_masked():
     assert "4821" in blob and "7302" in blob and "priya@acme.com" in blob  # proven possible
     out = redact(raw, RedactContext())
     text = repr(out)
-    assert "4821" not in text and "7302" not in text and "priya@acme.com" not in text
+    assert not leaks(text, "4821") and not leaks(text, "7302") and "priya@acme.com" not in text
     assert out["verification"]["account_id"] == "QS-10423"
     assert out["args"]["new_email"] == "p***@acme.com"
     assert raw["verification"]["pin"] == "4821"  # input not mutated
@@ -56,7 +57,7 @@ def test_redact_walks_models_sets_tuples_bytes_dataclasses():
     assert "4821" in before and "7302" in before and "priya@acme.com" in before  # proven possible
     out = redact(raw, RedactContext())
     after = repr(out)
-    assert "4821" not in after and "7302" not in after and "priya@acme.com" not in after
+    assert not leaks(after, "4821") and not leaks(after, "7302") and "priya@acme.com" not in after
     assert out["msg"]["pin"] == "[PIN]" and out["box"]["pin"] == "[PIN]"
     assert out["b"] == "p***@acme.com" and out["t"] == ("p***@acme.com",)
     assert out["s"] == {"p***@acme.com"} and out["fs"] == frozenset({"p***@acme.com"})

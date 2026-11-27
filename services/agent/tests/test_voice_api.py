@@ -28,6 +28,7 @@ from agent.sse import TurnOutcome, TurnStream
 from agent.voice import TranscriptMerger, VoiceDeps, VoiceSessionRow
 from ingress_fakes import MemoryTurnLock, MemoryTurnStore
 from voice_fakes import FakeMinter, MemoryCallKeys, MemoryVoiceStore
+from pin_probe import leaks
 
 KEY = "k" * 32
 VISITOR = "visitor-1"
@@ -421,7 +422,7 @@ async def test_posted_transcript_text_is_redacted_before_storage() -> None:
         assert (await c.post(f"/api/sessions/{SID}/transcript", json=body)).status_code == 204
     (row,) = w.vstore.items
     assert "priya@acme.com" not in row.text and "p***@acme.com" in row.text
-    assert "4821" not in row.text and "[PIN]" in row.text
+    assert not leaks(row.text, "4821") and "[PIN]" in row.text
 
 
 async def test_covered_voice_item_is_redacted_before_storage() -> None:
@@ -431,7 +432,7 @@ async def test_covered_voice_item_is_redacted_before_storage() -> None:
         events_of(await c.post(f"/api/sessions/{SID}/voice/ask", json=ask(
             user_item_id="item_u9", user_transcript="send it to priya@acme.com, PIN 4821")))
     (row,) = [i for i in w.vstore.items if i.realtime_item_id == "item_u9"]
-    assert "priya@acme.com" not in row.text and "4821" not in row.text
+    assert "priya@acme.com" not in row.text and not leaks(row.text, "4821")
     assert "p***@acme.com" in row.text and "[PIN]" in row.text
 
 
@@ -442,7 +443,7 @@ async def test_real_scanner_masks_a_spoken_pin_in_a_transcript() -> None:
     body = {"voice_session_id": "vs-1", "items": items(("item_u6", "user", "QS-10423 4821"))}
     async with w.client() as c:
         await c.post(f"/api/sessions/{SID}/transcript", json=body)
-    assert "4821" not in w.vstore.items[0].text
+    assert not leaks(w.vstore.items[0].text, "4821")
 
 
 async def test_token_refuses_while_the_relay_is_not_wired() -> None:
