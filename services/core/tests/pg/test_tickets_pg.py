@@ -396,3 +396,113 @@ def test_http_response_has_no_raw_error_for_bad_json(http):
                     headers={"Authorization": f"Bearer {TOKENS['agent_tools']}", "X-Session-Id": str(w.session_id),
                              "Idempotency-Key": f"{prefix}:bad", "Content-Type": "application/json"})
     assert r.status_code == 422 and r.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+# ---------------------------------------------------------------- fix round 1 (review PR #28)
+
+def _approval_ticket(conn, w: World):
+    """What: insert one Pending approval ticket for a World's account. Use when: a test needs an approval ticket.
+    Inputs: connection, world. Output: TicketRef. Side effects: a pending_actions row and the ticket rows.
+    Role: the core-created ticket that doc 07 s8.1 says is not counted toward the daily limit."""
+    from types import SimpleNamespace
+
+    from tests.pg.conftest import Seed
+    holder = SimpleNamespace(account_id=w.account_id, user_id=w.user_id, conn=conn)
+    pid = Seed.pending(holder, uuid.uuid4(), f"refund:CH-{uuid.uuid4().int % 90000000 + 10000000}",  # type: ignore[arg-type]
+                       state="awaiting_approval")
+    return insert_ticket(conn, policy=POLICY, clock=clock(), session_id=uuid.uuid4(), account_id=w.account_id,
+                         user_id=w.user_id, tier="pro", stage="pending_approval", queue="approvals", category="refund",
+                         summary="Refund request", origin="core", pending_action_id=pid, actor="system", actor_id=None)
+
+
+def test_approval_tickets_do_not_count_toward_the_daily_limit(app_conn):
+    """What: with two Pending approval tickets already today, five customer tickets are still created and the
+    sixth is limited. Use when: always. Inputs: app_conn. Output: assertions. Side effects: rolled back.
+    Role: doc 07 s8.1 'merges and approvals not counted' (review I1)."""
+    w = World(app_conn)
+    _approval_ticket(app_conn, w)
+    _approval_ticket(app_conn, w)
+    for c in CATEGORIES[:5]:
+        assert make(app_conn, w.session_id, c).created
+    with pytest.raises(CoreError) as exc:
+        make(app_conn, w.session_id, CATEGORIES[5])
+    assert exc.value.code == "TICKET_LIMIT_REACHED"
+    assert exc.value.details["existing"]["stage"] == "open"  # existing is a counted (customer) ticket
+
+
+def test_daily_limit_follows_the_new_york_business_day(app_conn):
+    """What: five tickets at 18:00 New York, a sixth at 19:30 New York (00:30 UTC next day) is refused and the
+    stored created_date is the New York date; at 00:01 New York next day it is created, and that day starts at zero.
+    Use when: always. Inputs: app_conn. Output: assertions. Side effects: rolled back.
+    Role: review I2 and re-review; kills 'count ignores the date', 'count date from UTC' and 'created_date from UTC'."""
+    w = World(app_conn)
+    sid = w.add_session(verified=True, expires_in=timedelta(days=2))  # claims must outlive the evening
+    evening = datetime(2026, 11, 27, 18, 0, tzinfo=NY)
+    # three at 18:00 (same date in New York and UTC), then 19:30 and 21:00 New York, which are already the next date
+    # in UTC: only creates in that window can tell a New York created_date from a UTC one
+    when = [evening + timedelta(seconds=i) for i in range(3)] + [datetime(2026, 11, 27, 19, 30, tzinfo=NY),
+                                                                 datetime(2026, 11, 27, 21, 0, tzinfo=NY)]
+    for t, c in zip(when, CATEGORIES[:5], strict=True):
+        assert t.astimezone(ZoneInfo("UTC")).date().isoformat() == ("2026-11-28" if t.hour >= 19 else "2026-11-27")
+        assert make(app_conn, sid, c, clk=FixedClock(t)).created
+    late = FixedClock(datetime(2026, 11, 27, 22, 0, tzinfo=NY))
+    assert late.now().astimezone(ZoneInfo("UTC")).date().isoformat() == "2026-11-28"  # UTC is already tomorrow
+    with pytest.raises(CoreError) as exc:
+        make(app_conn, sid, CATEGORIES[5], clk=late)
+    assert exc.value.code == "TICKET_LIMIT_REACHED"
+    late_night = FixedClock(datetime(2026, 11, 27, 23, 59, tzinfo=NY))
+    with pytest.raises(CoreError):
+        make(app_conn, sid, CATEGORIES[5], clk=late_night)
+    dates = {str(r[0]) for r in rows(app_conn, "SELECT created_date FROM tickets WHERE account_id=%s", w.account_id)}
+    assert dates == {"2026-11-27"}
+    next_day = [FixedClock(datetime(2026, 11, 28, 0, 1, tzinfo=NY) + timedelta(seconds=i)) for i in range(6)]
+    for i, c in enumerate(CATEGORIES[:5]):  # the day reset: five more are allowed (merge target is closed by category)
+        out = make(app_conn, sid, c, clk=next_day[i], summary="next day")
+        assert out.merged or out.created
+    created_next = rows(app_conn, "SELECT count(*) FROM tickets WHERE account_id=%s AND created_date='2026-11-28'",
+                        w.account_id)[0][0]
+    assert created_next == 0  # all five merged into the open tickets of the 27th: merges are never limited
+    w2 = World(app_conn)
+    sid2 = w2.add_session(verified=True, expires_in=timedelta(days=2))
+    for c in CATEGORIES[:5]:
+        make(app_conn, sid2, c, clk=FixedClock(evening))
+    assert make(app_conn, sid2, "other", clk=FixedClock(datetime(2026, 11, 28, 0, 1, tzinfo=NY))).created
+
+
+def test_merge_writes_a_merge_audit_row(app_conn):
+    """What: a merge writes one ticket_merge audit row and no second ticket_create row. Use when: always.
+    Inputs: app_conn. Output: assertions. Side effects: rolled back. Role: review M5."""
+    w = World(app_conn)
+    first = make(app_conn, w.session_id, "sso").ref
+    make(app_conn, w.session_id, "sso")
+    got = sorted(r[0] for r in rows(app_conn, "SELECT event FROM audit_events WHERE ticket_id=%s", first.ticket_id))
+    assert got == ["ticket_create", "ticket_merge"]
+
+
+@pytest.mark.parametrize("start,outcome", [("open", "approved_executed"), ("open", "rejected"),
+                                           ("pending_approval", "answered"), ("pending_approval", "resolved_by_operator"),
+                                           ("open", "banana")])
+def test_transition_outcome_must_fit_the_starting_stage(app_conn, start, outcome):
+    """What: an outcome that does not belong to the starting stage, or is unknown, is VALIDATION_ERROR and nothing
+    is written (no database error). Use when: always. Inputs: app_conn. Output: assertions.
+    Side effects: rolled back. Role: review M3 (07 s3.5: operator resolve is for open tickets only)."""
+    w = World(app_conn)
+    tid = (make(app_conn, w.session_id, "bug").ref if start == "open" else _approval_ticket(app_conn, w)).ticket_id
+    with pytest.raises(CoreError) as exc:
+        transition(app_conn, policy=POLICY, clock=clock(), ticket_id=tid, to_stage="resolved", actor="operator",
+                   actor_id="op-1", outcome=outcome)
+    assert exc.value.code == "VALIDATION_ERROR"
+    assert rows(app_conn, "SELECT stage FROM tickets WHERE id=%s", tid)[0][0] == start
+    assert rows(app_conn, "SELECT count(*) FROM ticket_events WHERE kind='stage_changed' AND ticket_id=%s", tid)[0][0] == 0
+
+
+def test_http_concurrent_same_category_creates_merge_into_one_ticket(http, owner_url):
+    """What: six simultaneous requests in one category leave exactly one ticket (one created, five merged).
+    Use when: always. Inputs: http fixture. Output: assertions. Side effects: committed rows, removed.
+    Role: review M5; the per-account lock serialises find-or-create."""
+    _client, w, post, _ = http
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        out = list(pool.map(lambda i: post(payload("bug"), key=f"m{i}").json(), range(6)))
+    assert sorted((o["created"], o["merged"]) for o in out) == [(False, True)] * 5 + [(True, False)]
+    with psycopg.connect(owner_url) as o:
+        assert rows(o, "SELECT count(*) FROM tickets WHERE account_id=%s", w.account_id)[0][0] == 1

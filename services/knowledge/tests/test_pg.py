@@ -1,7 +1,7 @@
 """What: Postgres-backed tests (marker `pg`): the tier filter in both legs, the HNSW iterative scan, known error
 codes surfacing their chunk with a healthy vector leg, and the corpus_version reader after a failed run.
-Use when: SQL in db.py, ingest/store.py or the migrations changes. Run: `scripts/knowledge_pg_test.sh` (starts a throwaway
-Compose Postgres, sets KNOWLEDGE_PG_TEST_URL, removes the stack). CI deselects these (`-m 'not pg'`).
+Use when: SQL in db.py, ingest/store.py or the migrations changes. Run: `scripts/pg_tests.sh` (starts a throwaway
+Compose Postgres, sets KNOWLEDGE_PG_TEST_URL, removes the stack). CI job "pg tests" runs them.
 Inputs: the real article corpus, ingested with a feature-hashing fake embedder (no OpenAI calls). Output: pass or fail.
 Side effects: DELETEs every article, chunk and ingest run in the target database, so it refuses to run unless
 KNOWLEDGE_PG_TEST_URL is set. Role: closes review-pr15 Important 3 (the access filter had no automated test)."""
@@ -67,7 +67,7 @@ def db():
     KNOWLEDGE_PG_TEST_URL. Output: Database. Side effects: wipes and refills the knowledge tables once per module.
     Role: real SQL under test; skips with a clear reason when no test database is configured."""
     if not URL:
-        pytest.skip("KNOWLEDGE_PG_TEST_URL not set; run scripts/knowledge_pg_test.sh")
+        pytest.skip("KNOWLEDGE_PG_TEST_URL not set; run scripts/pg_tests.sh")
     store = PgStore(URL)
     with store._conn() as c:
         c.execute("DELETE FROM articles")
