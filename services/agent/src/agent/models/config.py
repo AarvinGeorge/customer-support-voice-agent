@@ -85,7 +85,7 @@ class ModelsConfig(BaseModel):
             r = self.roles[name]
             if r.first_token_timeout_s is None:
                 raise ValueError(f"role {name}: first_token_timeout_s is required")
-            if r.first_token_timeout_s > r.attempt_timeout_s:
+            if r.attempt_timeout_s is not None and r.first_token_timeout_s > r.attempt_timeout_s:
                 raise ValueError(f"role {name}: first_token_timeout_s exceeds attempt_timeout_s")
         for name, r in self.roles.items():
             if r.price is None:

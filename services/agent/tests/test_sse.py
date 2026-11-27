@@ -8,7 +8,6 @@ import json
 from typing import Any
 
 import pytest
-from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
@@ -79,7 +78,7 @@ def parse_frames(frames: list[str]) -> list[Any]:
         lines = f.split("\n")
         assert f.endswith("\n\n") and lines[0].startswith("event: ") and lines[1].startswith("id: ")
         assert lines[2].startswith("data: ")
-        ev = parse_event(lines[2][len("data: "):])
+        ev: Any = parse_event(lines[2][len("data: "):])
         assert lines[0] == f"event: {ev.type}" and lines[1] == f"id: {ev.seq}"
         out.append(ev)
     return out
@@ -125,6 +124,8 @@ async def test_frames_match_the_contract_and_the_draft_flushes_in_40_char_tokens
     assert "".join(tokens) == answer and [len(t) for t in tokens] == [40, len(answer) - 40]
     steps = [(e.type, getattr(e, "kind", None)) for e in events if e.type.startswith("step.")]
     assert steps == [("step.started", "model"), ("step.completed", None)] * 2
+    ids = [e.step_id.rsplit(":", 1)[-1] for e in events if e.type.startswith("step.")]
+    assert ids == ["1", "1", "2", "2"], ids  # review PR #17 M1: no skipped step numbers
     done = events[-1]
     assert isinstance(done, TurnCompletedEvent) and done.final.text == answer and done.end_reason == "answered"
     assert done.usage.model_calls == 2 and done.usage.tool_calls == 1 and done.replayed is False
@@ -255,7 +256,7 @@ async def test_client_abort_mid_turn_still_writes_the_final_row():
     gate.set()
     outcome = await asyncio.wait_for(task, 2)
     assert written == [outcome] and outcome.final.text == "Finished after the client left."
-    assert stream.events[-1].type == "turn.completed"
+    assert isinstance(stream.events[-1], TurnCompletedEvent)
 
 
 def test_chunk_text_is_about_40_chars_and_lossless():

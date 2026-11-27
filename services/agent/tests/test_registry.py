@@ -40,7 +40,8 @@ def test_effort_maps_to_provider_kwarg(monkeypatch):
     seen = {}
     monkeypatch.setattr(reg, "init_chat_model", lambda model, **kw: seen.setdefault(model, kw))
     r = ModelRegistry(cfg)
-    r.build("agent"); r.build("agent_fallback")
+    r.build("agent")
+    r.build("agent_fallback")
     assert seen["claude-sonnet-5-5"]["effort"] == "low"
     assert seen[cfg.roles["agent_fallback"].model]["reasoning_effort"] == "low"
 

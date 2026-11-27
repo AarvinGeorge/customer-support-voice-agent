@@ -36,6 +36,24 @@ CAP_LINE = ("This conversation is getting long. Please start a new conversation;
 # doc 07 fixture edge_turns e3 error body; the deadline ticket and its line arrive with CS-E-03.S4.T1.
 DEADLINE_MESSAGE = "I couldn't finish that in time."
 TURN_DEADLINE_S = {"chat": limits.CHAT_TURN_DEADLINE_S, "voice": limits.VOICE_TURN_DEADLINE_S}
+# A swept turn (its process died mid-turn) replays as a failed, retryable deadline (doc 07 s2.4 step 4, s8.1).
+SWEPT_MESSAGE = "I couldn't finish that. Please send your message again."
+
+
+def swept_error() -> ErrorBody:
+    """What: the error body stored on, and replayed for, a swept turn.
+    Use when: PgTurnStore.sweep and the replay of a failed row with no stored error.
+    Inputs: none. Output: ErrorBody (turn_deadline_exceeded, retryable, changed unknown). Side effects: none.
+    Role: review PR #18 I1 (a swept turn must not replay blank)."""
+    return ErrorBody.model_validate({"class": "turn_deadline_exceeded", "code": "TURN_DEADLINE",
+                                     "message": SWEPT_MESSAGE, "retryable": True, "changed": None,
+                                     "fault_injected": False, "details": {"swept": True}})
+
+
+def swept_final() -> FinalAnswer:
+    """What: the final answer stored on, and replayed for, a swept turn (text and say carry the retry line).
+    Use when: with swept_error. Inputs: none. Output: FinalAnswer. Side effects: none. Role: helper."""
+    return FinalAnswer(text=SWEPT_MESSAGE, say=SWEPT_MESSAGE, citations=[], escalated=False)
 
 
 class DuplicateTurn(Exception):
@@ -181,14 +199,16 @@ class Ingress:
         self.reserve_s, self.now = reserve_s, now
 
     async def handle(self, inp: IngressInput) -> IngressError | IngressStream:
-        """What: run steps 1, 4, 6, 7, 8, 9 and start the turn task (14 to 16).
+        """What: run steps 1, 4, 6, 7, 8, 9 and start the turn task (14 to 16). A resend that finds its own
+        turn still running runs the step 6 sweep first, so a killed holder's turn replays as failed.
         Use when: every chat or voice turn. Inputs: IngressInput. Output: IngressError or IngressStream.
         Side effects: rows, lock, task. Role: entry point."""
         session = await self.store.get_session(inp.session_id)
         if session is None or session.visitor_id != inp.visitor_id:  # step 1: no existence hint
             return IngressError(404, "not_found", "NOT_FOUND", "Not found.")
-        prior = await self.store.find_turn(inp.session_id, inp.client_turn_id,
-                                           inp.realtime_call_id if inp.mode == "voice" else None)
+        prior = await self._find(inp)
+        if prior is not None and prior.status == "running" and await self.store.sweep(inp.session_id, self.now()):
+            prior = await self._find(inp)  # step 6 for a resend of a killed holder's turn (review PR #18 I1)
         if prior is not None:  # step 4: replay first, no lock
             return self._replay(prior) if prior.status != "running" else _conflict()
         await self.store.sweep(inp.session_id, self.now())  # step 6
@@ -222,6 +242,12 @@ class Ingress:
             await self.lock.release(inp.session_id, token)
             raise
 
+    async def _find(self, inp: IngressInput) -> TurnRow | None:
+        """What: the step 4 lookup (client turn id, and realtime call id for voice). Use when: handle.
+        Inputs: input. Output: row or None. Side effects: SELECT. Role: helper."""
+        return await self.store.find_turn(inp.session_id, inp.client_turn_id,
+                                          inp.realtime_call_id if inp.mode == "voice" else None)
+
     async def _start(self, inp: IngressInput, release: Callable[[TurnOutcome], Awaitable[None]]) -> IngressStream | IngressError:
         """What: step 9 (row, count, stream) and the deadline-bound turn task.
         Use when: handle, under the lock. Inputs: input, release callback. Output: stream or 409.
@@ -243,10 +269,13 @@ class Ingress:
         async def body(s: TurnStream) -> TurnOutcome:
             """What: the agent loop under asyncio.timeout. Use when: the turn task. Inputs: stream.
             Output: outcome (deadline outcome on timeout). Side effects: model and tools. Role: step 14."""
+            cm = asyncio.timeout(loop_budget)
             try:
-                async with asyncio.timeout(loop_budget):
+                async with cm:
                     return await self.run_agent(s, inp, row)
             except TimeoutError:
+                if not cm.expired():  # an inner timeout (httpx, wait_for) is an error, not the deadline
+                    raise
                 err = ErrorBody.model_validate({"class": "turn_deadline_exceeded", "code": "TURN_DEADLINE",
                                                 "message": DEADLINE_MESSAGE, "retryable": True, "changed": None,
                                                 "fault_injected": False, "details": {}})
@@ -264,10 +293,12 @@ class Ingress:
         Use when: step 4. Inputs: prior row. Output: IngressStream with no task. Side effects: none.
         Role: doc 07 s2.4 step 4 (seq restarts at 1 for the replay stream)."""
         stream = TurnStream(TurnMeta(prior.session_id, prior.turn_id, prior.mode, self.served_by, prior.input_kind))
-        if prior.status == "failed" and prior.error:
-            fields = {k: v for k, v in prior.error.items() if k != "trace_id"}
-            stream.emit("error", **fields)
-        final = prior.final or FinalAnswer(text="", say="", citations=[], escalated=False).model_dump(mode="json")
+        failed = prior.status == "failed"
+        if failed:  # a row swept before errors were stored still replays a retryable error
+            error = prior.error or swept_error().model_dump(mode="json", by_alias=True)
+            stream.emit("error", **{k: v for k, v in error.items() if k != "trace_id"})
+        blank = swept_final() if failed else FinalAnswer(text="", say="", citations=[], escalated=False)
+        final = prior.final or blank.model_dump(mode="json")
         usage = prior.usage or Usage(input_tokens=0, output_tokens=0, cache_read_tokens=0, cache_write_tokens=0,
                                      cost_usd_est=0.0, latency_ms=0, model_calls=0, tool_calls=0, models_used=[],
                                      fallback_used=False).model_dump(mode="json")
@@ -356,13 +387,17 @@ class PgTurnStore:
         return TurnRow(*r) if r else None
 
     async def sweep(self, session_id: str, now: datetime) -> int:
-        """What: doc 07 s2.4 step 6 UPDATE. Use when: before the lock. Inputs: id, now. Output: rows swept.
-        Side effects: UPDATE. Role: write."""
+        """What: doc 07 s2.4 step 6 UPDATE, plus the swept error and final so a replay is not blank.
+        Use when: before the lock, and on a resend that finds its own turn running. Inputs: id, now.
+        Output: rows swept. Side effects: UPDATE. Role: write."""
+        error = json.dumps(swept_error().model_dump(mode="json", by_alias=True))
+        final = json.dumps(swept_final().model_dump(mode="json"))
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                "UPDATE agent.turns SET status = 'failed', end_reason = 'swept', ended_at = %s "
-                "WHERE session_id = %s AND status = 'running' AND deadline_at + interval '10 seconds' < %s",
-                (now, session_id, now))
+                "UPDATE agent.turns SET status = 'failed', end_reason = 'swept', ended_at = %s, error = %s, "
+                "final = %s WHERE session_id = %s AND status = 'running' "
+                "AND deadline_at + interval '10 seconds' < %s",
+                (now, error, final, session_id, now))
             return cur.rowcount
 
     async def insert_turn(self, row: TurnRow) -> None:
