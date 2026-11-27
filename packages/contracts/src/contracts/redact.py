@@ -52,7 +52,7 @@ _TEENS = {"ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13", "fourte
           "sixteen": "16", "seventeen": "17", "eighteen": "18", "nineteen": "19"}
 _TENS = {"twenty": "2", "thirty": "3", "forty": "4", "fourty": "4", "fifty": "5", "sixty": "6", "seventy": "7",
          "eighty": "8", "ninety": "9"}
-_DASHES = "‐‑‒–—―−"
+_DASHES = "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"  # Unicode hyphens and dashes, written as escapes
 _W_TENS = "|".join(_TENS)
 _W_UNITS = "one|two|three|four|five|six|seven|eight|nine"
 # One spoken or typed number item: a tens pair ("forty-eight"), a tens word, a teen, a unit word, or a 1 or 2 digit
