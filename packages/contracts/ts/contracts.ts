@@ -804,7 +804,7 @@ export interface TurnRequest {
   client_turn_id: string;
   text?: string | null;
   confirm?: ConfirmInput | null;
-  verification?: VerificationInput | null;
+  verification?: VerificationInput | VerificationUnavailable | null;
   ticket_offer?: TicketOffer | null;
 }
 
@@ -883,6 +883,11 @@ export interface VerificationResultEvent {
   person?: VerifiedPerson | null;
   attempts_left?: number | null;
   ticket?: TicketRef | null;
+}
+
+/** What: the verification card's "I don't have my PIN" press. Use when: TurnRequest.verification, instead of */
+export interface VerificationUnavailable {
+  no_pin: true;
 }
 
 /** What: who the session is verified as, for display. Use when: verification.result. */

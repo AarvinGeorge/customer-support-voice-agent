@@ -22,7 +22,7 @@ from escalation_world import OWNER, Boom, World, error_response
 SNAPSHOT = Path(__file__).parent / "snapshots" / "say_fixed_lines.txt"
 UNSPEAKABLE = re.compile(r"[*_`#\[\]<>|$%]|\d|\b[A-Z]{2,4}-[0-9A-F]{4,}\b|https?://")
 # Lines that only go to the thread for the model to read (never shown or spoken to the customer).
-THREAD_ONLY = (verification.VERIFIED_THREAD_LINE, verification.CARD_SUBMITTED_LINE)
+THREAD_ONLY = (verification.VERIFIED_THREAD_LINE, verification.CARD_SUBMITTED_LINE, verification.NO_PIN_PRESSED)
 DISPLAY, SHORT, REF = "ticket ending 8213", "8213", "0a1f"
 
 
@@ -70,7 +70,7 @@ def fixed_lines() -> dict[str, str]:
         "handler.verify_expired": handler.VERIFY_EXPIRED_LINE, "voice_yes.reprompt": voice_yes.REPROMPT_LINE,
         "confirm.verify_lapsed": confirm.VERIFY_LAPSED_LINE,
         "verification.failed": verification.FAILED_LINE.format(n=2, tries="tries"),
-        "verification.locked": verification.LOCKED_LINE, "verification.held_ticket":
+        "verification.locked": verification.LOCKED_LINE, "verification.no_pin": verification.NO_PIN_LINE, "verification.held_ticket":
             verification.HELD_TICKET_LINE.format(name="Priya", clause=router.TICKET_CLAUSE.format(display=DISPLAY)),
         "escalation.hold": f"{router.ESCALATION_LEADS['not_in_docs']} {escalation.HOLD_SAY}",
         "escalation.hold_chat": f"{router.ESCALATION_LEADS['not_in_docs']} {escalation.HOLD_LINE}",

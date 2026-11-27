@@ -8,7 +8,6 @@ Output: StructuredInput, the fixed lines.
 Side effects: core calls through verification and the Confirmer; verification.*, confirmation.required and
 action.result events.
 Role: decides whether the turn ends with a deterministic reply or goes to the model; the model can never commit.
-D-070: an unverified customer who says they do not have their PIN gets the fixed "How to reach support" line.
 Fix round 1: a typed yes commits only when the read-back turn was delivered (I1); a lapsed verification shows the
 card again and keeps the pending (I2, D-055).
 CS-E-05.S1.T1: on a voice turn the yes or no comes only from the final user_transcript (agent.structured.voice_yes,
@@ -24,7 +23,7 @@ from contracts.events import FinalAnswer
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agent.clients.core_agent import CoreAgentClient
-from agent.escalation import NO_REQUESTER_LINE, Escalator, apology_is_last, says_pin_is_unavailable
+from agent.escalation import Escalator, apology_is_last
 from agent.prompt import TurnContext, build_turn_message
 from agent.say import speak
 from agent.sse import TurnOutcome, TurnStream
@@ -66,8 +65,6 @@ class StructuredInput:
             return await verify_card(stream, prep.control, body.verification, self.core, self.flags, self.escalator)
         if body is not None and getattr(body, "ticket_offer", None) is not None:  # s6.7 Create ticket button
             return await self._ticket_offer(stream, prep, TICKET_OFFER_PRESSED)
-        if inp.text and not prep.values.get("verified") and says_pin_is_unavailable(inp.text):
-            return await self._pin_unavailable(stream, prep, inp.text)
         pending = prep.memory.current_pending
         confirm = getattr(body, "confirm", None) if body is not None else None
         text = inp.text
@@ -130,16 +127,6 @@ class StructuredInput:
             outcome.final = FinalAnswer.model_validate({**outcome.final.model_dump(mode="json"), **final_extra})
         msg = AIMessage(say if voice else text, id=ingress_message_id(prep.control.turn_id))
         return StructuredResult(outcome=outcome, messages=[self._human(human), msg], state=state or {})
-
-    async def _pin_unavailable(self, stream: TurnStream, prep: TurnPrep, text: str) -> StructuredResult:
-        """What: D-070 forgotten-PIN path: an unverified customer says they do not have their PIN, so verification
-        and therefore a ticket are not possible here: the fixed "How to reach support" line, the hold cleared, no
-        model call. Use when: step 13, unverified text that says_pin_is_unavailable. Inputs: stream, prep, text.
-        Output: result (end_reason answered). Side effects: one hold write. Role: deterministic, never a ticket."""
-        await self.escalator.hold(prep.control, None)
-        human = build_turn_message(text, TurnContext(mode="voice" if prep.control.mode == "voice" else "chat",
-                                                     verified=False))
-        return self._reply(stream, prep, human, NO_REQUESTER_LINE, "answered")
 
     async def _ticket_offer(self, stream: TurnStream, prep: TurnPrep, human: Any) -> StructuredResult:
         """What: the s6.7 ticket offer accepted: one code ticket (reason model_unavailable) and its line, no model.

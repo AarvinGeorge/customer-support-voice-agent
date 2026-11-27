@@ -62,5 +62,6 @@ verification.conflict: This conversation is already verified as someone else. Pl
 verification.failed: That account ID and PIN didn't match. You have two tries left.
 verification.held_ticket: Thanks, Priya. I've opened a ticket for our team, ticket ending eight two one three.
 verification.locked: I couldn't verify you after three tries, so verification is locked for this conversation and I can't open a ticket for you. The How to reach support section of our Support, response times and escalation article explains what to do next.
+verification.no_pin: Without your support PIN I can't verify you in this conversation, so I can't look at your account or open a ticket for you. The How to reach support section of our Support, response times and escalation article explains what to do next.
 verification.unavailable: I couldn't check your details just now. Please try the card again in a moment.
 voice_yes.reprompt: I didn't catch that clearly. Please say yes, or press Confirm on screen.

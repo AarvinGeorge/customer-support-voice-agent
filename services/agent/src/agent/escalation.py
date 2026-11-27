@@ -10,7 +10,7 @@ Use when: TurnRunner after the agent loop (route escalations, limit, deadline, m
 Inputs: the agent-token core client and an optional EscalationHolds store; per call the turn stream, TurnControl,
 the compiled agent and its run config.
 Output: Escalator, EscalationHolds, NoRequester, the fixed lines, REASON_CATEGORY, last_customer_text,
-apology_is_last, says_pin_is_unavailable, model-unavailable ids.
+apology_is_last, EscalationFacts, model-unavailable ids.
 Side effects: at most one core ticket per turn (POST /v1/tickets, 3 s clamped to the time left, 0 retries),
 escalation step events, `escalated` events, verification.required for a hold, hold writes, best-effort thread
 writes inside the time left.
@@ -74,10 +74,6 @@ CARD_PENDING_LINE = "Please finish verifying in the secure card first, then I ca
 NO_REQUESTER_LINE = ("I can't open a ticket without verifying who you are, and I can't verify you in this "
                      "conversation. The How to reach support section of our Support, response times and escalation "
                      "article explains what to do next.")
-_PIN_WORD = re.compile(r"\bpin\b", re.I)
-_PIN_UNAVAILABLE = re.compile(
-    r"\b(forgot|forget|forgotten|lost|lose|reset|recover|don'?t\s+(know|remember|have)|do\s+not\s+(know|remember|have)|"
-    r"can'?t\s+(remember|find)|cannot\s+(remember|find)|never\s+(got|set))\b", re.I)
 
 REASON_CATEGORY: dict[str, str] = {
     "not_in_docs": "other", "retrieval_unavailable": "other", "grounding_failed": "other",
@@ -98,31 +94,33 @@ REASON_SUMMARY: dict[str, str] = {
 _CUSTOMER_RE = re.compile(r"<customer_message>\n?(.*?)\n?</customer_message>", re.S)
 
 
-def says_pin_is_unavailable(text: str) -> bool:
-    """What: true when one sentence of the message names the PIN together with a word saying the customer does not
-    have it ("I forgot my PIN", "I don't remember my support pin", "how do I reset my PIN").
-    Use when: step 13, unverified sessions (the forgotten-PIN path of D-070). Inputs: customer text.
-    Output: bool. Side effects: none. Role: plain rule, no model; "my PIN is ..." and "where do I enter my PIN" do
-    not match (the PIN scanner and the card handle those)."""
-    for sentence in re.split(r"[.?!\n]+", text):
-        if _PIN_WORD.search(sentence) and _PIN_UNAVAILABLE.search(sentence):
-            return True
-    return False
+@dataclass(frozen=True)
+class EscalationFacts:
+    """What: the agent.sessions facts an unverified escalation needs. Use when: returned by EscalationHolds.
+    Inputs: awaiting (agent.sessions.awaiting_verification: the card is on screen; set when it is shown, cleared on
+    verify, dismiss and topic change, doc 07 s6.3 and s7.3), held (the held escalation or None), verified_user_id (who
+    the session last verified as, None if never). Output: value. Side effects: none.
+    Role: explicit state only, never inferred from turn history (PR #78 review I-2)."""
+
+    awaiting: bool = False
+    held: dict[str, Any] | None = None
+    verified_user_id: str | None = None
 
 
 class EscalationHolds(Protocol):
     """What: the agent.sessions facts an unverified escalation needs (D-070). Use when: typing the Escalator store.
     Inputs: see methods. Output: see methods. Side effects: database. Role: port (PgSessionFlags implements it)."""
 
-    async def escalation_facts(self, session_id: str) -> tuple[bool, dict[str, Any] | None]:
-        """What: (a verification card was shown earlier in the session, the held escalation or None).
+    async def escalation_facts(self, session_id: str) -> EscalationFacts:
+        """What: the session's awaiting flag, held escalation and last verified user.
         Use when: an escalation was refused for no requester, and on a successful verify. Inputs: session id.
-        Output: pair. Side effects: one SELECT. Role: port method."""
+        Output: EscalationFacts. Side effects: one SELECT. Role: port method."""
         ...
 
     async def hold_escalation(self, session_id: str, held: dict[str, Any] | None) -> None:
         """What: write or clear agent.sessions.held_escalation. Use when: holding, after the held ticket, on lockout
-        or a forgotten PIN. Inputs: session id, {reason, category, summary, turn_id} or None. Output: none.
+        or the card's no-PIN press. Inputs: session id, {reason, category, summary, turn_id, prior_user_id} or None.
+        Output: none.
         Side effects: one UPDATE. Role: port method."""
         ...
 
@@ -261,8 +259,9 @@ class Escalator:
     async def no_requester(self, control: TurnControl, reason: str, *, summary: str,
                            category: str | None = None) -> NoRequester | None:
         """What: the D-070 decision after core refused the ticket for no verified requester: verification locked
-        gives the "How to reach support" clause (nothing held); a card already shown in this session gives the
-        card-pending clause (nothing held, the escalation does not fire while the customer is mid-verification);
+        gives the "How to reach support" clause (nothing held); a card on screen (agent.sessions.awaiting_verification,
+        or requested this turn) gives the card-pending clause (nothing held, the escalation does not fire while the
+        customer is mid-verification);
         otherwise the escalation is held on agent.sessions and control.awaiting_verification is set (the caller
         emits verification.required with its full line, request_card).
         Use when: right after open_ticket returned None. Inputs: control, reason, summary, category.
@@ -274,11 +273,13 @@ class Escalator:
             return None
         if refusal.get("verify_locked"):
             return NoRequester("unavailable", NO_REQUESTER_LINE, NO_REQUESTER_LINE)
-        card_shown, _held = await self._facts(control)
-        if card_shown or control.awaiting_verification:
+        facts = await self.facts(control)
+        if facts.awaiting or control.awaiting_verification:
             return NoRequester("card_pending", CARD_PENDING_LINE, CARD_PENDING_LINE)
+        # prior_user_id binds the hold to the verification lifetime it was made in (PR #78 review I-3)
         held = {"reason": reason, "category": category or REASON_CATEGORY.get(reason, "other"),
-                "summary": summary[:500] or reason, "turn_id": control.turn_id}
+                "summary": summary[:500] or reason, "turn_id": control.turn_id,
+                "prior_user_id": facts.verified_user_id}
         await self.hold(control, held)
         control.awaiting_verification = True
         return NoRequester("hold", HOLD_LINE, HOLD_SAY)
@@ -292,17 +293,28 @@ class Escalator:
             control.events.emit("verification.required", reason="action", prompt_text=text,
                                 attempts_left=control.verify_attempts_left, fields=["account_id", "pin"])
 
-    async def _facts(self, control: TurnControl) -> tuple[bool, dict[str, Any] | None]:
-        """What: the hold store's facts, (False, None) without a store or on a failure (logged).
-        Use when: no_requester and held_ticket. Inputs: control. Output: pair. Side effects: one read.
-        Role: a store failure never fails the turn."""
+    async def facts(self, control: TurnControl) -> EscalationFacts:
+        """What: the hold store's facts; empty facts without a store or on a failure (logged).
+        Use when: no_requester, and verify_card before it records the new identity. Inputs: control.
+        Output: EscalationFacts. Side effects: one read. Role: a store failure never fails the turn."""
         if self.holds is None:
-            return False, None
+            return EscalationFacts()
         try:
             return await self.holds.escalation_facts(control.session_id)
         except Exception:  # noqa: BLE001 - the reply still goes out; nothing is held
             log.warning("escalation facts read failed session_id=%s", control.session_id, exc_info=True)
-            return False, None
+            return EscalationFacts()
+
+    @staticmethod
+    def hold_is_for(held: dict[str, Any], before: EscalationFacts, user_id: str | None) -> bool:
+        """What: true when a hold may become a ticket for the person who just verified: it was made in the
+        session's current verification lifetime (its prior_user_id is still the session's verified user) and that
+        lifetime was either never verified or belonged to this same person.
+        Use when: verify_card success, with the facts read before the new identity is recorded. Inputs: hold,
+        facts before, the newly verified user id. Output: bool. Side effects: none.
+        Role: PR #78 review I-3: verify as A, expire, verify as B never files A's held escalation under B."""
+        prior = held.get("prior_user_id")
+        return prior == before.verified_user_id and prior in (None, user_id)
 
     async def hold(self, control: TurnControl, held: dict[str, Any] | None) -> None:
         """What: write or clear the held escalation (logged on failure). Use when: holding, after the held ticket,
@@ -315,22 +327,19 @@ class Escalator:
         except Exception:  # noqa: BLE001
             log.warning("escalation hold write failed session_id=%s", control.session_id, exc_info=True)
 
-    async def held_ticket(self, control: TurnControl) -> tuple[str, dict[str, Any] | None] | None:
-        """What: after a successful verify, open the held escalation's ticket for the person just verified (one
-        attempt, origin code, the held reason and summary), emit `escalated`, and clear the hold.
-        Use when: the verification card succeeded. Inputs: control. Output: None when nothing was held, else
-        (reason, ticket or None when the attempt failed). Side effects: one read, at most one ticket, one event,
-        one write. Role: D-070 "once verification completes it creates the ticket for that person"."""
-        _shown, held = await self._facts(control)
-        if not held:
-            return None
+    async def held_ticket(self, control: TurnControl, held: dict[str, Any]) -> dict[str, Any] | None:
+        """What: open the held escalation's ticket for the person just verified (one attempt, origin code, the held
+        reason and summary), emit `escalated`, and clear the hold (also when the attempt failed, the s8.1 one-attempt
+        rule). Use when: verify_card success after hold_is_for said yes. Inputs: control, hold.
+        Output: the ticket or None. Side effects: at most one ticket, one event, one write.
+        Role: D-070 "once verification completes it creates the ticket for that person"."""
         reason = str(held.get("reason") or "other")
         ticket = await self.open_ticket(control, reason, summary=str(held.get("summary") or reason),
                                         category=held.get("category"))
         await self.hold(control, None)
         if ticket is not None:
             self.emit(control, reason, ticket)
-        return reason, ticket
+        return ticket
 
     @staticmethod
     def emit(control: TurnControl, reason: str, ticket: dict[str, Any] | None, *, origin: str = "code",

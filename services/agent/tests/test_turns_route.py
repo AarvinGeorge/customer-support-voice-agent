@@ -23,6 +23,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 
 from agent import composition
+from agent.escalation import EscalationFacts
 from agent.access import sign_cookie
 from agent.ingress import Ingress, IngressInput, PgTurnStore, RedisTurnLock, SessionRow, TurnRow
 from agent.main import create_app
@@ -172,10 +173,10 @@ class Flags:
         Role: fake."""
         self.calls.append((session_id, awaiting, verified_user_id))
 
-    async def escalation_facts(self, session_id: str) -> tuple[bool, dict[str, Any] | None]:
-        """What: no card shown, nothing held (the D-070 hold store). Use when: an unverified escalation.
-        Inputs: id. Output: pair. Side effects: none. Role: fake."""
-        return False, None
+    async def escalation_facts(self, session_id: str) -> EscalationFacts:
+        """What: no card pending, nothing held, never verified (the D-070 hold store). Use when: an unverified
+        escalation or a verify. Inputs: id. Output: EscalationFacts. Side effects: none. Role: fake."""
+        return EscalationFacts()
 
     async def hold_escalation(self, session_id: str, held: dict[str, Any] | None) -> None:
         """What: record a hold write. Use when: an unverified escalation. Inputs: id, hold. Output: none.

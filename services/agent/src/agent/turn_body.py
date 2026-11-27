@@ -30,7 +30,7 @@ from psycopg.types.json import Jsonb
 
 from agent.assembly import run_config, turn_run_config
 from agent.clients.core_agent import CoreAgentClient
-from agent.escalation import Escalator
+from agent.escalation import EscalationFacts, Escalator
 from agent.memory import MemoryRefresh, refresh_memory, repair_dangling
 from agent.prompt import TurnContext, build_turn_message
 from agent.deadline import TurnBudgetExhausted
@@ -83,22 +83,19 @@ class PgSessionFlags:
                                "verified_user_id = COALESCE(%s, verified_user_id) WHERE session_id = %s",
                                (awaiting, verified_user_id, session_id))
 
-    async def escalation_facts(self, session_id: str) -> tuple[bool, dict[str, Any] | None]:
-        """What: (a verification card was shown earlier in this session, the held escalation or None). A card was
-        shown when an earlier completed turn ended verification_requested; the web keeps that card open until the
-        customer verifies, is locked out or hits a conflict, so for an unverified session it is still on screen.
-        Use when: an unverified escalation (agent.escalation.no_requester) and a successful verify (held_ticket).
-        Inputs: session id. Output: pair ((False, None) for an unknown session). Side effects: one SELECT.
-        Role: read for D-070 ("escalation must not fire while the verification card is pending")."""
+    async def escalation_facts(self, session_id: str) -> EscalationFacts:
+        """What: the session's awaiting_verification flag, held escalation and last verified user, read from
+        agent.sessions only (the card's explicit state, never inferred from turn history: PR #78 review I-2).
+        Use when: an unverified escalation (agent.escalation.no_requester) and a successful verify.
+        Inputs: session id. Output: EscalationFacts (empty for an unknown session). Side effects: one SELECT.
+        Role: read for D-070."""
         async with self.pool.connection() as conn:
-            cur = await conn.execute(
-                "SELECT s.held_escalation, EXISTS (SELECT 1 FROM agent.turns t WHERE t.session_id = s.session_id "
-                "AND t.status = 'completed' AND t.end_reason = 'verification_requested') "
-                "FROM agent.sessions s WHERE s.session_id = %s", (session_id,))
+            cur = await conn.execute("SELECT awaiting_verification, held_escalation, verified_user_id "
+                                     "FROM agent.sessions WHERE session_id = %s", (session_id,))
             row = await cur.fetchone()
         if row is None:
-            return False, None
-        return bool(row[1]), row[0]
+            return EscalationFacts()
+        return EscalationFacts(awaiting=bool(row[0]), held=row[1], verified_user_id=row[2])
 
     async def hold_escalation(self, session_id: str, held: dict[str, Any] | None) -> None:
         """What: write or clear agent.sessions.held_escalation. Use when: an unverified escalation is held, the held
@@ -188,6 +185,8 @@ class TurnRunner:
         values = dict((await self.agent.aget_state(config)).values or {})
         memory = await refresh_memory(self.core, control, values)  # step 11
         values.update(memory.update)
+        if memory.verified_cleared:  # the verification lapsed: a hold never outlives its lifetime (PR #78 review I-3)
+            await self.escalator.hold(control, None)
         result = StructuredResult()
         if self.structured is not None:  # step 13
             result = await self.structured(stream, inp, TurnPrep(control, config, values, memory, self.agent))

@@ -1,8 +1,9 @@
 """What: D-070 in the agent: an escalation in an unverified session never opens a ticket. With no verification card
 on screen the code says the fixed line, requests verification and holds the escalation on agent.sessions; when the
 card verifies the customer, code opens the held ticket for that person, writes the line to the thread and clears the
-hold. While the card is already pending the escalation does not fire. A locked session, a lockout and a forgotten
-PIN get the fixed "How to reach support" line and no ticket. create_ticket is not offered while unverified.
+hold. While the card is pending (agent.sessions.awaiting_verification) the escalation does not fire. A locked
+session, a lockout and the card's "I don't have my PIN" press get the fixed "How to reach support" line and no ticket.
+A hold is bound to the verification lifetime it was made in. create_ticket is not offered while unverified.
 Use when: pytest (fake models, the contracts core stub over ASGI, in-memory checkpointer and hold store).
 Inputs: none. Output: pass/fail. Side effects: none.
 Role: CS-E-03.S3.T3 red tests (RCA build-log/reports/rca-unverified-ticket-2026-11-27.md fix B)."""
@@ -14,11 +15,11 @@ from typing import Any
 from contracts.stubs import examples as ex
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agent.escalation import CARD_PENDING_LINE, HOLD_LINE, NO_REQUESTER_LINE, says_pin_is_unavailable
+from agent.escalation import CARD_PENDING_LINE, HOLD_LINE, NO_REQUESTER_LINE, EscalationFacts
 from agent.middleware.router import ESCALATION_LEADS
 from agent.middleware.visibility import visible_tool_names
-from agent.structured.verification import LOCKED_LINE
-from escalation_world import SID, World, of
+from agent.structured.verification import LOCKED_LINE, NO_PIN_LINE
+from escalation_world import OWNER, SID, World, of
 from test_escalation import call, routed_search
 
 LEAD = ESCALATION_LEADS["not_in_docs"]
@@ -26,21 +27,21 @@ QUESTION = "do you sign a HIPAA BAA?"
 
 
 class MemoryHolds:
-    """What: in-memory EscalationHolds (agent.sessions.held_escalation plus "a card was shown"). Use when: tests.
-    Inputs: card_shown flag. Output: escalation_facts, hold_escalation. Side effects: records writes.
-    Role: fake of PgSessionFlags' hold methods."""
+    """What: in-memory EscalationHolds (agent.sessions awaiting_verification, held_escalation, verified_user_id).
+    Use when: tests. Inputs: awaiting flag, the session's verified user. Output: escalation_facts, hold_escalation.
+    Side effects: records writes. Role: fake of PgSessionFlags' hold methods."""
 
-    def __init__(self, card_shown: bool = False) -> None:
-        """What: start empty. Use when: arranging. Inputs: card_shown. Output: none. Side effects: none.
+    def __init__(self, awaiting: bool = False, verified_user_id: str | None = None) -> None:
+        """What: start empty. Use when: arranging. Inputs: awaiting, verified user. Output: none. Side effects: none.
         Role: constructor."""
-        self.card_shown = card_shown
+        self.awaiting, self.verified_user_id = awaiting, verified_user_id
         self.held: dict[str, Any] | None = None
         self.writes: list[dict[str, Any] | None] = []
 
-    async def escalation_facts(self, session_id: str) -> tuple[bool, dict[str, Any] | None]:
-        """What: (card shown earlier, held escalation). Use when: the escalator. Inputs: session id.
-        Output: pair. Side effects: none. Role: fake read."""
-        return self.card_shown, self.held
+    async def escalation_facts(self, session_id: str) -> EscalationFacts:
+        """What: the session's facts. Use when: the escalator. Inputs: session id. Output: EscalationFacts.
+        Side effects: none. Role: fake read."""
+        return EscalationFacts(awaiting=self.awaiting, held=self.held, verified_user_id=self.verified_user_id)
 
     async def hold_escalation(self, session_id: str, held: dict[str, Any] | None) -> None:
         """What: set or clear the hold. Use when: the escalator. Inputs: session id, hold or None. Output: none.
@@ -74,6 +75,7 @@ async def test_unverified_escalation_holds_and_requests_verification_with_no_tic
     (req,) = of(events, "verification.required")
     assert req.reason == "action" and req.prompt_text == outcome.final.text
     assert holds.held is not None and holds.held["reason"] == "not_in_docs" and QUESTION in holds.held["summary"]
+    assert holds.held["prior_user_id"] is None  # made in a never-verified session
     assert (await w.values())["messages"][-1].content == outcome.final.text  # the thread says what the customer saw
 
 
@@ -97,7 +99,7 @@ async def test_verifying_opens_the_held_ticket_for_that_person_and_clears_the_ho
 
 
 async def test_no_escalation_fires_while_the_verification_card_is_pending() -> None:
-    holds = MemoryHolds(card_shown=True)
+    holds = MemoryHolds(awaiting=True)  # the card is on screen: agent.sessions.awaiting_verification
     w = World([call("search_kb", {"query": "okay"})], tools={"search_kb": routed_search("grounding_failed")},
               verified=False, holds=holds)
     outcome, events = await w.send(text="Okay.")
@@ -131,19 +133,63 @@ async def test_lockout_on_the_card_says_reach_support_clears_the_hold_and_opens_
     assert w.transport.tickets == [] and holds.held is None
 
 
-async def test_forgotten_pin_gets_the_fixed_line_with_no_model_call_and_no_ticket() -> None:
-    holds = MemoryHolds(card_shown=True)
-    holds.held = {"reason": "not_in_docs", "category": "other", "summary": "s", "turn_id": "t"}
+async def test_an_old_verification_turn_does_not_suppress_a_new_card() -> None:
+    """Review I-2: only the explicit awaiting flag means "card pending"; with it cleared (verified, dismissed or the
+    topic changed) a new escalation holds and shows the card again, whatever older turns asked for."""
+    holds = MemoryHolds(awaiting=False)
+    w = World([call("request_verification", {"reason": "action"}, "v1"),
+               call("search_kb", {"query": "hipaa baa"})],
+              tools={"search_kb": routed_search("not_in_docs")}, verified=False, holds=holds)
+    first, _ = await w.send(text="refund please")
+    assert first.end_reason == "verification_requested"
+    holds.awaiting = False  # the customer moved on (doc 07 s7.3 topic change clears the flag)
+    outcome, events = await w.send(text=QUESTION)
+    assert outcome.final.text == f"{LEAD} {HOLD_LINE}" and holds.held is not None
+    assert [e.reason for e in of(events, "verification.required")] == ["action"]
+
+
+async def test_the_card_no_pin_press_gives_the_reach_support_line_with_no_model_call_and_no_ticket() -> None:
+    """Review I-4: an explicit structured input from the card, never text matching on customer messages."""
+    holds = MemoryHolds(awaiting=True)
+    holds.held = {"reason": "not_in_docs", "category": "other", "summary": "s", "turn_id": "t", "prior_user_id": None}
     w = World([AIMessage("model must not run")], verified=False, holds=holds)
-    outcome, events = await w.send(text="I forgot my PIN")
-    assert outcome.final.text == NO_REQUESTER_LINE and outcome.end_reason == "answered"
+    outcome, events = await w.send(verification={"no_pin": True})
+    assert outcome.final.text == NO_PIN_LINE and outcome.end_reason == "answered"
     assert w.transport.tickets == [] and holds.held is None and of(events, "escalated") == []
     assert [e for e in of(events, "step.started") if e.kind == "model"] == []
+    assert w.stub is not None and [c for c in w.stub.state.calls if c.path.endswith("/identity/verify")] == []
+    messages = (await w.values())["messages"]
+    assert messages[-2].content == "[customer pressed I don't have my PIN]" and messages[-1].content == NO_PIN_LINE
 
 
-def test_pin_unavailable_phrases() -> None:
-    for text in ("I forgot my PIN", "i don't remember my support pin", "I lost my PIN, what now?",
-                 "How do I reset my PIN?", "I don't have a PIN"):
-        assert says_pin_is_unavailable(text), text
-    for text in ("my PIN is 4821", "where do I enter my PIN", "I forgot my password", "what is a PIN for?"):
-        assert not says_pin_is_unavailable(text), text
+async def test_pin_talk_in_text_goes_to_the_model_as_usual() -> None:
+    """Review I-4 regression: "I forgot my PIN" typed in chat is an ordinary message (grounded answer path)."""
+    w = World([AIMessage("You can verify in the secure card; the article explains what to do without a PIN.")],
+              verified=False, holds=MemoryHolds())
+    outcome, events = await w.send(text="I forgot my PIN")
+    assert outcome.final.text != NO_PIN_LINE
+    assert [e for e in of(events, "step.started") if e.kind == "model"] != []
+
+
+async def test_a_hold_from_another_verification_lifetime_never_becomes_a_ticket_for_someone_else() -> None:
+    """Review I-3 probe: verified as A, expired, escalation held, verify as B: no ticket for B, hold dropped."""
+    holds = MemoryHolds(verified_user_id="U-AAAA")  # the session belonged to A before it expired
+    w = World([call("search_kb", {"query": "hipaa baa"}), AIMessage("Thanks, how can I help?")],
+              tools={"search_kb": routed_search("not_in_docs")}, verified=False, holds=holds)
+    await w.send(text=QUESTION)
+    assert holds.held is not None and holds.held["prior_user_id"] == "U-AAAA"
+    refused = len(w.transport.tickets)
+    outcome, events = await w.send(verification={"account_id": ex.ACCOUNT_ID, "pin": ex.STUB_PIN})  # B (the stub)
+    assert w.transport.tickets[refused:] == [] and of(events, "escalated") == []
+    assert holds.held is None and outcome.final.ticket is None
+
+
+async def test_expiry_of_the_verification_clears_the_hold() -> None:
+    """Review I-3: any change of verified identity, expiry included, clears the hold."""
+    holds = MemoryHolds(verified_user_id=ex.CLAIMS.user_id)
+    holds.held = {"reason": "not_in_docs", "category": "other", "summary": "s", "turn_id": "t",
+                  "prior_user_id": ex.CLAIMS.user_id}
+    w = World([AIMessage("Please verify again.")], verified=False, holds=holds)  # core says SESSION_NOT_VERIFIED
+    await w.seed({"messages": [], **OWNER})
+    await w.send(text="hello again")
+    assert holds.held is None

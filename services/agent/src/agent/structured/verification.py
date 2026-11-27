@@ -40,6 +40,10 @@ LOCKED_LINE = ("I couldn't verify you after three tries, so verification is lock
                "can't open a ticket for you. The How to reach support section of our Support, response times and "
                "escalation article explains what to do next.")
 HELD_TICKET_LINE = "Thanks, {name}. {clause}"
+NO_PIN_PRESSED = "[customer pressed I don't have my PIN]"
+NO_PIN_LINE = ("Without your support PIN I can't verify you in this conversation, so I can't look at your account or "
+               "open a ticket for you. The How to reach support section of our Support, response times and escalation "
+               "article explains what to do next.")
 CONFLICT_LINE = ("This conversation is already verified as someone else. Please start a new conversation to verify "
                  "as another person.")
 UNAVAILABLE_LINE = "I couldn't check your details just now. Please try the card again in a moment."
@@ -64,6 +68,22 @@ def _retry_prompt(stream: TurnStream, text: str, attempts_left: int) -> None:
                 attempts_left=attempts_left, fields=["account_id", "pin"])
 
 
+async def _no_pin(control: TurnControl, flags: SessionFlags | None, escalator: Escalator | None) -> StructuredResult:
+    """What: the card's "I don't have my PIN" press: no core call, no model call, no ticket; the hold is cleared and
+    the card closes (awaiting_verification false); the fixed line points to "How to reach support".
+    Use when: verify_card with VerificationUnavailable. Inputs: control, flags, escalator. Output: StructuredResult
+    (end_reason answered). Side effects: at most two writes. Role: D-070 forgotten-PIN path (PR #78 review I-4)."""
+    control.awaiting_verification = False
+    if flags is not None:
+        await flags.set_awaiting_verification(control.session_id, False)
+    if escalator is not None:
+        await escalator.hold(control, None)
+    outcome = TurnOutcome.fixed(NO_PIN_LINE, end_reason="answered")
+    line = outcome.final.say if control.mode == "voice" else NO_PIN_LINE
+    return StructuredResult(outcome=outcome, messages=[HumanMessage(NO_PIN_PRESSED),
+                                                       AIMessage(line, id=ingress_message_id(control.turn_id))])
+
+
 async def verify_card(stream: TurnStream, control: TurnControl, body: Any, core: CoreAgentClient,
                       flags: SessionFlags | None = None, escalator: Escalator | None = None) -> StructuredResult:
     """What: run the card verification and decide the turn.
@@ -73,6 +93,8 @@ async def verify_card(stream: TurnStream, control: TurnControl, body: Any, core:
     verified person (D-070); on success otherwise no outcome (continue into the agent loop with the thread line, turn
     context verification "just_verified" and the new claims and MeContext in state); otherwise a fixed reply.
     Side effects: see module. Role: s6.3 steps 4 and 5."""
+    if getattr(body, "no_pin", False):  # the card's explicit "I don't have my PIN" press (PR #78 review I-4)
+        return await _no_pin(control, flags, escalator)
     step = Step.start(control.events, "verify", "verify", "Checking your details")
     timeout = clamp_timeout(limits.CORE_VERIFY_TIMEOUT_S, control.remaining_s())
     try:
@@ -109,15 +131,20 @@ async def verify_card(stream: TurnStream, control: TurnControl, body: Any, core:
     step.done("ok", "Verified your details", detail=person.display_name)
     stream.emit("verification.result", status="verified", person=person.model_dump(mode="json"))
     control.awaiting_verification = False
+    before = await escalator.facts(control) if escalator is not None else None  # read before the new identity is stored
     if flags is not None:
         await flags.set_awaiting_verification(control.session_id, False, claims.get("user_id"))
     memory = await refresh_memory(core, control, {"verified": True})  # s6.3 step 5 "load MeContext"
     state: dict[str, Any] = {"verified": True, "claims_snapshot": claims}
     if memory.snapshot is not None:
         state["context_snapshot"] = memory.snapshot
-    held = await escalator.held_ticket(control) if escalator is not None else None
-    if held is not None:  # D-070: the escalation held while unverified becomes this person's ticket now
-        _reason, ticket = held
+    held = before.held if before is not None else None
+    if held and escalator is not None and before is not None and \
+            not escalator.hold_is_for(held, before, claims.get("user_id")):
+        await escalator.hold(control, None)  # made in another verification lifetime: never this person's ticket
+        held = None
+    if held and escalator is not None:  # D-070: the escalation held while unverified becomes this person's ticket
+        ticket = await escalator.held_ticket(control, held)
         clause = (TICKET_CLAUSE.format(display=ticket.get("display") or f"ticket ending {ticket.get('short_id')}")
                   if ticket else fallback_clause(control))
         text = HELD_TICKET_LINE.format(name=person.display_name, clause=clause)
