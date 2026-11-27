@@ -119,6 +119,29 @@ services:
     volumes:
       - ./data/policy.yaml:/app/data/policy.yaml:ro   # the one config file core reads (doc 07 s13.1)
 
+  # One-shot seeding job (profile "seed", not part of `up`): `docker compose run --rm seed_core` seeds an empty
+  # schema, `... seed_core python -m core.seeds --reseed` wipes and reseeds (needs DEMO_RESEED=true). Runs as
+  # core_owner because the runtime role may not TRUNCATE or delete append-only history (doc 07 s3.6, s12).
+  seed_core:
+    <<: *python
+    profiles: [seed]
+    build:
+      context: .
+      dockerfile: infra/python.Dockerfile
+      args: {SERVICE: core}
+    restart: "no"
+    command: ["python", "-m", "core.seeds"]
+    networks: [backend]
+    depends_on:
+      migrate_core: {condition: service_completed_successfully}
+    volumes:
+      - ./data/seeds:/app/data/seeds:ro
+    environment:
+      CORE_DB_OWNER_URL: ${CORE_DB_OWNER_URL}
+      PIN_PEPPER: ${PIN_PEPPER}
+      DEMO_RESEED: ${DEMO_RESEED:-false}
+      SEEDS_DIR: /app/data/seeds
+
   knowledge:
     <<: *python
     build:

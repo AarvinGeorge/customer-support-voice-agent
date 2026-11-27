@@ -205,8 +205,10 @@ def applicable_codes(data, persona_name: str, charge_id: str | None, today: date
         return ["ENTERPRISE_HUMAN_DECIDES"]
     if acct["tier"] == "business":
         window = policy.tiers.business.window_days
+        assert window is not None
         return ["OUTSIDE_WINDOW"] if age > window else ["BUSINESS_APPROVAL_REQUIRED"]
     pro = policy.tiers.pro
+    assert pro.window_days is not None and pro.late_band_days is not None and pro.auto_cap_cents is not None
     window, late = pro.window_days, pro.late_band_days
     if age > window + late:
         return ["PRO_PAST_LATE_BAND"]
