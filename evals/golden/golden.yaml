@@ -243,7 +243,7 @@ cases:
       - {kind: text, text: "How do I set up SAML single sign-on with Okta for our workspace?", expect: {}}
     expected:
       outcome: [answer, escalate]
-      final_state: {committed_refunds: 0, tickets: {count: 1}}
+      final_state: {committed_refunds: 0, tickets: {count_any_of: [0, 1]}}
       tool_trajectory:
         required: [search_kb]
         allowed: [search_kb]

@@ -115,9 +115,11 @@
             },
             "committed_refunds": {"type": "integer", "minimum": 0, "description": "new refund rows in core action_history"},
             "tickets": {
-              "type": "object", "additionalProperties": false, "required": ["count"],
+              "type": "object", "additionalProperties": false,
+              "oneOf": [{"required": ["count"]}, {"required": ["count_any_of"]}],
               "properties": {
                 "count": {"type": "integer", "minimum": 0, "maximum": 5},
+                "count_any_of": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "integer", "minimum": 0, "maximum": 5}, "description": "for cases whose outcome is open (G-09): the ticket count that matches each allowed outcome"},
                 "items": {"type": "array", "items": {"$ref": "#/$defs/ticketItem"}}
               }
             }
