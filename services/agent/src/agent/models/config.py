@@ -27,6 +27,16 @@ STREAMING_ROLES = ("agent", "agent_fallback")
 # measured verdict was 178 tokens (PR #68 eval). scope_classifier: ON or OFF (4 to 5 tokens measured).
 GATE_REPLY_MIN_TOKENS = {"grounding_verifier": 640, "scope_classifier": 8}
 GATE_CAP_MARGIN = 2
+# Every role that returns a structured verdict gets a token rule (root-cause audit 2026-11-27 open item 5): the gate
+# roles above and the offline judge. judge: a pass or fail per check with a short reason, about 2,000 characters of
+# JSON at most (about 500 tokens); a rough figure, carried by the 2x margin.
+VERDICT_REPLY_MIN_TOKENS = {**GATE_REPLY_MIN_TOKENS, "judge": 512}
+# OpenAI reasoning models: max_output_tokens (max_completion_tokens on chat completions) caps reasoning and visible
+# tokens together, and a reply cut there may hold no visible output; "OpenAI recommends reserving at least 25,000
+# tokens for reasoning and outputs" (developers.openai.com/api/docs/guides/reasoning, "Allocating space for
+# reasoning", read via context7 2026-11-27). reasoning_effort defaults to "medium" (API reference, chat completions
+# and evals sampling_params), so a missing effort key means the model reasons.
+OPENAI_REASONING_RESERVE_TOKENS = 25000
 # Models that reject thinking {"type": "disabled"} with a 400 (claude-api skill, Thinking and Effort table, read
 # 2026-11-27; live page platform.claude.com/docs/en/build-with-claude/thinking): Claude Opus 5.5 ("disabled and
 # enabled return 400 at every effort level"), Claude Sonnet 5.5 ("disabled returns 400"; between_tools is its off
@@ -95,8 +105,9 @@ class ModelsConfig(BaseModel):
     @model_validator(mode="after")
     def _check_roles(self) -> "ModelsConfig":
         """What: require every role and the chat roles' timeouts. Use when: pydantic validation of models.yaml.
-        Inputs: self. Output: self; ValueError on a missing role or timeout, effort none off OpenAI, thinking off Anthropic, or a gate
-        role with thinking on or a cap too small for its reply. Side effects: none. Role: validator."""
+        Inputs: self. Output: self; ValueError on a missing role or timeout, effort none off OpenAI, thinking off Anthropic, a gate
+        role with thinking on or a cap too small for its reply, or a verdict role (judge) whose cap cannot hold its
+        reasoning and verdict. Side effects: none. Role: validator."""
         missing = [r for r in REQUIRED_ROLES if r not in self.roles]
         if missing:
             raise ValueError(f"missing roles: {', '.join(missing)}")
@@ -118,8 +129,12 @@ class ModelsConfig(BaseModel):
                 raise ValueError(f"role {name}: thinking is an anthropic setting (use effort none on OpenAI)")
             if r.thinking == "disabled" and thinking_always_on(r.model):
                 raise ValueError(f"role {name}: {r.model} rejects thinking disabled (400); leave thinking unset")
-        for name in gate_roles(self):
+        gates = gate_roles(self)
+        for name in gates:
             _check_gate_role(name, self.roles[name])
+        for name in verdict_roles(self):
+            if name not in gates:
+                _check_verdict_role(name, self.roles[name])
         return self
 
 
@@ -129,6 +144,39 @@ def gate_roles(config: "ModelsConfig") -> list[str]:
     Side effects: none. Role: one list, so a fallback gate model added later gets the same rules."""
     return [r for r in config.roles if r in GATE_REPLY_MIN_TOKENS
             or (r.endswith("_fallback") and r.removesuffix("_fallback") in GATE_REPLY_MIN_TOKENS)]
+
+
+def verdict_roles(config: "ModelsConfig") -> list[str]:
+    """What: every role that returns a structured verdict: the gate roles and the judge, each with any
+    `<role>_fallback`. Use when: the config validator and the verdict cap tests. Inputs: ModelsConfig.
+    Output: role names. Side effects: none. Role: one list, so no verdict role sits outside the token rule."""
+    return [r for r in config.roles if r in VERDICT_REPLY_MIN_TOKENS
+            or (r.endswith("_fallback") and r.removesuffix("_fallback") in VERDICT_REPLY_MIN_TOKENS)]
+
+
+def _check_verdict_role(name: str, r: RoleSpec) -> None:
+    """What: the token rule for a verdict role that is not a gate (the offline judge, which may reason). OpenAI:
+    effort must be explicit (the API default is medium); effort none needs a cap of GATE_CAP_MARGIN times the
+    verdict; any reasoning effort needs OPENAI_REASONING_RESERVE_TOKENS. Anthropic: the gate thinking rule
+    (thinking disabled with the 2x cap, or effort low plus the thinking allowance on a model that cannot turn it off).
+    Use when: ModelsConfig validation. Inputs: role name, spec. Output: none; ValueError naming the role.
+    Side effects: none. Role: audit open item 5; a judge cannot spend its cap on reasoning and return no verdict."""
+    base = name.removesuffix("_fallback")
+    if r.provider == "anthropic":
+        need = VERDICT_REPLY_MIN_TOKENS[base] * GATE_CAP_MARGIN
+        if thinking_always_on(r.model):
+            if r.effort != "low":
+                raise ValueError(f"role {name}: {r.model} cannot turn thinking off, so a verdict role needs effort: low")
+            need += GATE_THINKING_ALLOWANCE_TOKENS
+        elif r.thinking != "disabled":
+            raise ValueError(f"role {name}: a verdict role needs thinking: disabled (thinking spends the reply's tokens)")
+    else:
+        if r.effort is None:
+            raise ValueError(f"role {name}: a verdict role on OpenAI needs an explicit effort (the API default is medium)")
+        need = (VERDICT_REPLY_MIN_TOKENS[base] * GATE_CAP_MARGIN if r.effort == "none"
+                else OPENAI_REASONING_RESERVE_TOKENS)
+    if r.max_tokens is None or r.max_tokens < need:
+        raise ValueError(f"role {name}: max_tokens must be at least {need} for the verdict (effort {r.effort})")
 
 
 def thinking_always_on(model: str) -> bool:
