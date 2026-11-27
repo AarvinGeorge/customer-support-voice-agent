@@ -181,3 +181,33 @@ def test_config_applies_the_gate_rules_to_a_gate_fallback_role():
         ModelsConfig.model_validate(data)
     data["roles"]["grounding_verifier_fallback"]["thinking"] = "disabled"
     assert "grounding_verifier_fallback" in gate_roles(ModelsConfig.model_validate(data))
+
+
+# --- Review PR #68 I-2: the thinking rule is per model (claude-api skill thinking table) -------------------------
+def test_disabled_thinking_is_refused_on_a_model_that_rejects_it_in_any_role():
+    from agent.models.config import ModelsConfig
+
+    data = _yaml_with()
+    data["roles"]["agent"]["thinking"] = "disabled"  # claude-sonnet-5-5: disabled returns a 400
+    with pytest.raises(ValueError, match="agent"):
+        ModelsConfig.model_validate(data)
+
+
+@pytest.mark.parametrize(("model", "over", "accepted"), [
+    ("claude-sonnet-5-5", {"thinking": "disabled", "max_tokens": 1536}, False),     # 400 at the API
+    ("claude-sonnet-5-5", {"thinking": None, "effort": "low", "max_tokens": 1536}, False),  # no room to think
+    ("claude-sonnet-5-5", {"thinking": None, "effort": "low", "max_tokens": 6144}, True),
+    ("claude-sonnet-5-5", {"thinking": "adaptive", "effort": "medium", "max_tokens": 6144}, False),  # effort low only
+    ("claude-opus-5-5", {"thinking": "adaptive", "effort": "low", "max_tokens": 8192}, True),
+    ("claude-haiku-5-5", {"thinking": None, "effort": "low", "max_tokens": 8192}, False),  # disabled is supported
+], ids=["sonnet-disabled", "sonnet-small-cap", "sonnet-room", "sonnet-medium", "opus-room", "haiku-adaptive"])
+def test_a_gate_role_on_a_model_that_cannot_turn_thinking_off_needs_effort_low_and_room(
+        model: str, over: dict[str, Any], accepted: bool):
+    from agent.models.config import ModelsConfig
+
+    data = _yaml_with(model=model, **over)
+    if accepted:
+        ModelsConfig.model_validate(data)
+    else:
+        with pytest.raises(ValueError, match="grounding_verifier"):
+            ModelsConfig.model_validate(data)

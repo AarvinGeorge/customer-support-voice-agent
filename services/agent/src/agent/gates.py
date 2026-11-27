@@ -32,6 +32,7 @@ from contracts.trust import escape_untrusted, escape_untrusted_obj
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent.deadline import clamp_timeout
+from agent.models.usage import reply_truncated
 from agent.turn_control import Route, TurnControl
 from agent.untrusted import escape_tags, harden, harden_obj
 
@@ -51,16 +52,6 @@ def record_gate_call(control: TurnControl, model: Any, reply: Any = None) -> Non
     # The configured id first, so a success and a timeout of one model share one spelling (review PR #66 M-2).
     name = getattr(model, "model", None) or getattr(model, "model_name", None) or meta.get("model_name") or "unknown"
     control.gate_calls.append((str(name), getattr(reply, "usage_metadata", None)))
-
-
-def reply_truncated(reply: Any) -> bool:
-    """What: true when the provider stopped the reply at max_tokens (ChatAnthropic puts it in response_metadata as
-    stop_reason, or as the shared finish_reason). Use when: the gates, right after their model call.
-    Inputs: the reply. Output: bool. Side effects: none.
-    Role: a cut reply holds no complete verdict (with thinking on, a cap can be spent before any text,
-    platform.claude.com/docs/en/build-with-claude/thinking), so it is never read as an answer."""
-    meta = getattr(reply, "response_metadata", None) or {}
-    return "max_tokens" in (meta.get("stop_reason"), meta.get("finish_reason"))
 
 
 def _output_tokens(reply: Any) -> Any:
@@ -269,7 +260,7 @@ CHECKING_POLICY_LINE = "Checking the answer against policy..."
 CLARIFY_LINE = ("I want to be sure I give you the right answer. Could you tell me a little more about what you "
                 "need?")
 # The drawer detail for a verifier error, by GroundingResult.reason (at most 80 characters, StepCompletedEvent).
-ERROR_DETAILS = {"truncated": "Verifier hit its token cap before a verdict; failed closed",
+ERROR_DETAILS = {"truncated": "Verifier reply was cut at its token cap; failed closed",
                  "timeout": "Verifier timed out; failed closed",
                  "exception": "Verifier call failed; failed closed",
                  "unparseable": "Verifier reply was not a readable verdict; failed closed",

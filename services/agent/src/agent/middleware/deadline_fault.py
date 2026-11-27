@@ -4,14 +4,15 @@ gate (s10).
 Use when: assembly builds the stack (ModelFallbackMiddleware outer, ModelRetryMiddleware, then this); the turn
 route reads X-Demo-Fault through demo_fault_from_header and puts the result on IngressInput.demo_fault.
 Inputs: the model request and handler; TurnControl bound for the turn (deadline, demo_fault, events).
-Output: DeadlineAndFaultMiddleware, model_retry_on, fallback_reason, rate_limit_error_for, demo_fault_from_header,
-fault_run_metadata, FAULT_VALUES.
+Output: DeadlineAndFaultMiddleware, ModelOutputTruncated, model_retry_on, fallback_reason, rate_limit_error_for,
+demo_fault_from_header, fault_run_metadata, FAULT_VALUES.
 Side effects: mutates TurnControl (attempt_role, model_attempts, primary_error, fallback_used, fallback_unfinished,
 fault_fired); emits
 model.fallback; logs fault_header_ignored.
 Role: every model attempt is clamped to min(10 s, remaining - 3 s) and skipped below 2 s; the fallback is labelled
 so the predicate never retries it (spike 16); a 429, spend cap, auth or 400 is not retried, so it goes straight to
 the fallback (spike 4); llm_429 raises the provider's own rate-limit class on the primary only, before any request.
+A reply cut at max_tokens raises ModelOutputTruncated (a failed attempt, retried like a 5xx; review PR #68 I-1).
 First-token timeout: not enforced (spike 5 dropped by doc 09 s3; the contract fallback is the total 10 s only).
 """
 from __future__ import annotations
@@ -33,6 +34,7 @@ from langchain_core.exceptions import (
 )
 
 from agent.deadline import TurnBudgetExhausted, clamp_timeout, retry_fits
+from agent.models.usage import reply_truncated
 from agent.turn_control import TurnControl, current_control
 
 log = logging.getLogger("agent.fault")
@@ -43,6 +45,21 @@ FAULT_MESSAGE = "Injected demo fault: rate limit (llm_429)"
 class ModelAttemptTimeout(ModelTimeoutError):
     """What: a model attempt ran past its clamped timeout. Use when: raised by DeadlineAndFaultMiddleware.
     Inputs: message. Output: exception. Side effects: none. Role: a timeout to the retry predicate and reasons."""
+
+
+class ModelOutputTruncated(ModelAPIError):
+    """What: the model's reply stopped at max_tokens (empty, cut text or a cut tool call), so the attempt failed.
+    Use when: raised by DeadlineAndFaultMiddleware after a reply that reply_truncated flags. Inputs: message.
+    Output: exception. Side effects: none. Role: a ModelAPIError, so doc 07 s8.1 applies as for a 5xx: one retry
+    when the deadline allows, then the fallback, then the s6.7 apology; never an answer, never a Gate 2 draft
+    (review PR #68 I-1)."""
+
+
+def _reply_messages(response: Any) -> list[Any]:
+    """What: the AI messages of a model call result (a ModelResponse or a bare message). Use when: the truncation
+    check. Inputs: handler result. Output: list. Side effects: none. Role: helper."""
+    result = getattr(response, "result", None)
+    return list(result) if isinstance(result, list) else [response]
 
 
 def demo_fault_from_header(value: str | None, *, enabled: bool) -> str | None:
@@ -106,7 +123,8 @@ def fallback_reason(exc: BaseException | None) -> str:
     """What: the model.fallback reason for the primary's failure (doc 07 s6.2 Literal).
     Use when: the fallback attempt starts. Inputs: the primary's last exception (None: unknown).
     Output: fault_llm_429, spend_cap, rate_limit, timeout, auth or 5xx (other errors, for example a 400, are
-    reported as 5xx: the Literal has no client-error value). Side effects: none. Role: badge reason."""
+    reported as 5xx: the Literal has no client-error value; so is a reply cut at max_tokens, ModelOutputTruncated,
+    whose cause the model step's detail shows). Side effects: none. Role: badge reason."""
     if exc is None:
         return "5xx"
     if getattr(exc, "fault_injected", False):
@@ -180,7 +198,8 @@ class DeadlineAndFaultMiddleware(AgentMiddleware):
         """What: one model attempt under the rules in the class docstring. Use when: every model attempt.
         Inputs: request (request.model is the primary or a fallback), handler.
         Output: the model response. Side effects: see class; raises the injected fault, TurnBudgetExhausted
-        (skip) or ModelAttemptTimeout. Role: wrap_model_call hook."""
+        (skip), ModelAttemptTimeout or ModelOutputTruncated (a reply cut at max_tokens, recorded on
+        TurnControl.truncated_calls and logged). Role: wrap_model_call hook."""
         control = current_control()
         fallback = any(request.model is m for m in self.fallback_models)
         if control is None:  # outside a turn (unit use): plain call with the listed timeout
@@ -207,6 +226,13 @@ class DeadlineAndFaultMiddleware(AgentMiddleware):
             control.fallback_unfinished = True  # cleared only on success: a cut attempt (cancelled) stays unfinished
         try:
             response = await asyncio.wait_for(handler(request), timeout)
+            cut = next((m for m in _reply_messages(response) if reply_truncated(m)), None)
+            if cut is not None:
+                name = (getattr(cut, "response_metadata", None) or {}).get("model_name") or model_name_of(request.model)
+                control.truncated_calls.append((str(name), getattr(cut, "usage_metadata", None)))
+                log.warning("model reply cut at max_tokens role=%s model=%s output_tokens=%s; attempt failed",
+                            control.attempt_role, name, (getattr(cut, "usage_metadata", None) or {}).get("output_tokens"))
+                raise ModelOutputTruncated(f"{control.attempt_role} reply stopped at max_tokens")
             if fallback:
                 control.fallback_unfinished = False
             return response

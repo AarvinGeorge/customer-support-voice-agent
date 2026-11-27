@@ -9,10 +9,14 @@ roles:
   agent:
     provider: anthropic
     model: claude-sonnet-5-5
+    # Thinking cannot be turned off on claude-sonnet-5-5 (disabled is a 400), so the cap must hold thinking plus the
+    # reply. Measured (LangSmith, 46 agent calls 15:44 to 16:41 UTC incl. browser pass 2): max 318 output tokens
+    # (190 reasoning); ledger 00:58 saw 466 reasoning. 8192 is over 17 times the largest; the 10 s attempt timeout
+    # binds first. A reply that still hits it is a failed attempt (ModelOutputTruncated, review PR #68 I-1).
     effort: medium
     attempt_timeout_s: 10
     first_token_timeout_s: 6
-    max_tokens: 2048
+    max_tokens: 8192
     price: {input_per_mtok: 2.00, output_per_mtok: 10.00, cache_read_per_mtok: 0.10, cache_write_per_mtok: 2.50, as_of: 2026-11-27}
   agent_fallback:
     # Other provider (doc 07 s8.1). gpt-5.4-mini is the id exercised by the day-1 spikes
@@ -28,7 +32,7 @@ roles:
     max_tokens: 2048
     price: {input_per_mtok: 0.75, output_per_mtok: 4.50, cache_read_per_mtok: 0.075, as_of: 2026-11-27}
   grounding_verifier:
-    # Gate 2 (doc 07 s7; D-061): 0 retries, fail closed. The client timeout is the chat budget (5 s); voice turns are
+    # Gate 2 (doc 07 s6.4 and s8.1 'Gate 2 verifier' row; D-061): 0 retries, fail closed. The client timeout is the chat budget (5 s); voice turns are
     # cut at 3 s by GroundingVerifier (contracts.limits). Prices are the prompts-up-to-100K tier
     # (a Gate 2 prompt is far below that).
     provider: anthropic
@@ -42,7 +46,7 @@ roles:
     max_tokens: 1536
     price: {input_per_mtok: 0.10, output_per_mtok: 0.50, cache_read_per_mtok: 0.01, cache_write_per_mtok: 0.125, as_of: 2026-11-27}
   scope_classifier:
-    # On a Gate 1 `none` verdict (doc 07 s7): 2 s, 0 retries, failure counts as on-topic.
+    # On a Gate 1 `none` verdict (doc 07 s6.5 routing table and s8.1 'Scope classifier' row): 2 s, 0 retries, failure counts as on-topic.
     provider: anthropic
     model: claude-haiku-5-5
     # Thinking off, as for the verifier: the reply is one word (ON or OFF), so 64 is ample with no reasoning.
