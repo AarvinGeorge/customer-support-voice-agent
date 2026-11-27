@@ -1,15 +1,16 @@
 "use client";
 /**
- * What: the console input bar: a message field that sends on Enter, a send button, and a
- *   disabled mic placeholder (voice arrives with CS-E-05).
+ * What: the console input bar: a message field that sends on Enter, a send button, and the mic
+ *   button that starts or ends a voice call.
  * Use when: the bottom of the console.
- * Inputs: { onSend, busy, disabled }.
+ * Inputs: { onSend, busy, disabled, voice? }.
  * Output: JSX.
  * Side effects: calls onSend with the trimmed text and clears the field.
  * Role: CS-E-04.S5.T1 input bar (F1 s5.1, s5.4); the 2,000 limit counter and pending placeholder
- *   are CS-E-04.S5.T3.
+ *   are CS-E-04.S5.T3. The mic is the minimal CS-E-05.S3.T3 control; the voice dock that replaces
+ *   the bar during a call is CS-E-05.S4.T1.
  */
-import { ArrowUp, Mic } from "lucide-react";
+import { ArrowUp, Mic, PhoneOff } from "lucide-react";
 import { useState, type KeyboardEvent, type Ref } from "react";
 
 import { cn } from "@/lib/utils";
@@ -28,6 +29,8 @@ export interface InputBarProps {
   disabled: boolean;
   /** Ref to the message field, so the shell can return focus to it after a card press. */
   inputRef?: Ref<HTMLTextAreaElement>;
+  /** The voice call: live (a call is open) and the toggle the mic button calls; absent disables the mic. */
+  voice?: { live: boolean; onToggle: () => void };
 }
 
 /**
@@ -38,7 +41,7 @@ export interface InputBarProps {
  * Side effects: see module.
  * Role: see module. Enter sends (ignored while an IME is composing); Shift+Enter is a newline.
  */
-export function InputBar({ onSend, busy, disabled, inputRef }: InputBarProps) {
+export function InputBar({ onSend, busy, disabled, inputRef, voice }: InputBarProps) {
   const [text, setText] = useState("");
   const canSend = !busy && !disabled && text.trim() !== "";
 
@@ -87,12 +90,17 @@ export function InputBar({ onSend, busy, disabled, inputRef }: InputBarProps) {
         />
         <button
           type="button"
-          disabled
-          aria-label="Voice, coming soon"
-          title="Voice, coming soon"
-          className="flex size-9 shrink-0 items-center justify-center rounded-full border border-rule bg-raised text-ink disabled:opacity-50"
+          disabled={disabled || voice === undefined}
+          aria-label={voice?.live ? "End voice call" : "Start voice"}
+          aria-pressed={voice?.live ?? false}
+          title={voice?.live ? "End voice call" : "Start voice"}
+          onClick={voice?.onToggle}
+          className={cn(
+            "flex size-9 shrink-0 items-center justify-center rounded-full border border-rule outline-none transition-colors duration-150 ease-out-expo focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-raised disabled:opacity-50",
+            voice?.live ? "border-ember bg-ember text-paper" : "bg-raised text-ink",
+          )}
         >
-          <Mic aria-hidden className="size-[18px]" />
+          {voice?.live ? <PhoneOff aria-hidden className="size-[18px]" /> : <Mic aria-hidden className="size-[18px]" />}
         </button>
         <button
           type="button"

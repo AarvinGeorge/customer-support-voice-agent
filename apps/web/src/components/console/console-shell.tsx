@@ -7,6 +7,7 @@
  * Output: the full-height console frame.
  * Side effects: sending a message or pressing a card calls store.sendTurn (one network request);
  *   an in-flight turn is aborted on unmount (its turn ends in the failed state, review PR #16 I1).
+ *   The mic button starts or ends a voice call (useVoice); voice turns land in the same thread.
  * Role: CS-E-04.S5.T1 shell, laid out from the Figma page "Console, chat (S1)".
  */
 import { MotionConfig } from "motion/react";
@@ -20,6 +21,8 @@ import { Button } from "@/components/ui/button";
 import type { TurnView } from "@/lib/turns/reducer";
 import { turnStore, type ThreadItem, type TurnStoreState } from "@/lib/turns/store";
 import { trailSummary } from "@/lib/turns/trail";
+import { isLive } from "@/lib/voice/machine";
+import { useVoice } from "@/lib/voice/use-voice";
 
 import { ConversationLog, type CardActions } from "./conversation-log";
 import { InputBar } from "./input-bar";
@@ -103,6 +106,25 @@ export function announcement(thread: readonly ThreadItem[], turns: Readonly<Reco
 }
 
 /**
+ * What: the minimal voice line above the input bar: the state in words, the live caption of what
+ *   the customer is saying, and the error words when a call failed.
+ * Use when: a call has been started at least once (hidden while idle).
+ * Inputs: { state, label, caption, error }.
+ * Output: a short line, or nothing.
+ * Side effects: none.
+ * Role: CS-E-05.S3.T3 placeholder; the voice dock and bars are CS-E-05.S4.T1.
+ */
+export function VoiceLine({ state, label, caption, error }: { state: string; label: string; caption: string | null; error: string | null }) {
+  if (state === "idle") return null;
+  return (
+    <p data-voice-state={state} className="mb-2 flex min-w-0 items-baseline gap-2 text-caption text-muted">
+      <span className="shrink-0 font-medium text-ink">{label}</span>
+      {error !== null ? <span>{error}</span> : caption !== null && caption !== "" && <span className="truncate italic">{caption}</span>}
+    </p>
+  );
+}
+
+/**
  * What: props of ConsoleShell.
  * Use when: typing the component.
  * Inputs: none (type).
@@ -133,6 +155,7 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
   const messageRef = useRef<HTMLTextAreaElement | null>(null);
   const pinRef = useRef<HTMLInputElement | null>(null);
   const [account, setAccount] = useState("");
+  const { voice, toggle, available } = useVoice(sessionId, store);
 
   useEffect(() => () => inflight.current?.abort(), []);
   useEffect(() => () => inflight.current?.abort(), [sessionId]);
@@ -259,7 +282,14 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
             </div>
           </div>
           <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
-            <InputBar onSend={send} busy={busy} disabled={sessionId === null} inputRef={messageRef} />
+            <VoiceLine state={voice.state} label={voice.label} caption={voice.caption?.text ?? null} error={voice.error} />
+            <InputBar
+              onSend={send}
+              busy={busy}
+              disabled={sessionId === null}
+              inputRef={messageRef}
+              voice={available ? { live: isLive(voice.state), onToggle: toggle } : undefined}
+            />
           </div>
         </main>
       </div>
