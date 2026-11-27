@@ -7,9 +7,10 @@ Role: storage adapter; tests use an in-memory fake with the same two methods.
 """
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from typing import Any, Protocol
+
+from langchain_core.utils.uuid import uuid7
 
 from agent.ingress import PgTurnStore, SessionRow
 
@@ -35,7 +36,7 @@ class PgSessionStore:
         """What: insert a session for this visitor. Use when: POST /api/sessions.
         Inputs: visitor id, optional salted IP hash. Output: (session_id, created_at).
         Side effects: INSERT. Role: session start."""
-        sid = str(uuid.uuid4())
+        sid = str(uuid7())  # doc 07 s1.2: session ids are uuid7
         async with self.pool.connection() as conn:
             cur = await conn.execute("INSERT INTO agent.sessions (session_id, visitor_id, ip_hash) "
                                      "VALUES (%s, %s, %s) RETURNING created_at", (sid, visitor_id, ip_hash))

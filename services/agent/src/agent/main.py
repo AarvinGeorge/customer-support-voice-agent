@@ -8,6 +8,7 @@ Role: composition root of the HTTP service: access gate, visitor routes, health.
 """
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -16,12 +17,14 @@ from contracts import limits
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from agent.access import install_access_gate
+from agent.access import install_access_gate, install_not_owned_handler
 from agent.api import install_api
 from agent.readiness import Probe, build_probes, readiness
 from agent.sessions import PgSessionStore, SessionStore
 from agent.settings import Settings
 from agent.web import install_http
+
+log = logging.getLogger("agent.main")
 
 
 def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None = None,
@@ -71,6 +74,10 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
     app.state.session_store = session_store
     install_access_gate(app)  # before install_http: ids and headers wrap the gate
     install_http(app, cfg.served_by)
+    install_not_owned_handler(app)
+    for name, value in ("SESSION_SIGNING_KEY", cfg.session_signing_key), ("DEMO_ACCESS_CODE", cfg.demo_access_code):
+        if not value:
+            log.error("%s is not set: nobody can sign in until it is", name)
     install_api(app)
 
     @app.get("/api/healthz")

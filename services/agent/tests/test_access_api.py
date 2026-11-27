@@ -219,14 +219,38 @@ async def test_me_reports_demo_faults_flag(flag):
 
 # ---- GET /api/demo/personas ----
 
-async def test_personas_from_file_match_contract():
+async def test_real_seed_file_parses_into_the_contract_list():
     async with client(make_app()) as c:
         await login(c)
         r = await c.get("/api/demo/personas")
     assert r.status_code == 200
-    people = [Persona.model_validate(p) for p in r.json()]
-    assert [p.name for p in people] == ["Priya Raman", "Marcus Lee"]
-    assert people[0].scenarios == ["S1", "S2", "S5"] and people[0].pin == "4821"
+    raw = r.json()
+    assert len(raw) == 9
+    assert all(set(p) == set(Persona.model_fields) for p in raw)  # nothing beyond the contract fields
+    people = [Persona.model_validate(p) for p in raw]
+    assert people[0].name == "Priya Raman" and people[0].scenarios == ["S1", "S2", "S5"] and people[0].pin == "7342"
+    assert people[1].scenarios == ["S3", "rules"] and people[1].role == "member"
+
+
+def _write(tmp_path, text: str) -> str:
+    """What: write a temporary personas file. Use when: malformed-file tests. Inputs: dir, text.
+    Output: path string. Side effects: file write. Role: helper."""
+    f = tmp_path / "p.yaml"
+    f.write_text(text)
+    return str(f)
+
+
+GOOD = ("- {name: A, role: owner, tier: free, contract_status: active, account_id: QS-1, pin: '1234', "
+        "scenarios: [S4], description: hi%s}\n")
+
+
+async def test_unknown_keys_are_ignored_and_never_returned(tmp_path):
+    path = _write(tmp_path, GOOD % ", user_id: USR-SECRET-1, pin_hash: deadbeef")
+    async with client(make_app(personas_path=path)) as c:
+        await login(c)
+        r = await c.get("/api/demo/personas")
+    assert r.status_code == 200 and len(r.json()) == 1
+    assert "USR-SECRET-1" not in r.text and "deadbeef" not in r.text and set(r.json()[0]) == set(Persona.model_fields)
 
 
 async def test_missing_personas_file_gives_empty_list_and_a_warning(caplog, tmp_path):
@@ -238,18 +262,30 @@ async def test_missing_personas_file_gives_empty_list_and_a_warning(caplog, tmp_
     assert any("personas file not found" in m for m in caplog.messages)
 
 
-def test_malformed_personas_file_raises_instead_of_hiding(tmp_path):
-    bad = tmp_path / "p.yaml"
-    bad.write_text("personas:\n  - name: x\n")
-    with pytest.raises(Exception):
-        load_personas(str(bad))
+@pytest.mark.parametrize("text", ["- {name: A\n  : [", "just a string", "key: value", "- 5\n- [1, 2]\n"])
+async def test_malformed_file_is_a_logged_error_and_an_empty_list_never_a_500(text, caplog, tmp_path):
+    async with client(make_app(personas_path=_write(tmp_path, text))) as c:
+        await login(c)
+        with caplog.at_level(logging.ERROR, logger="agent.personas"):
+            r = await c.get("/api/demo/personas")
+    assert r.status_code == 200 and r.json() == []
+    assert any(rec.levelno == logging.ERROR for rec in caplog.records)
 
 
-def test_personas_accepts_a_bare_top_level_list(tmp_path):
-    f = tmp_path / "p.yaml"
-    f.write_text("- name: A\n  role: owner\n  tier: free\n  contract_status: active\n  account_id: ACC-1\n"
-                 "  pin: '1234'\n  scenarios: [S4]\n  description: hi\n")
-    assert [p.name for p in load_personas(str(f))] == ["A"]
+async def test_one_bad_item_is_skipped_and_logged_without_its_values(caplog, tmp_path):
+    bad = ("- {name: B, role: ghost, tier: free, contract_status: active, account_id: QS-2, pin: 'SECRETPIN', "
+           "scenarios: [S4], description: hi}\n")
+    long = "- {name: C, role: owner, tier: free, contract_status: active, account_id: QS-3, pin: '1', scenarios: [S4], description: '%s'}\n" % ("x" * 141)
+    async with client(make_app(personas_path=_write(tmp_path, GOOD % "" + bad + long))) as c:
+        await login(c)
+        with caplog.at_level(logging.ERROR, logger="agent.personas"):
+            r = await c.get("/api/demo/personas")
+    assert [p["name"] for p in r.json()] == ["A"]
+    assert "SECRETPIN" not in caplog.text and "role" in caplog.text and "description" in caplog.text
+
+
+def test_personas_accepts_a_personas_mapping_too(tmp_path):
+    assert [p.name for p in load_personas(_write(tmp_path, "personas:\n" + "  " + GOOD % ""))] == ["A"]
 
 
 # ---- POST /api/sessions and ownership ----
@@ -311,3 +347,30 @@ async def test_origin_check_runs_before_the_cookie_check():
     async with client(make_app()) as c:
         r = await c.post("/api/sessions", json={}, headers={"Origin": "https://evil.example"})
     assert r.status_code == 403
+
+
+async def test_not_owned_is_a_404_not_found_envelope_by_default():
+    app = make_app()
+
+    @app.get("/api/boom-owned")
+    async def boom_owned() -> None:
+        """What: route that forgets to catch NotOwned. Use when: this test. Inputs: none.
+        Output: raises. Side effects: none. Role: probe."""
+        raise access.NotOwned("x")
+
+    async with client(app) as c:
+        await login(c)
+        r = await c.get("/api/boom-owned")
+    assert r.status_code == 404 and ErrorEnvelope.model_validate(r.json()).error.code == "NOT_FOUND"
+
+
+def test_pg_store_mints_uuid7_session_ids():
+    import inspect
+    from agent import sessions
+    assert "uuid7" in inspect.getsource(sessions.PgSessionStore.create_session)
+
+
+def test_empty_key_or_code_is_reported_at_startup(caplog):
+    with caplog.at_level(logging.ERROR, logger="agent.main"):
+        make_app(session_signing_key="", demo_access_code="")
+    assert "SESSION_SIGNING_KEY" in caplog.text and "DEMO_ACCESS_CODE" in caplog.text

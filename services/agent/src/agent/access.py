@@ -18,6 +18,7 @@ import time
 from typing import Any, Awaitable, Callable, Protocol
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from agent.ingress import SessionRow
 from agent.web import error_response
@@ -154,3 +155,15 @@ async def owned_session(store: SessionLookup, session_id: str, visitor_id: str) 
     if row is None or not hmac.compare_digest(row.visitor_id.encode(), visitor_id.encode()):
         raise NotOwned(session_id)
     return row
+
+
+def install_not_owned_handler(app: FastAPI) -> None:
+    """What: turn a NotOwned that a route did not catch into the 404 NOT_FOUND envelope.
+    Use when: once in create_app. Inputs: app. Output: none. Side effects: mutates app.
+    Role: makes the ownership helper safe by default (no existence hint, never a 500)."""
+
+    @app.exception_handler(NotOwned)
+    async def not_owned(request: Request, exc: NotOwned) -> JSONResponse:
+        """What: 404 envelope for a foreign or unknown session. Use when: NotOwned escapes a route.
+        Inputs: request, exc. Output: response. Side effects: none. Role: doc 07 s2.1 Ownership."""
+        return error_response(request, 404, "not_found", "NOT_FOUND", "Not found.")
