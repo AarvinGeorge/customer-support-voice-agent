@@ -17,7 +17,7 @@ import logging
 import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncGenerator, Awaitable, Callable
 
 from contracts import VERSION, limits
 from contracts.errors import ErrorBody
@@ -140,7 +140,7 @@ class TurnStream:
         Inputs: none. Output: none. Side effects: queue sentinel. Role: cleanup."""
         self._queue.put_nowait(None)
 
-    async def frames(self) -> AsyncIterator[str]:
+    async def frames(self) -> AsyncGenerator[str, None]:
         """What: SSE frames until turn.completed; ": keepalive" when idle for keepalive_s.
         Use when: the HTTP response body. Inputs: none. Output: frames. Side effects: none.
         Role: response iterator; closing it (client disconnect) does not touch the turn task."""
@@ -191,7 +191,7 @@ async def _drive(stream: TurnStream, body: Callable[[TurnStream], Awaitable[Turn
             _emit_error(stream, err)
             outcome = TurnOutcome.fixed(err.message, end_reason="error", status="failed", error=err)
         if outcome.error is not None and outcome.status == "failed" and \
-                not any(e.type == "error" for e in stream.events):
+                not any(getattr(e, "type", None) == "error" for e in stream.events):
             _emit_error(stream, outcome.error)
         latency = stream.ms()
         outcome.usage = outcome.usage.model_copy(update={
@@ -324,7 +324,8 @@ async def stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[st
                     call = token_usage()
                     model_name = "unknown"
                     for m in msgs:
-                        model_ids.add(m.id)
+                        if m.id is not None:
+                            model_ids.add(m.id)
                         call = add_usage(call, normalize_usage(m.usage_metadata))
                         model_name = (m.response_metadata or {}).get("model_name") or model_name
                     model_used = model_name

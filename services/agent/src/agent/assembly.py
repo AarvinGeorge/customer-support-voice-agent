@@ -56,7 +56,7 @@ MIDDLEWARE_ORDER: tuple[str, ...] = (
 CheckpointerFactory = Callable[[], Any]  # returns an async context manager yielding a saver
 
 
-def build_middleware(fallback_model: Any) -> list[AgentMiddleware]:
+def build_middleware(fallback_model: Any) -> list[AgentMiddleware[Any, Any]]:
     """What: the middleware list in MIDDLEWARE_ORDER.
     Use when: build_agent; the order test.
     Inputs: the fallback chat model (role agent_fallback).

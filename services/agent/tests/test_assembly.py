@@ -192,12 +192,12 @@ async def test_checkpointer_factory_injects_saver_and_default_is_async_postgres(
 
 async def test_caching_middleware_marks_the_system_prompt_on_anthropic_models():
     mw = {m.name: m for m in build_middleware(fallback_model=fake("fb"))}["AnthropicPromptCachingMiddleware"]
-    model = ChatAnthropic(model="claude-sonnet-5-5", api_key="sk-test-not-real", max_retries=0)
+    model = ChatAnthropic(model="claude-sonnet-5-5", api_key="sk-test-not-real", max_retries=0)  # pyright: ignore[reportCallIssue]  # pydantic alias
     req = ModelRequest(model=model, messages=[HumanMessage("hi")], system_message=SystemMessage(SYSTEM_PROMPT),
                        tools=[], state={"messages": []}, runtime=None)  # type: ignore[arg-type]
     captured: list[ModelRequest] = []
 
-    async def handler(r: ModelRequest) -> AIMessage:
+    async def handler(r: ModelRequest) -> Any:
         """What: capture the request. Use when: this test. Inputs: request. Output: AIMessage.
         Side effects: appends. Role: fake model handler."""
         captured.append(r)
@@ -206,22 +206,23 @@ async def test_caching_middleware_marks_the_system_prompt_on_anthropic_models():
     await mw.awrap_model_call(req, handler)
     sent = captured[0]
     assert sent.model_settings.get("cache_control") == {"type": "ephemeral", "ttl": "5m"}
+    assert sent.system_message is not None
     blocks = sent.system_message.content
-    assert isinstance(blocks, list) and blocks[-1].get("cache_control") == {"type": "ephemeral", "ttl": "5m"}
+    assert isinstance(blocks, list) and isinstance(blocks[-1], dict) and blocks[-1].get("cache_control") == {"type": "ephemeral", "ttl": "5m"}
 
 
 @pytest.mark.parametrize("name", sorted(stubs.STUB_NAMES))
 async def test_stubs_are_pass_through(name: str):
     mw = {m.name: m for m in build_middleware(fallback_model=fake("fb"))}[name]
     if hasattr(type(mw), "abefore_model") and name == "RouterMiddleware":
-        assert await mw.abefore_model({"messages": []}, None) is None
+        assert await mw.abefore_model({"messages": []}, None) is None  # pyright: ignore[reportArgumentType]  # stub ignores runtime
     if name == "GroundingMiddleware":
-        assert await mw.aafter_model({"messages": []}, None) is None
+        assert await mw.aafter_model({"messages": []}, None) is None  # pyright: ignore[reportArgumentType]  # stub ignores runtime
     if name in ("ToolVisibilityMiddleware", "DeadlineAndFaultMiddleware"):
-        out = await mw.awrap_model_call("REQ", _echo)
+        out = await mw.awrap_model_call("REQ", _echo)  # pyright: ignore[reportArgumentType]  # pass-through probe
         assert out == ("handled", "REQ")
     if name == "ToolGuardMiddleware":
-        out = await mw.awrap_tool_call("CALL", _echo)
+        out = await mw.awrap_tool_call("CALL", _echo)  # pyright: ignore[reportArgumentType]  # pass-through probe
         assert out == ("handled", "CALL")
 
 

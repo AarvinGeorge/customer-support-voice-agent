@@ -1,4 +1,6 @@
 """What: tests for the usage normalizer and price math. Use when: pytest. Inputs: none. Output: pass/fail. Side effects: none. Role: test."""
+from datetime import date
+
 import pytest
 
 from agent.models.config import Price
@@ -7,7 +9,7 @@ from contracts.events import Usage
 from agent.models.usage import add_usage, cost_usd_est, normalize_usage, token_usage
 
 PRICE = Price(input_per_mtok=2.0, output_per_mtok=10.0, cache_read_per_mtok=0.1,
-              cache_write_per_mtok=2.5, as_of="2026-11-27")
+              cache_write_per_mtok=2.5, as_of=date(2026, 11, 27))
 
 
 def test_langchain_shape_anthropic_cache_fields():
@@ -73,7 +75,7 @@ def test_cost_splits_cached_from_fresh_input():
 
 
 def test_cost_without_cache_prices_bills_cache_at_input_rate():
-    p = Price(input_per_mtok=1.0, output_per_mtok=2.0, as_of="2026-11-27")
+    p = Price(input_per_mtok=1.0, output_per_mtok=2.0, as_of=date(2026, 11, 27))
     assert cost_usd_est(token_usage(1000, 100, 600, 0), p) == pytest.approx((1000 * 1.0 + 100 * 2.0) / 1e6)
 
 
