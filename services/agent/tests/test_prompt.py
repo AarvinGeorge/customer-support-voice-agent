@@ -64,3 +64,9 @@ def test_pending_summary_is_escaped_inside_turn_context():
 def test_turn_message_is_deterministic():
     ctx = TurnContext(mode="chat", verified=True, context_snapshot={"b": 1, "a": 2})
     assert build_turn_message("q", ctx).content == build_turn_message("q", ctx).content
+
+
+def test_system_prompt_forbids_advice_the_article_does_not_state():
+    # Browser pass 2b (S1 follow-up): the draft added "if it hasn't appeared after a reasonable wait, your bank is
+    # the best place to check", which no article says, and Gate 2 replaced the whole answer with the clarify line.
+    assert "Do not add tips, advice or next steps of your own" in SYSTEM_PROMPT
