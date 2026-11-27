@@ -2,9 +2,10 @@
 print Gate 1 counts, write the dated report and exit 0 only when every graded case passed.
 Use when: a measured run is wanted (against a running stack, or against a test double in CI).
 Inputs: flags below and env DEMO_ACCESS_CODE, EVALS_AGENT_URL (default http://localhost:3000), EVALS_KNOWLEDGE_URL,
-KNOWLEDGE_TOKEN_AGENT, EVALS_CORE_DB_URL or CORE_DB_URL, EVALS_AGENT_DB_URL or AGENT_DB_URL, EVALS_RESEED_CMD,
-EVALS_FIXTURE_INGEST_CMD and EVALS_FIXTURE_REMOVE_CMD (templates with {path}). Output: report files, a summary on stdout.
-Side effects: HTTP, Postgres SELECTs, reseed subprocesses, files. Role: single entry point (doc 09 s5 CS-E-06.S1.T1).
+KNOWLEDGE_TOKEN_AGENT, EVALS_CORE_DB_URL or CORE_DB_URL, EVALS_AGENT_DB_URL or AGENT_DB_URL, COMPOSE_PROJECT_NAME and
+DEMO_FAULTS_ENABLED=true (the reseed guard, evals.reseed), EVALS_FIXTURE_INGEST_CMD and EVALS_FIXTURE_REMOVE_CMD
+(templates with {path}). Output: report files, a summary on stdout.
+Side effects: HTTP, Postgres SELECTs, guarded reseed subprocesses (one per case, pinned to the stack under test), files. Role: single entry point (doc 09 s5 CS-E-06.S1.T1).
 Exit codes: 0 all passed, 1 some case not passed, 2 usage or configuration problem (nothing was run)."""
 from __future__ import annotations
 
@@ -22,10 +23,9 @@ from contracts.policy import load_policy
 from . import gate1, report, runner
 from .agent_client import AgentClient, AgentError
 from .cases import ROOT, DatasetError, load_cases, load_personas, load_retrieval
+from . import reseed
 from .hooks import make_hooks
 from .store import PgStore
-
-DEFAULT_RESEED = "docker compose --profile seed run --rm -e DEMO_RESEED=true seed_core python -m core.seeds --reseed"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -70,16 +70,29 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
     agent_url = args.agent_url or e.get("EVALS_AGENT_URL", "http://localhost:3000")
     if agent_http is None:
         agent_http = httpx.Client(base_url=agent_url, timeout=httpx.Timeout(90.0, connect=10.0))
-    if store is None:
-        core_db = e.get("EVALS_CORE_DB_URL") or e.get("CORE_DB_URL")
-        agent_db = e.get("EVALS_AGENT_DB_URL") or e.get("AGENT_DB_URL")
+    core_db = e.get("EVALS_CORE_DB_URL") or e.get("CORE_DB_URL")
+    agent_db = e.get("EVALS_AGENT_DB_URL") or e.get("AGENT_DB_URL")
+    if store is None or before_case is None:
         if not core_db or not agent_db:
             print("CORE_DB_URL and AGENT_DB_URL (or the EVALS_ overrides) are required to read rows and turn_events", file=sys.stderr)
             return 2
+    if store is None:
+        assert core_db and agent_db
         store = PgStore(core_db, agent_db)
     if before_case is None:
-        before_case, after_case = make_hooks(e.get("EVALS_RESEED_CMD", DEFAULT_RESEED), e.get("EVALS_FIXTURE_INGEST_CMD"),
-                                             e.get("EVALS_FIXTURE_REMOVE_CMD"))
+        assert core_db
+        try:
+            reseed.reseed_command(e, agent_url, ROOT)  # refuse up front, before any turn or truncate
+        except reseed.ReseedRefused as ex:
+            print(f"refusing to reseed: {ex}", file=sys.stderr)
+            return 2
+        db = core_db
+
+        def guarded() -> None:
+            """What: the shared guarded reseed for this stack. Use when: before each case. Inputs: none. Output: none.
+            Side effects: see evals.reseed.guarded_reseed. Role: one guard for the CLI and the e2e tests."""
+            reseed.guarded_reseed(e, agent_url, db, ROOT)
+        before_case, after_case = make_hooks(guarded, e.get("EVALS_FIXTURE_INGEST_CMD"), e.get("EVALS_FIXTURE_REMOVE_CMD"))
     if search is None and not args.skip_gate1:
         k_url, k_tok = args.knowledge_url or e.get("EVALS_KNOWLEDGE_URL"), e.get("KNOWLEDGE_TOKEN_AGENT")
         if not k_url or not k_tok:

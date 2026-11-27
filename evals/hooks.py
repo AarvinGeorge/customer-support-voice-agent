@@ -1,6 +1,7 @@
 """What: the per-case hooks that prepare and clean the stack: reseed core (the DEMO_RESEED CLI) and, for cases that carry
 test-only fixture articles, ingest and remove them.
-Use when: the runner starts and ends a case. Inputs: shell command strings (shlex-split, no shell), run function.
+Use when: the runner starts and ends a case. Inputs: the reseed (a callable, the golden CLI's guarded reseed, or a
+command string), fixture command strings (shlex-split, no shell), run function.
 Output: two callables (before, after). Side effects: runs the given commands. Role: a case with fixtures and no ingest command is
 a HookError (the case would otherwise pass without its attack in play); a non-zero exit is a HookError too."""
 from __future__ import annotations
@@ -11,6 +12,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .reseed import ReseedError
+
 GOLDEN = Path(__file__).resolve().parent / "golden"
 
 
@@ -19,9 +22,11 @@ class HookError(Exception):
     Output: exception. Side effects: none. Role: the case grades error."""
 
 
-def make_hooks(reseed_cmd: str, ingest_cmd: str | None, remove_cmd: str | None, run: Callable[..., Any] = subprocess.run
+def make_hooks(reseed_cmd: str | Callable[[], None], ingest_cmd: str | None, remove_cmd: str | None,
+               run: Callable[..., Any] = subprocess.run
                ) -> tuple[Callable[[dict[str, Any]], None], Callable[[dict[str, Any]], None]]:
-    """What: build the before and after case hooks. Use when: the CLI assembles a run. Inputs: reseed command, ingest command
+    """What: build the before and after case hooks. Use when: the CLI assembles a run. Inputs: reseed (a callable such
+    as evals.reseed.guarded_reseed bound to the stack, whose ReseedError becomes a HookError, or a command), ingest command
     template with {path}, remove command template with {path}, a subprocess runner. Output: (before, after).
     Side effects: the hooks run subprocesses. Role: stack preparation per case."""
 
@@ -40,7 +45,13 @@ def make_hooks(reseed_cmd: str, ingest_cmd: str | None, remove_cmd: str | None, 
 
     def before(case: dict[str, Any]) -> None:
         """What: reseed core then ingest the case's fixtures. Use when: a case is about to run. Inputs: case. Output: none. Side effects: runs the reseed and ingest commands. Role: clean state per case."""
-        call(reseed_cmd, "reseed")
+        if callable(reseed_cmd):
+            try:
+                reseed_cmd()
+            except ReseedError as e:
+                raise HookError(f"reseed: {e}") from e
+        else:
+            call(reseed_cmd, "reseed")
         paths = fixture_paths(case)
         if paths and not ingest_cmd:
             raise HookError(f"{case['id']} needs test-only fixture articles but no fixture ingest command is configured")

@@ -12,7 +12,7 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
-from evals import cli, gate1, report
+from evals import cli, gate1, report, reseed
 from evals.agent_client import AgentClient
 from evals.cases import load_cases, load_personas, load_retrieval
 from evals.model import CaseGrade, Check
@@ -199,5 +199,33 @@ def test_knowledge_client_non_json_200_is_search_failed() -> None:
 
 
 def test_default_reseed_uses_the_seed_core_job_that_holds_the_owner_url() -> None:
-    assert "seed_core" in cli.DEFAULT_RESEED and "--profile seed" in cli.DEFAULT_RESEED and " exec " not in cli.DEFAULT_RESEED
-    assert "DEMO_RESEED=true" in cli.DEFAULT_RESEED
+    args = " ".join(reseed.RESEED_ARGS)
+    assert "seed_core" in args and "--profile seed" in args and " exec " not in args and "DEMO_RESEED=true" in args
+
+
+LIVE_ENV = {**ENV, "CORE_DB_URL": "postgresql://core", "AGENT_DB_URL": "postgresql://agent"}
+
+
+def test_cli_refuses_an_unguarded_reseed_target_before_running_anything(tmp_path: Path) -> None:
+    """What: with the real hooks and no COMPOSE_PROJECT_NAME, the CLI exits 2 and writes nothing.
+    Use when: CI. Inputs: tmp dir. Output: none. Side effects: none. Role: PR #60 follow-up (DEFAULT_RESEED had no guard)."""
+    _w, deps = make_deps()
+    del deps["before_case"], deps["after_case"]
+    assert cli.main(["run", "--skip-gate1", "--out-dir", str(tmp_path)], LIVE_ENV, **deps) == 2
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_reseeds_each_case_through_the_shared_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What: the default before-case hook calls reseed.guarded_reseed with the env, agent URL and core DB, once per case,
+    after one up-front reseed_command check. Use when: CI. Inputs: tmp dir, monkeypatch. Output: none. Side effects: none.
+    Role: one guard, no second copy."""
+    _w, deps = make_deps()
+    del deps["before_case"], deps["after_case"]
+    checks: list[str] = []
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(reseed, "reseed_command", lambda env, url, root, run=None: checks.append(url) or ["x"])
+    monkeypatch.setattr(reseed, "guarded_reseed", lambda env, url, core_db, root, **k: seen.append((url, core_db)))
+    env = {**LIVE_ENV, "EVALS_AGENT_URL": "http://localhost:3095"}
+    cli.main(["run", "--cases", "G-01,G-02", "--skip-gate1", "--out-dir", str(tmp_path)], env, **deps)
+    assert checks == ["http://localhost:3095"]
+    assert seen == [("http://localhost:3095", "postgresql://core")] * 2
