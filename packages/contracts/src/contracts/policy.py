@@ -22,7 +22,6 @@ from pydantic import (AfterValidator, BaseModel, ConfigDict, PositiveInt, Valida
                       field_validator, model_validator)
 
 from contracts.core_api import ContractStatus, Role, TicketCategory
-from contracts.core_api import Tier as TierName
 from contracts.reason_codes import ReasonCode
 
 APPROVAL_QUESTION = "Shall I send this to our team for approval?"
@@ -43,8 +42,8 @@ class _FrozenDict(dict):
         Output: never returns. Side effects: raises TypeError. Role: immutability guard."""
         raise TypeError("policy config is read-only")
 
-    __setitem__ = __delitem__ = update = pop = popitem = clear = setdefault = _blocked
-    __ior__ = _blocked
+    __setitem__ = __delitem__ = update = pop = popitem = clear = setdefault = _blocked  # pyright: ignore[reportAssignmentType]  # blocked mutators are looser than dict signatures on purpose
+    __ior__ = _blocked  # pyright: ignore[reportAssignmentType]
 
     def __reduce__(self):  # type: ignore[no-untyped-def]
         """What: rebuild through the constructor. Use when: copy or deepcopy runs. Inputs: none.
@@ -345,7 +344,7 @@ def policy_version(path: Path | str | None = None) -> str:
     Output: str. Side effects: reads a file. Role: detects any change to the file, even one byte."""
     p = Path(path) if path else default_path()
     data = p.read_bytes()
-    label = _parse(data).get("version_label", "unlabelled")
+    label = _parse(data).get("version_label", "unlabelled")  # pyright: ignore[reportAttributeAccessIssue]
     return f"{label}+{hashlib.sha256(data).hexdigest()[:12]}"
 
 
@@ -382,7 +381,7 @@ def render_placeholder(cfg: PolicyConfig, expr: str) -> str:
     if fmt in ("dollars", "days") and (isinstance(node, bool) or not isinstance(node, int)):
         raise PolicyError(f"|{fmt} needs an integer value: {key}")
     if fmt == "dollars":
-        return f"${int(node) // 100:,}" if int(node) % 100 == 0 else f"${int(node) / 100:,.2f}"
+        return f"${int(node) // 100:,}" if int(node) % 100 == 0 else f"${int(node) / 100:,.2f}"  # pyright: ignore[reportArgumentType]
     if fmt == "days":
         return f"{node} days"
     if fmt:
