@@ -15,8 +15,8 @@ from fastapi import FastAPI, Request
 
 from agent.access import owned_session
 from agent.ingress import Ingress, IngressError, IngressInput, input_kind_of, parse_turn_request, to_response
-from agent.limits.ratelimit import canonical_sid, turn_counter
 from agent.middleware.deadline_fault import demo_fault_from_header
+from agent.limits.ratelimit import canonical_sid, turn_counter
 from agent.web import error_response
 
 

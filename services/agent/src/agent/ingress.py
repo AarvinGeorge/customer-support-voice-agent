@@ -11,14 +11,14 @@ Role: plain code before and after the model (doc 07 s2.4). Voice (CS-E-05.S3.T2)
 session match and expiry) runs in the voice/ask route (agent.voice). Step 9a (PIN scan and the typed-PIN refusal,
 CS-E-03.S7.T9) runs first in the turn task, through agent.pin_guard. Not here yet, by plan: rate limits
 (CS-E-07.S2.T1), admission semaphore (designed only), repair and memory
-(CS-E-03.S7.T5), structured input (CS-E-03.S7.T8), tickets on the deadline and limit paths (CS-E-03.S4.T1).
+(CS-E-03.S7.T5), structured input (CS-E-03.S7.T8). Tickets on the deadline and limit paths live in the body
+(agent.turn_body, agent.escalation, CS-E-03.S4.T1); ingress keeps only a hard net at the full deadline.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -37,13 +37,13 @@ from pydantic import ValidationError
 from agent.deadline import TurnBudgetExhausted
 from agent.pin_guard import refuse_without_thread, scan_input, session_redact_context
 from agent.sse import TurnMeta, TurnOutcome, TurnStream, start_turn
-from agent.turn_control import TurnControl, bind_turn_control
+from agent.turn_control import TurnControl, bind_turn_control, loop_clock
 
 log = logging.getLogger("agent.ingress")
 
 CAP_LINE = ("This conversation is getting long. Please start a new conversation; your tickets and account "
             "history are kept.")
-# doc 07 fixture edge_turns e3 error body; the deadline ticket and its line arrive with CS-E-03.S4.T1.
+# doc 07 fixture edge_turns e3 error body (hard net only; the deadline ticket and line are in agent.escalation).
 DEADLINE_MESSAGE = "I couldn't finish that in time."
 TURN_DEADLINE_S = {"chat": limits.CHAT_TURN_DEADLINE_S, "voice": limits.VOICE_TURN_DEADLINE_S}
 # A swept turn (its process died mid-turn) replays as a failed, retryable deadline (doc 07 s2.4 step 4, s8.1).
@@ -187,6 +187,7 @@ class IngressInput:
     body: Any = None
     demo_fault: str | None = None  # already gated by demo_fault_from_header (doc 07 s10), request-scoped
     merged_transcript: str | None = None
+    later_user_item: bool | None = None  # step 12: a client user item was merged; None = unknown (fail closed)
     redact_context: RedactContext | None = None
     count_turn: Callable[[], Awaitable[IngressError | None]] | None = None  # rate-limit hook, called at step 9
 
@@ -215,8 +216,19 @@ class IngressStream:
     task: asyncio.Task[TurnOutcome] | None
 
 
+@dataclass(frozen=True)
+class MergeResult:
+    """What: a step 12 merge outcome: the wrapped text (or None) and whether a client user item was claimed,
+    decided from the rows before any display truncation. Use when: a MergeTranscript that knows its rows
+    (agent.voice.TranscriptMerger). Inputs: text, later_user_item. Output: value. Side effects: none.
+    Role: lets the voice yes rule (doc 07 s7.3) read data, not display text (review PR #56 I2, M1)."""
+
+    text: str | None
+    later_user_item: bool
+
+
 AgentBody = Callable[[TurnStream, IngressInput, TurnRow], Awaitable[TurnOutcome]]
-MergeTranscript = Callable[[IngressInput, TurnRow], Awaitable[str | None]]
+MergeTranscript = Callable[[IngressInput, TurnRow], Awaitable["str | MergeResult | None"]]
 
 
 def parse_turn_request(raw: Any) -> TurnRequest | IngressError:
@@ -353,7 +365,9 @@ class Ingress:
         """What: step 12: claim unmerged client transcript items for this turn; a failure is logged and the turn
         goes on without them (they stay unmerged for the next turn only if the claim did not commit).
         Use when: the turn task, before the agent loop. Inputs: input, turn row.
-        Output: the input with merged_transcript set. Side effects: transcript_items UPDATE. Role: helper."""
+        Output: the input with merged_transcript set, and later_user_item when the merger reports it (a missing
+        merger, a failure or a plain-text result leave it None: unknown). Side effects: transcript_items UPDATE.
+        Role: helper."""
         if self.merge_transcript is None:
             return inp
         try:
@@ -362,6 +376,8 @@ class Ingress:
             log.warning("transcript merge failed session_id=%s turn_id=%s", inp.session_id, row.turn_id,
                         exc_info=True)
             merged = None
+        if isinstance(merged, MergeResult):
+            return replace(inp, merged_transcript=merged.text, later_user_item=merged.later_user_item)
         return replace(inp, merged_transcript=merged)
 
     async def _find(self, inp: IngressInput) -> TurnRow | None:
@@ -388,21 +404,24 @@ class Ingress:
         await self.store.count_turn(inp.session_id)
         stream = TurnStream(TurnMeta(inp.session_id, row.turn_id, inp.mode, self.served_by, inp.input_kind),
                             sink=self.trajectory.add if self.trajectory is not None else None)  # doc 07 s12 turn_events
-        loop_budget = max(budget - self.reserve_s, 0.0)  # the reserve is kept for the escalation ticket
-        deadline_mono = time.monotonic() + budget  # TurnControl.deadline: clamps take the reserve off this
+        # The hard net is the whole deadline: the body itself (TurnRunner) stops its agent loop 3 s early and spends the
+        # reserve on the escalation ticket (CS-E-03.S4.T1); cutting the body at deadline - 3 s here would cancel that
+        # ticket. self.reserve_s is kept for callers; the body owns the reserve.
+        hard_net = budget
+        deadline_mono = loop_clock() + budget  # TurnControl.deadline: clamps take the reserve off this
 
         async def body(s: TurnStream) -> TurnOutcome:
             """What: the agent loop under asyncio.timeout, with the turn's one TurnControl bound (deadline = the 45 s
             or 20 s turn deadline, so every clamp subtracts the 3 s reserve from it; the request's demo fault).
             Step 9a runs first: the PIN scan (only redacted text travels further) and the typed-PIN refusal.
             Use when: the turn task. Inputs: stream.
-            Output: outcome (deadline outcome on timeout or on a call skipped by the clamp). Side effects: model
+            Output: outcome (deadline outcome, no ticket, on the hard net or on a call skipped by the clamp). Side effects: model
             and tools; binds TURN_CONTROL in this task. Role: steps 9a to 14; doc 07 s8.2 deadline path."""
             scanned = scan_input(inp, session_redact_context(session))  # step 9a
             control = TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
                                   deadline=deadline_mono, demo_fault=inp.demo_fault, events=s)
             bind_turn_control(control)  # the turn task's own context; the only .set() (spike 15)
-            cm = asyncio.timeout(loop_budget)
+            cm = asyncio.timeout(hard_net)
             try:
                 async with cm:
                     if scanned.refuse:

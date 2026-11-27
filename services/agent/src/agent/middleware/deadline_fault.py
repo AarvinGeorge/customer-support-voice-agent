@@ -6,7 +6,8 @@ route reads X-Demo-Fault through demo_fault_from_header and puts the result on I
 Inputs: the model request and handler; TurnControl bound for the turn (deadline, demo_fault, events).
 Output: DeadlineAndFaultMiddleware, model_retry_on, fallback_reason, rate_limit_error_for, demo_fault_from_header,
 fault_run_metadata, FAULT_VALUES.
-Side effects: mutates TurnControl (attempt_role, model_attempts, primary_error, fallback_used, fault_fired); emits
+Side effects: mutates TurnControl (attempt_role, model_attempts, primary_error, fallback_used, fallback_unfinished,
+fault_fired); emits
 model.fallback; logs fault_header_ignored.
 Role: every model attempt is clamped to min(10 s, remaining - 3 s) and skipped below 2 s; the fallback is labelled
 so the predicate never retries it (spike 16); a 429, spend cap, auth or 400 is not retried, so it goes straight to
@@ -202,8 +203,13 @@ class DeadlineAndFaultMiddleware(AgentMiddleware):
                 control.events.emit("model.fallback", from_model=control.primary_model or "unknown",
                                     to_model=model_name_of(request.model), reason=fallback_reason(control.primary_error))
         control.model_attempts += 1
+        if fallback:
+            control.fallback_unfinished = True  # cleared only on success: a cut attempt (cancelled) stays unfinished
         try:
-            return await asyncio.wait_for(handler(request), timeout)
+            response = await asyncio.wait_for(handler(request), timeout)
+            if fallback:
+                control.fallback_unfinished = False
+            return response
         except (TimeoutError, asyncio.TimeoutError) as exc:
             err = ModelAttemptTimeout(f"model attempt exceeded {timeout:.1f} s")
             if not fallback:
