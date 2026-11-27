@@ -39,7 +39,7 @@ export async function listPersonas(deps: ApiDeps = {}): Promise<Persona[]> {
 
 /**
  * What: POST /api/sessions with an empty body.
- * Use when: the visitor presses Start on a persona row.
+ * Use when: the console opens without a session, or New conversation is pressed.
  * Inputs: deps.
  * Output: SessionCreated {session_id, created_at}.
  * Side effects: network request; the agent creates a session bound to this visitor.
@@ -63,13 +63,28 @@ export async function getMe(deps: ApiDeps = {}): Promise<Me> {
 }
 
 /**
- * What: the console URL for a session.
- * Use when: navigating after createSession.
- * Inputs: the session id.
- * Output: "/console?session=<id>" (id URL-encoded).
+ * What: the console URL for a session, with the optional display-only hint (D-076).
+ * Use when: navigating after createSession (the console's own start, New conversation).
+ * Inputs: the session id; the hint (a persona's account id, or null).
+ * Output: "/console?session=<id>", plus "&as=<account id>" when a hint is given (both URL-encoded).
  * Side effects: none.
- * Role: one place that fixes the console route shape.
+ * Role: one place that fixes the console route shape. The hint only pre-fills the verification
+ *   card; it is never sent to the server.
  */
-export function consolePath(sessionId: string): string {
-  return `/console?session=${encodeURIComponent(sessionId)}`;
+export function consolePath(sessionId: string, hint: string | null = null): string {
+  const base = `/console?session=${encodeURIComponent(sessionId)}`;
+  return hint === null || hint === "" ? base : `${base}&as=${encodeURIComponent(hint)}`;
+}
+
+/**
+ * What: the URL a landing Start link opens in a new tab: the console without a session (D-076).
+ * Use when: the landing page's "Start a conversation" (no hint) and each persona row's Start
+ *   (that persona's account id as the display-only hint).
+ * Inputs: the hint (account id) or null.
+ * Output: "/console" or "/console?as=<account id>".
+ * Side effects: none.
+ * Role: the console creates the fresh session itself, so every click is a new conversation.
+ */
+export function consoleStartPath(hint: string | null = null): string {
+  return hint === null || hint === "" ? "/console" : `/console?as=${encodeURIComponent(hint)}`;
 }
