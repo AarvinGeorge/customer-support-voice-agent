@@ -45,8 +45,9 @@ class CoreError(Exception):
     Role: the only way core code signals a non-2xx outcome."""
 
     def __init__(self, code: str, message: str | None = None, details: dict[str, Any] | None = None,
-                 retry_after_s: int | None = None, klass: str | None = None) -> None:
-        """What: store the error facts. Use when: raising. Inputs: see class. Output: none.
+                 retry_after_s: int | None = None, klass: str | None = None, fault_injected: bool = False) -> None:
+        """What: store the error facts. Use when: raising. Inputs: see class (fault_injected is true only for the
+        doc 07 s10 demo fault). Output: none.
         Side effects: raises KeyError for a code that is not in the contract table. Role: typo guard."""
         if code not in CORE_ERROR_CODES:
             raise KeyError(f"{code} is not a core error code in doc 07 s1.3")
@@ -56,6 +57,7 @@ class CoreError(Exception):
         self.details = details or {}
         self.retry_after_s = retry_after_s
         self.klass = klass or _CLASS[code]
+        self.fault_injected = fault_injected
 
 
 def _ids(request: Request) -> tuple[str, str]:
@@ -84,7 +86,7 @@ def core_error_response(request: Request, exc: CoreError) -> JSONResponse:
     status, retryable, changed = CORE_ERROR_CODES[exc.code]
     body = ErrorBody.model_validate({
         "class": exc.klass, "code": exc.code, "message": exc.message, "retryable": retryable, "changed": changed,
-        "retry_after_s": exc.retry_after_s, "fault_injected": False, "trace_id": _ids(request)[1] or None,
+        "retry_after_s": exc.retry_after_s, "fault_injected": exc.fault_injected, "trace_id": _ids(request)[1] or None,
         "details": exc.details})
     return envelope_response(request, status, body)
 
