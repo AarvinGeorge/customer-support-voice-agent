@@ -22,7 +22,7 @@ class ConfirmInput(StrictModel):
 
     pending_action_id: str = Field(pattern=PENDING_ID_PATTERN)
     decision: Literal["confirm", "cancel"]
-    step_up_pin: str | None = Field(default=None, pattern=r"^\d{4}$")
+    step_up_pin: str | None = Field(default=None, pattern=r"^[0-9]{4}$")
 
 
 class VerificationInput(StrictModel):
@@ -30,7 +30,7 @@ class VerificationInput(StrictModel):
     Inputs: account_id, pin. Output: model. Side effects: none. Role: doc 07 s2.3."""
 
     account_id: str = Field(min_length=1, max_length=20)
-    pin: str = Field(pattern=r"^\d{4}$")
+    pin: str = Field(pattern=r"^[0-9]{4}$")
 
 
 class TicketOffer(StrictModel):

@@ -12,7 +12,7 @@ from contracts.base import StrictModel
 
 SearchTier = Literal["public", "free", "pro", "business", "enterprise"]
 Verdict = Literal["pass", "weak", "none", "error", "uncalibrated"]
-ERROR_CODE_PATTERN = r"^E-[A-Z]+-\d{3}$"
+ERROR_CODE_PATTERN = r"^E-[A-Z]+-[0-9]{3}$"
 
 
 class SearchRequest(StrictModel):

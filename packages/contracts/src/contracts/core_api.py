@@ -25,8 +25,8 @@ TicketCategory = Literal["billing", "refund", "access", "sso", "integration", "b
                          "commitment", "human_requested", "other"]
 
 PENDING_ID_PATTERN = r"^PA-[0-9A-F]{8}$"
-CHARGE_ID_PATTERN = r"^CH-\d{8}$"
-TICKET_ID_PATTERN = r"^TCK-\d{8}$"
+CHARGE_ID_PATTERN = r"^CH-[0-9]{8}$"
+TICKET_ID_PATTERN = r"^TCK-[0-9]{8}$"
 
 
 class Permissions(StrictModel):
@@ -75,7 +75,7 @@ class VerifyRequest(StrictModel):
     Role: doc 07 s3.1 (no tool calls this; the PIN never reaches the model)."""
 
     account_id: str = Field(min_length=1, max_length=20)
-    pin: str = Field(pattern=r"^\d{4}$")
+    pin: str = Field(pattern=r"^[0-9]{4}$")
 
 
 class Profile(StrictModel):
@@ -125,7 +125,7 @@ class TicketRef(StrictModel):
     Output: model. Side effects: none. Role: doc 07 s3.2 TicketRef (format TCK-26118213, short 8213)."""
 
     ticket_id: str = Field(pattern=TICKET_ID_PATTERN)
-    short_id: str = Field(pattern=r"^\d{4}$")
+    short_id: str = Field(pattern=r"^[0-9]{4}$")
     display: str
     stage: TicketStage
     priority: Literal["P1", "P2", "P3", "P4"]
@@ -222,7 +222,7 @@ class ChargeRefEnding(StrictModel):
     Use when: prepare_refund had ending and maybe on. Inputs: ending, on.
     Output: model. Side effects: none. Role: doc 07 s3.3 charge_ref variant."""
 
-    ending: str = Field(pattern=r"^\d{4}$")
+    ending: str = Field(pattern=r"^[0-9]{4}$")
     on: str | None = None
 
 

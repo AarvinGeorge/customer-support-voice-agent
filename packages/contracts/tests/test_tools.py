@@ -90,3 +90,12 @@ def test_ask_support_agent_matches_doc():
     FunctionCallOutput.model_validate({"say": "Done.", "escalated": False})
     with pytest.raises(ValidationError):
         FunctionCallOutput.model_validate({"say": "x", "escalated": False, "awaiting": "pin"})
+
+
+def test_parameters_carry_no_descriptor_docstring():
+    """What: the root of each parameters schema has no description (the D-015 docstring must not
+    reach the model; review PR4 Minor 2). Use when: CI. Inputs: none. Output: assertion.
+    Side effects: none. Role: prompt hygiene."""
+    for spec in tool_schemas():
+        assert "description" not in spec["parameters"], spec["name"]
+        assert "Side effects" not in str(spec["parameters"]), spec["name"]

@@ -65,3 +65,12 @@ def test_voice_ask_requires_flags():
     del bad["transcript_final"]
     with pytest.raises(ValidationError):
         VoiceAskRequest.model_validate(bad)
+
+
+def test_pin_rejects_non_ascii_digits():
+    """What: Arabic-Indic digits are not a PIN (review PR4 Minor 1). Use when: CI. Inputs: none.
+    Output: assertion. Side effects: none. Role: ASCII digit guard."""
+    from contracts.agent_api import VerificationInput
+
+    with pytest.raises(ValidationError):
+        VerificationInput.model_validate({"account_id": "QS-10423", "pin": "٤٨٢١"})

@@ -239,7 +239,7 @@ export interface CoreReady {
 export interface CreateTicketArgs {
   category: "billing" | "refund" | "access" | "sso" | "integration" | "bug" | "account_change" | "commitment" | "human_requested" | "other";
   summary: string;
-  steps_tried?: Array<string>;
+  steps_tried: Array<string>;
   blocking?: boolean;
 }
 

@@ -55,3 +55,23 @@ def test_core_error_table_spot_checks():
     assert CORE_ERROR_CODES["INTERNAL"] == (500, True, None)
     assert CORE_ERROR_CODES["PENDING_EXPIRED"] == (410, False, False)
     assert CORE_ERROR_CODES["VERIFY_LOCKED"] == (423, False, False)
+
+
+def test_default_dump_uses_wire_name_class():
+    """What: model_dump and model_dump_json without by_alias emit "class" (review PR4 I2).
+    Use when: CI. Inputs: none. Output: assertion. Side effects: none. Role: wire-name guard."""
+    import json
+
+    b = ErrorBody.model_validate(_body())
+    assert "class" in b.model_dump() and "class_" not in b.model_dump()
+    assert json.loads(b.model_dump_json())["class"] == "core_unavailable"
+    assert "class_" not in b.model_dump_json()
+
+
+def test_wire_key_class_underscore_rejected():
+    """What: a body with "class_" instead of "class" fails validation (no silent round trip).
+    Use when: CI. Inputs: none. Output: assertion. Side effects: none. Role: wire-name guard."""
+    bad = _body()
+    bad["class_"] = bad.pop("class")
+    with pytest.raises(ValidationError):
+        ErrorBody.model_validate(bad)

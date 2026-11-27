@@ -23,7 +23,7 @@ class ErrorBody(StrictModel):
     """What: the body of every error (JSON key "class" maps to class_).
     Use when: building or parsing an error response or an SSE error event.
     Inputs: class, code, message, retryable, changed, retry_after_s, fault_injected, trace_id, details.
-    Output: validated error body; dump with by_alias=True to get the "class" key.
+    Output: validated error body; every dump emits the "class" key (input must use "class").
     Side effects: none.
     Role: doc 07 s1.3 ErrorBody. changed: false proven no effect, true applied, null unknown."""
 

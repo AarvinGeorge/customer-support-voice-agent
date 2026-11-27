@@ -43,7 +43,7 @@ class ListChargesArgs(StrictModel):
     """What: arguments of list_charges. Use when: a billing role asks about charges.
     Inputs: ending, on, since_days. Output: model. Side effects: none. Role: doc 07 s5.1 row 4."""
 
-    ending: str | None = Field(default=None, pattern=r"^\d{4}$")
+    ending: str | None = Field(default=None, pattern=r"^[0-9]{4}$")
     on: date | None = None
     since_days: int = Field(default=90, ge=1, le=400)
 
@@ -53,7 +53,7 @@ class ListTicketsArgs(StrictModel):
     Inputs: status, ending. Output: model. Side effects: none. Role: doc 07 s5.1 row 5."""
 
     status: Literal["open", "all"] = "open"
-    ending: str | None = Field(default=None, pattern=r"^\d{4}$")
+    ending: str | None = Field(default=None, pattern=r"^[0-9]{4}$")
 
 
 class PrepareRefundArgs(StrictModel):
@@ -62,7 +62,7 @@ class PrepareRefundArgs(StrictModel):
     Role: doc 07 s5.1 row 6 (the wrapper builds charge_ref; core decides; nothing is changed)."""
 
     charge_id: str | None = Field(default=None, pattern=CHARGE_ID_PATTERN)
-    ending: str | None = Field(default=None, pattern=r"^\d{4}$")
+    ending: str | None = Field(default=None, pattern=r"^[0-9]{4}$")
     on: date | None = None
     reason: RefundReason
     note: str = Field(max_length=300)
@@ -75,7 +75,7 @@ class CreateTicketArgs(StrictModel):
 
     category: TicketCategory
     summary: str = Field(min_length=1, max_length=500)
-    steps_tried: list[Annotated[str, Field(max_length=200)]] = Field(default_factory=list, max_length=8)
+    steps_tried: list[Annotated[str, Field(max_length=200)]] = Field(max_length=8)
     blocking: bool = False
 
 
@@ -147,6 +147,7 @@ def strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
     schema = copy.deepcopy(model.model_json_schema())
     if "$defs" in schema:
         raise ValueError(f"{model.__name__}: nested models are not supported in tool args")
+    schema.pop("description", None)  # the D-015 docstring must not reach the model
     return _strictify(schema)
 
 
