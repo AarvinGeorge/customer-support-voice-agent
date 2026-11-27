@@ -347,7 +347,7 @@ export function ConversationLog({
     <div role="log" aria-label="Conversation" aria-live="off" className="flex flex-col gap-7">
       {thread.map((item, i) => {
         if (item.kind === "user") return <UserMessage key={item.id} text={item.text} mode={item.mode} />;
-        if (item.kind === "error") return <SendError key={item.id} item={item} onRetry={onRetry} />;
+        if (item.kind === "error") return <SendError key={item.id} item={item} onRetry={cards.disabled ? undefined : onRetry} />;
         const turn = turns[item.turnId];
         const prev = thread[i - 1];
         const typed = prev?.kind === "user" && prev.mode === "chat" ? prev.text : null;

@@ -191,6 +191,110 @@ describe("429 and 503 banners", () => {
   });
 });
 
+describe("a refused message is never lost (fix round 1, I1)", () => {
+  it("typed while in flight: the refused text shows as a draft chip and Restore keeps both", async () => {
+    let release: (r: Response) => void = () => undefined;
+    const refusal = errorFetch(503, "BUSY", "admission_rejected", 3);
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((res) => (release = res))));
+    render(<ConsoleShell sessionId={SID} store={createTurnStore()} />);
+    typeAndSend("FIRST message");
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "second" } });
+    await act(async () => release(await refusal()));
+    const chip = await screen.findByRole("group", { name: "Message not sent" });
+    expect(within(chip).getByText("FIRST message")).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("second");
+    fireEvent.click(within(chip).getByRole("button", { name: "Restore" }));
+    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("FIRST message\nsecond");
+    expect(screen.queryByRole("group", { name: "Message not sent" })).toBeNull();
+  });
+
+  it("Retry from an older row while the field holds text: the retried text lands in the chip", async () => {
+    const fail = vi.fn(async () => new Response(JSON.stringify({ error: { class: "internal", code: "X", message: "boom", retryable: true, changed: false, retry_after_s: null, fault_injected: false, details: {} } }), { status: 500, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fail);
+    render(<ConsoleShell sessionId={SID} store={createTurnStore()} />);
+    typeAndSend("old");
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "hello" } });
+    vi.stubGlobal("fetch", errorFetch(429, "SESSION_TURNS", "rate_limited", 30));
+    fireEvent.click(retry);
+    const chip = await screen.findByRole("group", { name: "Message not sent" });
+    expect(within(chip).getByText("old")).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("hello");
+  });
+
+  it("an empty field gets the text back and no chip", async () => {
+    vi.stubGlobal("fetch", errorFetch(429, "SESSION_TURNS", "rate_limited", 30));
+    render(<ConsoleShell sessionId={SID} store={createTurnStore()} />);
+    typeAndSend("plain");
+    await screen.findByRole("status", { name: "Sending paused" });
+    expect(screen.queryByRole("group", { name: "Message not sent" })).toBeNull();
+    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("plain");
+  });
+});
+
+describe("the wait is announced once (fix round 1, I2)", () => {
+  /** What: text of every polite live region. Use when: announcement tests. Inputs: none. Output: strings. Side effects: none. Role: test helper. */
+  const live = () => [...document.querySelectorAll("[aria-live='polite'], [role='status']")].filter((n) => !n.closest("[aria-hidden='true']")).map((n) => {
+    const c = n.cloneNode(true) as Element;
+    c.querySelectorAll("[aria-hidden='true']").forEach((h) => h.remove());
+    return c.textContent ?? "";
+  }).join(" | ");
+
+  it("announces the wait length when the banner appears and again when sending unlocks, not every second", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.stubGlobal("fetch", errorFetch(429, "SESSION_TURNS", "rate_limited", 42));
+    render(<ConsoleShell sessionId={SID} store={createTurnStore()} />);
+    typeAndSend("hi");
+    await screen.findByRole("status", { name: "Sending paused" });
+    expect(live()).toContain("You can send again in about 42 seconds.");
+    const seen = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      await act(async () => void vi.advanceTimersByTime(1000));
+      seen.add(live());
+    }
+    expect(seen.size).toBe(1);
+    await act(async () => void vi.advanceTimersByTime(40_000));
+    expect(live()).toContain("You can send again.");
+    expect(live()).not.toContain("about 42 seconds");
+  });
+});
+
+describe("minors (fix round 1)", () => {
+  it("M1: Retry on an error row is not offered during the countdown", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { class: "internal", code: "X", message: "boom", retryable: true, changed: false, retry_after_s: null, fault_injected: false, details: {} } }), { status: 500, headers: { "content-type": "application/json" } })));
+    const store = createTurnStore();
+    render(<ConsoleShell sessionId={SID} store={store} />);
+    typeAndSend("old");
+    await screen.findByRole("button", { name: "Retry" });
+    vi.stubGlobal("fetch", errorFetch(429, "SESSION_TURNS", "rate_limited", 30));
+    typeAndSend("again");
+    await screen.findByRole("status", { name: "Sending paused" });
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("M3: a refused card press does not claim a draft is kept", async () => {
+    vi.stubGlobal("fetch", errorFetch(429, "SESSION_TURNS", "rate_limited", 30));
+    const store = createTurnStore();
+    render(<ConsoleShell sessionId={SID} store={store} />);
+    await act(async () => void store.getState().sendTurn(SID, { client_turn_id: "t1", ticket_offer: { accept: true } } as never).catch(() => undefined));
+    const banner = await screen.findByRole("status", { name: "Sending paused" });
+    expect(within(banner).queryByText(/draft is kept/)).toBeNull();
+    expect(within(banner).getByText(/Try that again when the countdown ends/)).toBeTruthy();
+  });
+
+  it("M4: the first render of the countdown already shows the wait, never 0:00", async () => {
+    vi.stubGlobal("fetch", errorFetch(429, "SESSION_TURNS", "rate_limited", 42));
+    const seen: string[] = [];
+    const obs = new MutationObserver(() => seen.push(document.body.textContent ?? ""));
+    obs.observe(document.body, { subtree: true, childList: true, characterData: true });
+    render(<ConsoleShell sessionId={SID} store={createTurnStore()} />);
+    typeAndSend("hi");
+    await screen.findByRole("status", { name: "Sending paused" });
+    obs.disconnect();
+    expect(seen.some((t) => t.includes("0:00"))).toBe(false);
+  });
+});
+
 describe("Create ticket after both models were unavailable (doc 07 s6.7)", () => {
   /**
    * What: S4 with its escalation turn rewritten to a model_unavailable apology with the button.

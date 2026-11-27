@@ -28,7 +28,7 @@ const notice = (o: Partial<LimitNotice>): LimitNotice => ({
   untilMs: 1,
   limit: "10/minute",
   scope: "session",
-  draft: null,
+  draft: "hello",
   ...o,
 });
 
@@ -47,10 +47,20 @@ describe("limitWords", () => {
   });
 
   it("a 503 without a wait says try again and adds no caption", () => {
-    expect(limitWords(notice({ status: 503, code: "REDIS_UNAVAILABLE", untilMs: null, retryAfterS: null, limit: null, scope: null }))).toEqual({
+    expect(limitWords(notice({ status: 503, code: "REDIS_UNAVAILABLE", untilMs: null, retryAfterS: null, limit: null, scope: null, message: "Support is briefly unavailable." }))).toEqual({
       message: "Support is briefly unavailable. Try again in a moment; your draft is kept.",
       caption: null,
     });
+  });
+
+  it("an unknown code shows the server's own sentence (doc 07 s1.3)", () => {
+    expect(limitWords(notice({ status: 503, code: "REDIS_UNAVAILABLE", message: "Our queue is restarting." })).message).toBe(
+      "Our queue is restarting. You can send again shortly; your draft is kept.",
+    );
+  });
+
+  it("a refused press with no text does not claim a draft", () => {
+    expect(limitWords(notice({ draft: null })).message).toBe("You're sending messages quickly. Try that again when the countdown ends.");
   });
 });
 

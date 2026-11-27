@@ -9,7 +9,7 @@
  * Role: CS-E-07.S1.T4, from the Figma "Rate limit banner (our 429)" frame.
  */
 import { Clock } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { formatClock, limitWords } from "@/lib/turns/limits";
 import type { LimitNotice } from "@/lib/turns/store";
@@ -24,25 +24,23 @@ import type { LimitNotice } from "@/lib/turns/store";
  */
 export function useSecondsLeft(untilMs: number | null, onDone: () => void): number {
   const left = (now: number) => (untilMs === null ? 0 : Math.max(0, Math.ceil((untilMs - now) / 1000)));
-  const [seconds, setSeconds] = useState(() => left(Date.now()));
+  const [, setTick] = useState(0);
+  const doneRef = useRef(onDone);
+  doneRef.current = onDone;
   useEffect(() => {
-    if (untilMs === null) {
-      setSeconds(0);
-      return;
-    }
+    if (untilMs === null) return;
     const tick = () => {
-      const s = left(Date.now());
-      setSeconds(s);
-      if (s === 0) {
+      setTick((t) => t + 1);
+      if (left(Date.now()) === 0) {
         clearInterval(id);
-        onDone();
+        doneRef.current();
       }
     };
     const id = setInterval(tick, 1000);
     tick();
     return () => clearInterval(id);
   }, [untilMs]);
-  return seconds;
+  return left(Date.now());
 }
 
 /**
@@ -51,8 +49,9 @@ export function useSecondsLeft(untilMs: number | null, onDone: () => void): numb
  * Inputs: { notice, seconds } (seconds from useSecondsLeft).
  * Output: a labelled status region.
  * Side effects: none.
- * Role: the sentence is announced once (polite); the ticking clock is aria-hidden, its value
- *   is read with the label instead of every second.
+ * Role: the sentence is the banner's status text; the ticking clock is aria-hidden so it is never
+ *   read every second. The wait length and the unlock are announced once each by the console's
+ *   polite announcer (console-shell.tsx), not by this component.
  */
 export function LimitBanner({ notice, seconds }: { notice: LimitNotice; seconds: number }) {
   const { message } = limitWords(notice);

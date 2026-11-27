@@ -42,9 +42,10 @@ const SCOPE: Readonly<Record<string, string>> = Object.freeze({ session: "in thi
  * Role: copy.
  */
 export function limitWords(n: LimitNotice): { message: string; caption: string | null } {
-  const lead = LEAD[n.code] ?? (n.status === 429 ? "Too many messages for now." : "Support is briefly unavailable.");
+  const lead = LEAD[n.code] ?? (n.message.trim() !== "" ? n.message.trim() : n.status === 429 ? "Too many messages for now." : "Support is briefly unavailable.");
   const timed = n.untilMs !== null;
-  const message = `${lead} ${timed ? "You can send again shortly" : "Try again in a moment"}; your draft is kept.`;
+  const wait = timed ? "You can send again shortly" : "Try again in a moment";
+  const message = n.draft !== null ? `${lead} ${wait}; your draft is kept.` : `${lead} Try that again when ${timed ? "the countdown ends" : "you are ready"}.`;
   const parts: string[] = [];
   const m = n.limit === null ? null : /^(\d+)\/(\w+)$/.exec(n.limit);
   if (m) parts.push(`Limit: ${m[1]} messages per ${m[2]}${n.scope && SCOPE[n.scope] ? ` ${SCOPE[n.scope]}` : ""}.`);

@@ -150,7 +150,21 @@ export function ConsoleShell({
   const person = useStore(store, (s) => s.conversation.verified);
   const busy = useStore(store, (s) => s.connection.phase === "streaming");
   const limit = useStore(store, (s) => s.limit);
-  const clearLimit = useCallback(() => store.getState().clearLimit(), [store]);
+  const [limitNote, setLimitNote] = useState("");
+  const clearLimit = useCallback(() => {
+    store.getState().clearLimit();
+    setLimitNote("You can send again.");
+  }, [store]);
+  useEffect(() => {
+    if (busy) setLimitNote("");
+  }, [busy]);
+  const limitId = limit?.id ?? null;
+  const limitS = limit?.retryAfterS ?? null;
+  useEffect(() => {
+    // Announce the wait once per notice, from retry_after_s (not the ticking clock).
+    if (limitId === null) return;
+    setLimitNote(limitS !== null && limitS > 0 ? `You can send again in about ${limitS} second${limitS === 1 ? "" : "s"}.` : "Sending is paused for a moment.");
+  }, [limitId]);
   const secondsLeft = useSecondsLeft(limit?.untilMs ?? null, clearLimit);
   const locked = limit !== null && limit.untilMs !== null && limit.untilMs > Date.now() ? "Send unlocks when the countdown ends" : null;
   const inflight = useRef<AbortController | null>(null);
@@ -333,7 +347,7 @@ export function ConsoleShell({
               inspect={{ onInspect: inspect, selected: inspectorOpen ? (pickedTurnId ?? conversation.turnOrder.at(-1) ?? null) : null }}
             />
             <div role="status" aria-live="polite" className="sr-only">
-              {announcement(thread, conversation.turns)}
+              {limitNote || announcement(thread, conversation.turns)}
             </div>
           </div>
           <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
