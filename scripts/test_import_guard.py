@@ -63,6 +63,85 @@ def test_commit_client_outside_tools_is_allowed(tmp_path: Path) -> None:
     assert guard.find_violations(tmp_path) == []
 
 
+def _bad(tmp_path: Path, body: str, name: str = "t.py") -> list[str]:
+    """What: write one tool module with `body` and return the guard findings. Use when: one test per forbidden path.
+    Inputs: tmp_path, source, file name. Output: findings list. Side effects: creates files. Role: test helper."""
+    _tool(tmp_path, name, body)
+    return guard.find_violations(tmp_path)
+
+
+def test_ingress_confirm_module_fails(tmp_path: Path) -> None:
+    """What: doc 07 s1.4 commit code `agent.ingress.confirm` is forbidden to tools (from-import of a name).
+    Use when: pytest. Inputs: tmp_path. Output: assert. Side effects: none. Role: ingress path, absolute."""
+    assert len(_bad(tmp_path, "from agent.ingress.confirm import commit_action\n")) == 1
+
+
+def test_ingress_package_then_confirm_name_fails(tmp_path: Path) -> None:
+    """What: `from agent.ingress import confirm` resolves to the same module and is caught.
+    Use when: pytest. Inputs: tmp_path. Output: assert. Side effects: none. Role: ingress path, name form."""
+    assert len(_bad(tmp_path, "from agent.ingress import confirm\n")) == 1
+
+
+def test_relative_ingress_import_fails(tmp_path: Path) -> None:
+    """What: `from ..ingress import confirm` and `from ..ingress.confirm import x` resolve against the file's package.
+    Use when: pytest. Inputs: tmp_path. Output: assert. Side effects: none. Role: ingress path, relative."""
+    assert len(_bad(tmp_path, "from ..ingress import confirm\n")) == 1
+    assert len(_bad(tmp_path, "from ..ingress.confirm import x\n", "u.py")) == 1 + 1  # t.py and u.py both now violate
+
+
+def test_services_prefixed_path_fails(tmp_path: Path) -> None:
+    """What: the doc form `services.agent.ingress.confirm` is caught. Use when: pytest. Inputs: tmp_path.
+    Output: assert. Side effects: none. Role: ingress path, prefixed."""
+    assert len(_bad(tmp_path, "import services.agent.ingress.confirm\n")) == 1
+
+
+def test_ops_router_fails(tmp_path: Path) -> None:
+    """What: `from agent.ops import router` and `import agent.ops.routes` are caught. Use when: pytest.
+    Inputs: tmp_path. Output: assert. Side effects: none. Role: ops path."""
+    assert len(_bad(tmp_path, "from agent.ops import router\nimport agent.ops.routes\n")) == 2
+
+
+def test_commit_or_ops_token_name_fails(tmp_path: Path) -> None:
+    """What: the literal CORE_TOKEN_COMMIT or CORE_TOKEN_OPS anywhere in a tool module is a violation.
+    Use when: pytest. Inputs: tmp_path. Output: assert. Side effects: none. Role: token path."""
+    found = _bad(tmp_path, "import os\nx = os.environ['CORE_TOKEN_COMMIT']\ny = 'CORE_TOKEN_OPS'\n")
+    assert len(found) == 2
+
+
+def test_agent_token_name_is_allowed(tmp_path: Path) -> None:
+    """What: CORE_TOKEN_AGENT is the tools token and is fine. Use when: pytest. Inputs: tmp_path.
+    Output: assert. Side effects: none. Role: no false positive on the allowed token."""
+    assert _bad(tmp_path, "import os\nx = os.environ['CORE_TOKEN_AGENT']\n") == []
+
+
+def test_dynamic_import_of_forbidden_module_fails(tmp_path: Path) -> None:
+    """What: importlib.import_module and __import__ with a forbidden literal, or with a non-literal, are violations.
+    Use when: pytest. Inputs: tmp_path. Output: assert. Side effects: none. Role: dynamic import path."""
+    body = "import importlib\nimportlib.import_module('agent.clients.core_commit')\n__import__('agent.ops')\nimportlib.import_module(name)\n"
+    assert len(_bad(tmp_path, body)) == 3
+
+
+def test_flat_tools_module_is_scanned(tmp_path: Path) -> None:
+    """What: a single file `agent/tools.py` (no tools directory) is in scope. Use when: pytest. Inputs: tmp_path.
+    Output: assert. Side effects: none. Role: scope path."""
+    d = tmp_path / "services" / "agent" / "src" / "agent"
+    d.mkdir(parents=True)
+    (d / "tools.py").write_text("from agent.ops import router\n")
+    assert len(guard.find_violations(tmp_path)) == 1
+
+
+def test_devops_client_is_not_a_false_positive(tmp_path: Path) -> None:
+    """What: `devops_client` contains `ops_client` as a substring but is a different name.
+    Use when: pytest. Inputs: tmp_path. Output: assert. Side effects: none. Role: word-boundary regression."""
+    assert _bad(tmp_path, "from agent.devops_client import X\nimport operations\n") == []
+
+
+def test_camel_case_client_class_fails(tmp_path: Path) -> None:
+    """What: `from agent.clients import OpsClient` is caught by the imported class name. Use when: pytest.
+    Inputs: tmp_path. Output: assert. Side effects: none. Role: class-name path."""
+    assert len(_bad(tmp_path, "from agent.clients import OpsClient\n")) == 1
+
+
 def test_main_exit_codes(tmp_path: Path) -> None:
     """What: main returns 0 for a clean tree and 1 for a violation. Use when: pytest. Inputs: tmp_path.
     Output: assert. Side effects: prints. Role: the CI exit status."""
