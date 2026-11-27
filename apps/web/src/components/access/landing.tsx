@@ -1,24 +1,26 @@
 "use client";
 /**
- * What: the landing flow: check access, show the gate or the persona list, start a session.
+ * What: the landing flow: check access, then show the gate or the two journeys (D-076): one
+ *   "Start a conversation" link (signed out) and the persona reference sheet with a Start link per
+ *   row (signed in, display-only hint).
  * Use when: route `/` (ACCESS_GATE_PATH).
  * Inputs: none.
  * Output: one of four states: checking, gate, personas, or an unreachable-service notice.
- * Side effects: GET /api/demo/personas on mount and after a good code; POST /api/sessions on
- *   Start, then client navigation to /console?session=<id>.
+ * Side effects: GET /api/demo/personas on mount and after a good code. Start links open /console
+ *   in a new tab; the console there creates the fresh session, so this page creates none.
  * Role: CS-E-04.S1.T1 page controller (doc 07 s2.1, s2.2, s9).
  */
 import type { Persona } from "@contracts/contracts";
-import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowUpRight } from "lucide-react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 import { ThemeToggle } from "@/components/theme-toggle";
-import { Button } from "@/components/ui/button";
-import { consolePath, createSession, listPersonas } from "@/lib/api/access";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { consoleStartPath, listPersonas } from "@/lib/api/access";
 import { ApiError } from "@/lib/api/client";
 
 import { AccessGate } from "./access-gate";
-import { BrandMark, RecordingNotice, VoiceHint, formatWait, useCountdown } from "./parts";
+import { BrandMark, RecordingNotice, VoiceHint } from "./parts";
 import { PersonaList } from "./persona-list";
 
 /**
@@ -56,15 +58,10 @@ async function resolveView(): Promise<View> {
  * Role: page controller.
  */
 export function Landing() {
-  const router = useRouter();
   const [view, setView] = useState<View>({ kind: "checking" });
-  const [startingIndex, setStartingIndex] = useState<number | null>(null);
-  const [startError, setStartError] = useState<string | null>(null);
-  const startCountdown = useCountdown();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const focusHeading = useRef(false);
-  const starting = useRef(false);
-  const lastRemaining = useRef(0);
+  const startHelpId = useId();
 
   /**
    * What: loads the personas; a 401 means the visitor still needs the gate.
@@ -98,42 +95,6 @@ export function Landing() {
       headingRef.current?.focus();
     }
   }, [view.kind]);
-
-  // When a Start rate-limit countdown ends, clear its message (review PR #8 M-2).
-  useEffect(() => {
-    if (lastRemaining.current > 0 && startCountdown.remaining === 0) setStartError(null);
-    lastRemaining.current = startCountdown.remaining;
-  }, [startCountdown.remaining]);
-
-  /**
-   * What: creates a session and opens the console.
-   * Use when: a Start button is pressed.
-   * Inputs: the persona row index (only used to show "Starting" on that row).
-   * Output: none.
-   * Side effects: POST /api/sessions; navigation; on 401 returns to the gate; on 429 a countdown.
-   * Role: Start handler.
-   */
-  async function start(index: number) {
-    if (starting.current) return;
-    starting.current = true;
-    setStartingIndex(index);
-    setStartError(null);
-    try {
-      const created = await createSession();
-      router.push(consolePath(created.session_id));
-    } catch (err) {
-      starting.current = false;
-      setStartingIndex(null);
-      if (err instanceof ApiError && err.status === 401) {
-        setView({ kind: "gate" });
-      } else if (err instanceof ApiError && err.status === 429) {
-        setStartError(err.body.message);
-        startCountdown.start(err.retryAfterS ?? 60);
-      } else {
-        setStartError(err instanceof ApiError ? err.body.message : "The demo service did not answer. Try again.");
-      }
-    }
-  }
 
   if (view.kind === "checking") {
     return (
@@ -170,7 +131,6 @@ export function Landing() {
     );
   }
 
-  const limited = startCountdown.remaining > 0;
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="flex h-16 items-center justify-between border-b border-rule px-4 md:h-[129px] md:px-6">
@@ -186,24 +146,30 @@ export function Landing() {
             Choose who you are
           </h1>
           <p className="text-body text-muted">
-            Each persona is a seeded Quillstack customer. When the agent asks you to verify, use that persona&apos;s
-            account ID and support PIN. PINs are shown here on purpose; they are demo data.
+            Each persona is a seeded Quillstack customer. Start as one (in a new tab) to arrive signed in: the verification card
+            names them and fills in the account ID. Or start a conversation signed out and verify with any account ID
+            and support PIN below. PINs are shown here on purpose; they are demo data.
           </p>
+        </div>
+        <div className="mt-6 flex flex-wrap items-center gap-x-4 gap-y-2">
+          <a
+            href={consoleStartPath()}
+            target="_blank"
+            rel="noopener"
+            aria-describedby={startHelpId}
+            className={buttonVariants({ variant: "ink", className: "h-10" })}
+          >
+            Start a conversation
+            <span className="sr-only"> (opens in a new tab)</span>
+            <ArrowUpRight aria-hidden data-icon="new-tab" className="size-3.5" />
+          </a>
+          <span id={startHelpId} className="text-body-sm text-muted">
+            Opens in a new tab, signed out. Each start is a new conversation.
+          </span>
         </div>
         <div className="mt-7">
-          <PersonaList
-            personas={view.personas}
-            onStart={(i) => void start(i)}
-            startingIndex={startingIndex}
-            startDisabled={limited}
-          />
+          <PersonaList personas={view.personas} />
         </div>
-        {startError && (
-          <p role="alert" className={limited ? "mt-4 text-body-sm text-info" : "mt-4 text-body-sm text-error"}>
-            {startError}
-            {limited ? ` Try again in ${formatWait(startCountdown.remaining)}.` : ""}
-          </p>
-        )}
         <div className="mt-7 flex flex-col gap-7">
           <VoiceHint />
           <RecordingNotice className="max-w-[45rem]" />

@@ -76,6 +76,8 @@ export interface InspectActions {
  */
 export interface CardActions {
   disabled: boolean;
+  /** The hinted persona's name while the Account ID field holds its account id (D-076), else null. */
+  verifyAs: string | null;
   account: string;
   setAccount: (value: string) => void;
   pinRef: RefObject<HTMLInputElement | null>;
@@ -97,6 +99,7 @@ export interface CardActions {
  */
 const NO_ACTIONS: CardActions = Object.freeze({
   disabled: false,
+  verifyAs: null,
   account: "",
   setAccount: () => undefined,
   pinRef: { current: null },
@@ -307,6 +310,7 @@ function AssistantMessage({
           request={conversation.awaitingVerification ?? turn.verificationRequired}
           state={verifyState}
           disabled={cards.disabled}
+          verifyAs={cards.verifyAs}
           account={cards.account}
           onAccountChange={cards.setAccount}
           pinRef={cards.pinRef}
