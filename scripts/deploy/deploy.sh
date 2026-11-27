@@ -279,8 +279,13 @@ restore_backup() {
   local drops="" n
   for n in $SCHEMAS; do drops="$drops drop schema if exists $n cascade;"; done
   if ! { echo "$drops"; cat "$f"; } | dc exec -T postgres psql -U postgres -d quillstack -v ON_ERROR_STOP=1 --single-transaction -q >/dev/null; then
-    echo "deploy: restore failed and was rolled back: the database is unchanged. Restarting the app services as they were." >&2
-    docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" start agent_a agent_b core knowledge >&2 || true
+    echo "deploy: restore failed and was rolled back: the database is unchanged. Starting the app services again (same form as the rolling restart)." >&2
+    # `compose start` would refuse (the migrate job containers do not exist: they are run with `run --rm`); `up -d --no-deps` is the form that works.
+    if dc up -d --no-deps --wait --wait-timeout 180 core knowledge agent_a agent_b >&2; then
+      echo "deploy: app services are running again (still the failed release's images; run rollback without --restore-db to switch code)." >&2
+    else
+      die "database restore failed AND the app services could NOT be restarted: the site is down; run: docker compose -f compose.yaml up -d --no-deps core knowledge agent_a agent_b (backup kept at $f)"
+    fi
     die "database restore failed; the backup file is kept at $f"
   fi
   if [ "$(counts quillstack)" != "$(cat "$f.manifest")" ]; then

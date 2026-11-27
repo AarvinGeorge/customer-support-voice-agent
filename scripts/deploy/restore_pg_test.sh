@@ -2,7 +2,7 @@
 # What: Postgres-backed test of deploy.sh backup and restore, including the case that destroyed a database before: the failed release ADDED a table.
 # Use when: you change backup or restore in scripts/deploy/deploy.sh, and in CI (job "pg tests"). Needs docker; no provider, no secrets.
 # Inputs: none. Output: PASS lines and exit 0, or a FAIL line and exit 1. Side effects: starts a throwaway postgres (project cs-restore-test), removed on exit.
-# Role: proves restore is all-or-nothing: added tables vanish, row counts equal the manifest, a corrupt backup changes nothing, a backup from another release is refused.
+# Role: proves restore is all-or-nothing and that a failed restore brings the apps back: added tables vanish, row counts equal the manifest, a corrupt backup changes nothing, a backup from another release is refused.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export COMPOSE_PROJECT_NAME=cs-restore-test DEPLOY_COMPOSE_FILES=scripts/deploy/compose.restore-test.yaml
@@ -14,6 +14,7 @@ D() { scripts/deploy/deploy.sh --local --env-file "$tmp/env" --state-dir "$S" "$
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 dc up -d --wait --wait-timeout 120 postgres agent_a agent_b core knowledge >/dev/null
+dc rm -f -s migrate_stub >/dev/null 2>&1 || true   # like the real stack: the job container is gone, so `compose start` of an app would fail
 sql "create schema core; create schema knowledge; create schema agent;
      create table core.accounts(id int primary key, name text); insert into core.accounts select g, 'a'||g from generate_series(1,5) g;
      create table knowledge.chunks(id int primary key, body text); insert into knowledge.chunks select g, repeat('x',300) from generate_series(1,40) g;
@@ -38,7 +39,8 @@ sql "create table core.rev_extra2(id int); insert into core.rev_extra2 values (1
 f="$(sed -n 1p "$S/backup")"; printf 'THIS IS NOT SQL;\n' >> "$f"
 if D restore >/dev/null 2>&1; then fail "a corrupt backup restored without error"; fi
 [ "$(sql "select count(*) from core.rev_extra2")" = 1 ] && [ "$(sql "select count(*) from core.accounts")" = 5 ] || fail "failed restore left a partial database"
-echo "PASS corrupt backup: restore failed and the database is exactly as it was"
+[ "$(dc ps --status running -q agent_a agent_b core knowledge | wc -l | tr -d ' ')" = 4 ] || fail "the app services were not running again after the failed restore"
+echo "PASS corrupt backup: restore failed, the database is exactly as it was and the 4 app services run again"
 
 # a backup taken on another base is refused
 printf 'v9\n' > "$S/rollback_to"

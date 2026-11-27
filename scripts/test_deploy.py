@@ -254,6 +254,8 @@ case "$a" in
   *"image inspect"*) echo "sha-${a##*img-}" ;;
   *"inspect -f {{.Image}}"*) echo "sha-${a##*cid-}" ;;
   *"inspect -f {{.Config.Image}}"*) echo "img-${a##*cid-}" ;;
+  *--single-transaction*) cat > /dev/null; [ -z "${STUB_RESTORE_FAIL:-}" ] || exit 1 ;;
+  *"up -d --no-deps"*) [ -z "${STUB_FAIL_UP:-}" ] || exit 1 ;;
   *"count(*) from information_schema.tables"*) echo "${STUB_SCHEMAS:-0}" ;;
   *"to_regclass"*) echo "${STUB_REGCLASS:-f}" ;;
   *"from agent.turns"*) echo "${STUB_TURNS:-0}" ;;
@@ -422,3 +424,35 @@ def test_every_job_image_is_built_before_it_runs(tmp_path: Path) -> None:
     assert b < next(i for i, ln in enumerate(log) if "run --rm --no-deps seed_core" in ln)
     assert b < next(i for i, ln in enumerate(log) if "run --rm --no-deps ingest_knowledge" in ln)
     assert any("--force-recreate caddy" in ln for ln in log)
+
+
+def _restore_state(tmp: Path) -> None:
+    """What: write a good state, a recorded backup bound to v1 and rollback_to v1. Use when: restore tests. Inputs: tmp.
+    Output: none. Side effects: writes tmp/state. Role: arrange a restore."""
+    st = tmp / "state"
+    st.mkdir(exist_ok=True)
+    dump = st / "x.sql"
+    dump.write_text("-- dump\n")
+    Path(str(dump) + ".manifest").write_text("core.t1 1\n")
+    (st / "backup").write_text(f"{dump}\nv1\nv2\n")
+    (st / "rollback_to").write_text("v1\n")
+    (st / "good").write_text("v1\n")
+
+
+def test_failed_restore_starts_the_apps_with_up_not_start(tmp_path: Path) -> None:
+    """What: a failed restore restarts core, knowledge and both agents with `up -d --no-deps` (never `compose start`) and says so.
+    Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: N3 (`compose start` failed on the real stack and was hidden)."""
+    _restore_state(tmp_path)
+    p = real(["rollback", "--restore-db"], tmp_path, STUB_RESTORE_FAIL="1")
+    log = (tmp_path / "stub.log").read_text()
+    assert p.returncode != 0 and "app services are running again" in p.stderr
+    assert "up -d --no-deps --wait --wait-timeout 180 core knowledge agent_a agent_b" in log
+    assert " start " not in log
+
+
+def test_failed_restore_with_failed_restart_fails_loudly(tmp_path: Path) -> None:
+    """What: when the restart after a failed restore also fails, the script says the site is down and how to start it.
+    Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: N3 (no `|| true`)."""
+    _restore_state(tmp_path)
+    p = real(["rollback", "--restore-db"], tmp_path, STUB_RESTORE_FAIL="1", STUB_FAIL_UP="1")
+    assert p.returncode != 0 and "could NOT be restarted" in p.stderr and "site is down" in p.stderr
