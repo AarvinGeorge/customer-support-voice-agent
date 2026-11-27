@@ -50,16 +50,16 @@ x-agent: &agent
     FEATURE_A4: ${FEATURE_A4:-false}
 
 services:
-  # Edge (CS-E-01.S3.T3, lane C). SITE_ADDRESS unset: plain http on :80 (override publishes it on localhost). On the VM set it to the domain.
+  # Edge (CS-E-01.S3.T3, lane C). SITE_ADDRESS is required: the domain on the VM, or :80 locally (the override defaults it).
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11-alpine
     restart: unless-stopped
     ports: ["80:80", "443:443"]
     networks: [edge]
     depends_on:
       web: {condition: service_healthy}
     environment:
-      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+      SITE_ADDRESS: ${SITE_ADDRESS:-}   # no default: empty makes Caddy refuse to start (VM must set the domain; local gets :80 from compose.override.yaml)
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

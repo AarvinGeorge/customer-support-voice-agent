@@ -1,19 +1,19 @@
 # What: the single public edge for Quillstack (doc 06 s9, s10; doc 07 s15.1).
 # Use when: Compose mounts it at /etc/caddy/Caddyfile in the `caddy` service.
-# Inputs: env SITE_ADDRESS. Unset or ":80" serves plain http (local, published on 127.0.0.1:EDGE_PORT).
-#   Set to a domain on the VM (for example "demo.example.com") and Caddy gets a certificate and serves https.
+# Inputs: env SITE_ADDRESS, REQUIRED, no default here. ":80" serves plain http (local; compose.override.yaml supplies it,
+#   published on 127.0.0.1:EDGE_PORT). A domain on the VM (for example "demo.example.com") gets a certificate and https.
+#   Unset or empty makes Caddy refuse to start (fail loudly: the VM must never silently serve http).
 # Output: /api/* round robin to agent_a and agent_b (active health checks on /api/readyz), everything else to web.
 # Side effects: terminates TLS on the VM; sets X-Forwarded-For for the agent (doc 07 s9); adds security headers.
 # Role: only public service; core, knowledge, postgres and redis are never routed here.
-
 {
 	admin off
 }
 
-{$SITE_ADDRESS::80} {
-	# 64 KB request body cap (doc 07 s15.1 row 5): the largest legitimate body is a turn or transcript post.
+{$SITE_ADDRESS} {
+	# 64 KiB (65,536 bytes) request body cap (doc 07 s15.1 row 5): the largest legitimate body is a turn or transcript post.
 	request_body {
-		max_size 64KB
+		max_size 64KiB
 	}
 
 	header {
