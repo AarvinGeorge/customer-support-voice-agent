@@ -24,11 +24,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # pyright_target: what pyright checks (empty = the whole project). packages/contracts: `src` is the frozen wire
-        # contract and is HARD; its tests are checked in a separate soft step (26 known errors, see that step).
+        # pyright_target: what pyright checks (empty = the whole project, tests included, all hard).
         # pyright "skip": infra/migrate.py imports psycopg, which only exists in the service image (lane A owns it).
         include:
-          - {project: packages/contracts, pyright_target: src}
+          - {project: packages/contracts, pyright_target: ""}
           - {project: services/agent, pyright_target: ""}
           - {project: services/core, pyright_target: ""}
           - {project: services/knowledge, pyright_target: ""}
@@ -63,27 +62,23 @@ jobs:
           else
             uvx pyright@1.1.405 .
           fi
-      - name: pyright on contract tests (SOFT, recorded reason)
-        if: matrix.project == 'packages/contracts'
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          # Reason: 26 known errors in tests/ (attribute access on the Envelope union in test_fixtures.py and test_events.py).
-          # They predate CI and the tests run green; lane B tracks the fix. Remove this step's continue-on-error then.
-          if ! uv run --frozen --with pyright==1.1.405 pyright tests; then
-            echo "::warning title=pyright on packages/contracts/tests::known type errors in tests (soft, tracked for lane B); src is hard"
-            exit 1
-          fi
       - name: pytest
         run: |
           set -euo pipefail
+          # No quiet branches: a project without tests fails, and so does any skipped test (a skip is a green run
+          # that tested nothing; same rule as scripts/pg_tests.sh). Deselected markers (pg, real, e2e) are not skips.
+          # No -q here: some projects already set -q in addopts and two -q drop the summary line the checks below read.
+          out="$(mktemp)"
           if [ ! -f pyproject.toml ]; then
-            uv run --no-project --with pytest==8.3.5 --with pyyaml pytest -q .
+            uv run --no-project --with pytest==8.3.5 --with pyyaml pytest -rs . 2>&1 | tee "$out"
           elif [ -d tests ]; then
-            uv run --frozen --with pytest pytest -q
+            uv run --frozen --with pytest pytest -rs 2>&1 | tee "$out"
           else
-            echo "::warning title=${{ matrix.project }}::no tests/ directory yet, pytest skipped on purpose (the owning lane adds tests; remove this branch then)"
+            echo "::error title=${{ matrix.project }}::no tests/ directory: every project in this matrix must have tests"
+            exit 1
           fi
+          if grep -qE '[0-9]+ skipped' "$out"; then echo "::error title=${{ matrix.project }}::pytest skipped tests (must run or be deselected by marker)"; exit 1; fi
+          if ! grep -qE '[0-9]+ passed' "$out"; then echo "::error title=${{ matrix.project }}::pytest passed nothing"; exit 1; fi
 
   repo-tests:
     name: repo tests (tests/ and keys)
@@ -98,7 +93,10 @@ jobs:
       - name: Root tests (need the contracts package) and scripts/test_keys.py
         run: |
           set -euo pipefail
-          uv run --no-project --with pytest==8.3.5 --with pyyaml --with ./packages/contracts pytest -q tests scripts/test_keys.py
+          out="$(mktemp)"
+          uv run --no-project --with pytest==8.3.5 --with pyyaml --with ./packages/contracts pytest -q -rs tests scripts/test_keys.py 2>&1 | tee "$out"
+          if grep -qE '[0-9]+ skipped' "$out"; then echo "::error::pytest skipped tests (must run)"; exit 1; fi
+          if ! grep -qE '[0-9]+ passed' "$out"; then echo "::error::pytest passed nothing"; exit 1; fi
 
   web:
     runs-on: ubuntu-latest
@@ -139,11 +137,7 @@ jobs:
       - name: Bundle test
         run: |
           set -euo pipefail
-          if node -e "process.exit(require('./package.json').scripts?.['test:bundle'] ? 0 : 1)"; then
-            pnpm test:bundle
-          else
-            echo "::warning title=web bundle test::no test:bundle script on this branch; skipped"
-          fi
+          pnpm test:bundle
 
   gitleaks:
     runs-on: ubuntu-latest
