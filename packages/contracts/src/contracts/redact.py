@@ -268,8 +268,8 @@ def scan_pins(text: str, context: RedactContext, issued: frozenset[str] = frozen
     fillers. Without a credential word, amounts, dates and decimals are kept.
     Use when: ingress step 9a, POST /transcript, and every string inside redact.
     Inputs: text, context; issued: exact ids our code received from core for the session (ticket short ids,
-    invoice endings), kept by provenance (D-071); only scan_relayed passes it, for a sentence that is one of our
-    own lines; empty for customer text.
+    invoice endings), kept by provenance (D-071) only inside a span scan_relayed marked as one of our own lines;
+    empty for customer text.
     Output: PinScan (the original text when nothing was redacted). Side effects: none; never
     raises (on an internal error every number is masked). Role: the one free-text PIN rule."""
     try:
@@ -293,7 +293,7 @@ def _scan(text: str, context: RedactContext, issued: frozenset[str] = frozenset(
     cred_idx = [i for i, (_, w) in enumerate(tokens) if _is_strong(w) or _is_code_word(tokens, i, context, norm)]
     filler_only = all(w in _FILLERS for w in _TOKEN_RE.findall(_CANDIDATE_RE.sub(" ", norm).lower()))
     if not cands:
-        return PinScan(text, 0, False, _expects_pin(tokens, cred_idx, account, context),
+        return PinScan(_unmark(text), 0, False, _expects_pin(tokens, cred_idx, account, context),
                        _moved_on(tokens, cred_idx, account, norm))
     dates = [m.span() for rx in _DATES for m in rx.finditer(norm)]
     index = {s: i for i, (s, _) in enumerate(tokens)}
@@ -301,8 +301,8 @@ def _scan(text: str, context: RedactContext, issued: frozenset[str] = frozenset(
     cred = False
     for m in cands:
         a, b = m.span()
-        if issued and m.group().strip(_LONG_OPEN + _LONG_CLOSE) in issued:
-            continue  # D-071: a number our system issued (ticket ending 8352) is not customer input
+        if issued and m.group().strip(_LONG_OPEN + _LONG_CLOSE) in issued and _in_span(norm, a):
+            continue  # D-071: an id core issued, inside one of our own sentences (ticket ending 8352)
         i = index.get(a + (1 if norm[a] == _LONG_OPEN else 0), 0)
         near = [j for j in cred_idx if abs(j - i) <= _NEAR]
         strong_here = strong and not _is_far_year(m.group(), i, tokens, near)
@@ -320,12 +320,12 @@ def _scan(text: str, context: RedactContext, issued: frozenset[str] = frozenset(
             hits.append(m)
             cred = cred or filler_only
     if not hits:
-        return PinScan(text, 0, False, _expects_pin(tokens, cred_idx, account, context), False)
+        return PinScan(_unmark(text), 0, False, _expects_pin(tokens, cred_idx, account, context), False)
     out = norm
     for m in reversed(hits):
         out = out[:m.start()] + PIN_TOKEN + out[m.end():]
     out = out.replace(_LONG_OPEN, "").replace(_LONG_CLOSE, "")
-    return PinScan(out, len(hits), cred)
+    return PinScan(_unmark(out), len(hits), cred)
 
 
 def _is_far_year(group: str, i: int, tokens: list[tuple[int, str]], near: list[int]) -> bool:
@@ -405,45 +405,51 @@ def scan_text(text: str, context: RedactContext, issued: frozenset[str] = frozen
 
 
 _SENTENCE_RE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)")
-_HOLD = "\uf8f0"  # private-use placeholder for a held sentence (not a long-run marker); no digits, no word characters
+_SPAN_OPEN, _SPAN_CLOSE = "\uf8f2", "\uf8f3"  # private-use span markers (not the long-run markers); no word chars
+
+
+def _unmark(text: str) -> str:
+    """What: drop the span markers. Use when: every scan_pins result. Inputs: text. Output: text.
+    Side effects: none. Role: helper (markers never leave the scanner)."""
+    return text.replace(_SPAN_OPEN, "").replace(_SPAN_CLOSE, "")
+
+
+def _in_span(norm: str, pos: int) -> bool:
+    """What: position pos lies inside a marked span (the last open marker before it has no close marker after it).
+    Use when: _scan, before keeping an issued id. Inputs: normalized text, position. Output: bool.
+    Side effects: none. Role: review-pr76-r1 N1: the exemption covers only the exact matched sentence."""
+    return norm.rfind(_SPAN_OPEN, 0, pos) > norm.rfind(_SPAN_CLOSE, 0, pos)
 
 
 def _sentence_key(sentence: str) -> str:
     """What: a sentence compared by meaning of its characters: scanner normalization (spoken digits as numerals),
     lower case, letters and digits only. Use when: scan_relayed matches a relayed sentence to one of our lines.
     Inputs: sentence. Output: key. Side effects: none. Role: helper."""
-    norm = _normalize(sentence).replace(_LONG_OPEN, "").replace(_LONG_CLOSE, "").lower()
+    norm = _unmark(_normalize(sentence).replace(_LONG_OPEN, "").replace(_LONG_CLOSE, "")).lower()
     return " ".join(re.findall(r"[a-z0-9]+", norm))
 
 
 def scan_relayed(text: str, context: RedactContext, lines: Any, issued: frozenset[str]) -> str:
-    """What: redact text the realtime voice model said aloud. That model heard the customer, so its text is
-    customer-derived and gets the full scan, except a sentence that IS one of our own lines (same key as a sentence
-    of `lines`): there, a number is kept only when it is in `issued`, the exact ids our code received from core
-    for this session. Use when: POST /transcript, for every posted item (the browser's role label is not trusted).
+    """What: redact text the realtime voice model said aloud. That model heard the customer, so the whole item is
+    scanned once as one message with the session context (every credential word in it counts, also one inside our
+    own sentence). The only exemption: an id in `issued` (the exact ids core gave this session) that lies inside a
+    sentence that IS one of our own lines (same key as a sentence of `lines`) and has words, not only a number.
+    Use when: POST /transcript, for every posted item (the browser's role label is not trusted).
     Inputs: text, session context, our lines (the agent answers handed to the relay), exact issued ids.
     Output: redacted text (emails masked). Side effects: none; never raises (scan_pins never raises).
-    Role: D-071 part 3, provenance by identity plus an exact allowlist (review-pr76 I1): "Thanks, you said your PIN
-    is 8352" matches none of our lines and is masked even when 8352 is an issued ticket suffix."""
-    text = text.replace(_HOLD, "")  # a posted placeholder character must never select one of our held sentences
-    ours = {_sentence_key(sent) for line in lines if line for sent in _SENTENCE_RE.findall(line)} - {""}
-    held: list[str] = []
+    Role: D-071 part 3 (review-pr76 I1; rereview-pr76-r1 N1, N2): "Thanks, you said your PIN is 8352" matches none
+    of our lines and is masked; "Ticket no. 8352." never makes a bare "8352" ours."""
+    text = _unmark(text)  # posted marker characters must never open or close a span
+    ours = {k for line in lines if line for sent in _SENTENCE_RE.findall(line)
+            if re.search(r"[a-z]", k := _sentence_key(sent))}
 
-    def hold(m: re.Match[str]) -> str:
-        """What: hold out one of our sentences. Use when: re.sub. Inputs: match. Output: placeholder or the text.
-        Side effects: appends to held. Role: helper."""
-        if not (ours and issued) or _sentence_key(m.group()) not in ours:
-            return m.group()
-        held.append(m.group())
-        return " " + _HOLD * len(held) + " "
+    def mark(m: re.Match[str]) -> str:
+        """What: wrap one of our sentences in span markers. Use when: re.sub. Inputs: match. Output: text.
+        Side effects: none. Role: helper."""
+        return _SPAN_OPEN + m.group() + _SPAN_CLOSE if _sentence_key(m.group()) in ours else m.group()
 
-    rest = _SENTENCE_RE.sub(hold, text)
-    if not held:
-        return scan_text(text, context)
-    out = scan_pins(rest, context).text  # the customer-derived rest, scanned as one message
-    ours_clean = [scan_pins(h, context, issued).text for h in held]
-    out = re.sub(rf" ?({_HOLD}+) ?", lambda m: ours_clean[len(m.group(1)) - 1], out)
-    return mask_email(out)
+    marked = _SENTENCE_RE.sub(mark, text) if ours and issued else text
+    return mask_email(scan_pins(marked, context, issued).text)
 
 
 # Customer frames inside system text: the prompt frame (agent.prompt) and merged voice chatter (contracts.trust).

@@ -48,11 +48,10 @@ def test_system_data_scans_customer_frames_as_a_second_net() -> None:
     assert "my PIN is [PIN]" in out["a"] and "ticket ending 8352" in out["a"]
 
 
-def test_an_exact_issued_id_is_kept_and_any_other_number_is_masked() -> None:
-    kept = scan_pins("ticket ending 8352", AWAITING, issued=frozenset({"8352"}))
-    assert kept.redacted == 0
-    other = scan_pins("ticket ending 4821", AWAITING, issued=frozenset({"8352"}))
-    assert "4821" not in other.text and other.redacted == 1
+def test_an_issued_id_outside_one_of_our_sentences_is_masked() -> None:
+    # Round 2: scan_pins alone never exempts; only a span scan_relayed marked as our own sentence does.
+    out = scan_pins("ticket ending 8352", AWAITING, issued=frozenset({"8352"}))
+    assert "8352" not in out.text and out.redacted == 1
 
 
 # ---- fix round 1 (review-pr76 I1): relayed text is ours only when it IS one of our lines ----
@@ -85,10 +84,33 @@ def test_a_number_in_our_line_that_core_did_not_issue_is_masked() -> None:
     assert "4821" not in out
 
 
-def test_a_posted_placeholder_character_cannot_smuggle_a_number() -> None:
-    out = scan_relayed("\uf8f0\uf8f0 my PIN is 4821. I've opened a ticket for our team, ticket ending 8352.",
-                       AWAITING, LINES, ISSUED)
-    assert "4821" not in out and "ticket ending 8352" in out and "\uf8f0" not in out
+# ---- fix round 2 (rereview-pr76-r1 N1, N2) ----
+
+RESET = "You can reset your PIN in Settings, under Security."
+
+
+def test_n1_a_pin_word_in_our_held_sentence_still_counts_for_the_rest_of_the_item() -> None:
+    posted = f"{RESET} Got it, 4821."
+    assert "4821" not in scan_text(posted, RedactContext())  # positive control: the full scan masks it
+    out = scan_relayed(posted, RedactContext(), [RESET], ISSUED)
+    assert "4821" not in out and RESET in out
+
+
+def test_n1_our_id_stays_kept_next_to_a_pin_word_in_the_same_held_sentence() -> None:
+    line = "Please enter your PIN in the secure card; your ticket ending 8352 is open."
+    assert scan_relayed(line, RedactContext(), [line], ISSUED) == line
+
+
+def test_n2_a_sentence_that_is_only_the_id_never_exempts_a_bare_number() -> None:
+    for lines in (["Ticket no. 8352."], ["Your ticket ends in:\n8352"]):
+        for ctx in (AWAITING, RedactContext()):
+            assert "8352" not in scan_relayed("8352", ctx, lines, ISSUED)
+            assert "8352" not in scan_relayed("8352.", ctx, lines, ISSUED)
+
+
+def test_posted_span_markers_are_stripped() -> None:
+    out = scan_relayed("\uf8f2my PIN is 4821\uf8f3 ticket ending 8352.", AWAITING, LINES, ISSUED)
+    assert "4821" not in out and "\uf8f2" not in out and "\uf8f3" not in out
 
 
 def test_relayed_text_without_facts_fails_closed() -> None:
