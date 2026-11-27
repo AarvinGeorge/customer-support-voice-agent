@@ -95,7 +95,6 @@ def test_every_stub_names_the_task_that_fills_it():
     assert fills == {
         "DeadlineAndFaultMiddleware": "CS-E-07.S1.T2",
         "GroundingMiddleware": "CS-E-02.S4.T2",
-        "ToolGuardMiddleware": "CS-E-03.S8.T6",
     }
     assert stubs.retry_on_placeholder.FILLED_BY == "CS-E-07.S1.T2"  # type: ignore[attr-defined]
 
@@ -192,9 +191,6 @@ async def test_stubs_are_pass_through(name: str):
     if name == "DeadlineAndFaultMiddleware":
         out = await mw.awrap_model_call("REQ", _echo)  # pyright: ignore[reportArgumentType]  # pass-through probe
         assert out == ("handled", "REQ")
-    if name == "ToolGuardMiddleware":
-        out = await mw.awrap_tool_call("CALL", _echo)  # pyright: ignore[reportArgumentType]  # pass-through probe
-        assert out == ("handled", "CALL")
 
 
 async def _echo(x: Any) -> tuple[str, Any]:

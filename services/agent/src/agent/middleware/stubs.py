@@ -3,8 +3,9 @@ Use when: assembling the agent before the tasks that fill them land; each class 
 FILLED_BY. The hook each stub defines is the hook its real version uses, so the graph shape and
 the order test stay valid when it is filled in.
 Inputs: none.
-Output: DeadlineAndFaultMiddleware, GroundingMiddleware, ToolGuardMiddleware, retry_on_placeholder,
-STUB_NAMES. RouterMiddleware and ToolVisibilityMiddleware are real (agent.middleware.router, .visibility).
+Output: DeadlineAndFaultMiddleware, GroundingMiddleware, retry_on_placeholder, STUB_NAMES.
+RouterMiddleware, ToolVisibilityMiddleware and ToolGuardMiddleware are real (agent.middleware.router,
+.visibility, .tool_guard).
 Side effects: none.
 Role: slots in the middleware stack. Async hooks only (D-048: the agent runs async only).
 """
@@ -52,27 +53,6 @@ class GroundingMiddleware(AgentMiddleware):
         return None
 
 
-class ToolGuardMiddleware(AgentMiddleware):
-    """What: PLACEHOLDER for doc 07 s2.5 item 10 (wrap_tool_call). Filled by CS-E-03.S8.T6: hidden-tool
-    block, per-tool timeout and one retry, failure counting, untrusted wrapping (s5.3), step events,
-    audit fields, AND the combined tool limiter (D-046, D-048: total 8, search_kb 3,
-    request_verification 1, counters on TurnControl, a blocked call returns one error ToolMessage).
-    This slot replaces the three ToolCallLimitMiddleware instances of s2.5 item 3.
-    Use when: around every tool call.
-    Inputs: tool call request, handler.
-    Output: the handler's result unchanged until filled.
-    Side effects: none.
-    Role: tool guard and tool-limit slot.
-    """
-
-    FILLED_BY = "CS-E-03.S8.T6"
-
-    async def awrap_tool_call(self, request: Any, handler: Callable[[Any], Awaitable[Any]]) -> Any:
-        """What: pass-through. Use when: each tool call. Inputs: request, handler.
-        Output: handler(request). Side effects: none. Role: placeholder."""
-        return await handler(request)
-
-
 def retry_on_placeholder(exc: BaseException) -> bool:
     """What: PLACEHOLDER retry predicate for ModelRetryMiddleware. Filled by CS-E-07.S1.T2 with the
     deadline-aware predicate (s8.2: timeout or 5xx on the primary only, read from TurnControl).
@@ -87,4 +67,4 @@ def retry_on_placeholder(exc: BaseException) -> bool:
 
 retry_on_placeholder.FILLED_BY = "CS-E-07.S1.T2"  # type: ignore[attr-defined]
 
-STUB_NAMES = frozenset({"DeadlineAndFaultMiddleware", "GroundingMiddleware", "ToolGuardMiddleware"})
+STUB_NAMES = frozenset({"DeadlineAndFaultMiddleware", "GroundingMiddleware"})

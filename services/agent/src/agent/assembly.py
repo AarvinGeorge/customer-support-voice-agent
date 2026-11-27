@@ -32,12 +32,8 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from agent.middleware.router import RouterMiddleware
-from agent.middleware.stubs import (
-    DeadlineAndFaultMiddleware,
-    GroundingMiddleware,
-    ToolGuardMiddleware,
-    retry_on_placeholder,
-)
+from agent.middleware.stubs import DeadlineAndFaultMiddleware, GroundingMiddleware, retry_on_placeholder
+from agent.middleware.tool_guard import ToolGuardMiddleware
 from agent.middleware.visibility import ToolVisibilityMiddleware
 from agent.prompt import SYSTEM_PROMPT
 from agent.state import SupportState
@@ -85,7 +81,7 @@ def build_agent(model: Any, *, fallback_model: Any, checkpointer: BaseCheckpoint
                 tools: Sequence[Any] = ()) -> Any:
     """What: compile the support agent graph.
     Use when: at startup inside an entered checkpointer factory; tests pass InMemorySaver.
-    Inputs: primary model, fallback model, checkpointer, tools (filled by CS-E-03.S8.T6).
+    Inputs: primary model, fallback model, checkpointer, tools (agent.tools.build_tools in the service).
     Output: CompiledStateGraph over SupportState.
     Side effects: none.
     Role: create_agent call site.
