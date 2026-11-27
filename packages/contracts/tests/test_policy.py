@@ -229,7 +229,7 @@ def test_numbers_appear_in_staged_articles():
         "billing-invoices-payments": ["at most once per day", "7 days, once per 12 months",
                                       "14 days, once per 6 months"],
         "plans-pricing-contracts": ["$8 per seat per month", "$16 per seat per month"],
-        "support-and-escalation": ["5 tickets per day", "up to 2 tickets", "72 hours", "24 hours",
+        "support-and-escalation": ["5 tickets per day", "after 5 failed attempts", "72 hours", "24 hours",
                                    "8 hours", "4 hours", "1 hour"],
     }
     for article, phrases in facts.items():
