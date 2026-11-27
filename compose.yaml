@@ -102,6 +102,9 @@ services:
       DEMO_FAULTS_ENABLED: ${DEMO_FAULTS_ENABLED:-true}
       FEATURE_A4: ${FEATURE_A4:-false}
       DEMO_RESEED: ${DEMO_RESEED:-false}
+      POLICY_PATH: /app/data/policy.yaml
+    volumes:
+      - ./data/policy.yaml:/app/data/policy.yaml:ro   # the one config file core reads (doc 07 s13.1)
 
   knowledge:
     <<: *python
