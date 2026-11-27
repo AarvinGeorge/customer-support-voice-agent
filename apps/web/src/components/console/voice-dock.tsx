@@ -155,7 +155,8 @@ export function VoiceBars({ levels, reducedMotion, schedule, cancel }: VoiceBars
     let agent: number[] = [];
     let you: number[] = [];
     let frame = 0;
-    const loop = { id: 0 };
+    let id = 0;
+    let stopped = false;
     /**
      * What: writes one row's history into its bars (oldest left, newest right).
      * Use when: each sampled frame.
@@ -181,6 +182,7 @@ export function VoiceBars({ levels, reducedMotion, schedule, cancel }: VoiceBars
      * Role: loop body.
      */
     const tick = () => {
+      if (stopped) return; // a frame already queued when cleanup ran must not keep the loop alive
       frame += 1;
       if (frame % 2 === 0) {
         const lv = readLevels();
@@ -189,10 +191,13 @@ export function VoiceBars({ levels, reducedMotion, schedule, cancel }: VoiceBars
         paint(agentRef.current, agent);
         paint(youRef.current, you);
       }
-      loop.id = scheduleFrame(tick);
+      id = scheduleFrame(tick);
     };
-    loop.id = scheduleFrame(tick);
-    return () => cancelFrame(loop.id);
+    id = scheduleFrame(tick);
+    return () => {
+      stopped = true;
+      cancelFrame(id);
+    };
   }, [reducedMotion]);
 
   const rows: Array<{ key: "agent" | "you"; name: string; color: string; ref: typeof agentRef; value: number }> = [

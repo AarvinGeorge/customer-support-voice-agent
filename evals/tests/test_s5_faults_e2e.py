@@ -43,8 +43,15 @@ from evals.reseed import guarded_reseed
 from evals.runner import run_case
 from evals.store import PgStore, _connect
 
-pytestmark = [pytest.mark.e2e,
-              pytest.mark.skipif(os.environ.get("EVALS_E2E") != "1", reason="end-to-end: set EVALS_E2E=1 on a running stack")]
+pytestmark = pytest.mark.e2e
+
+
+@pytest.fixture(autouse=True)
+def _require_stack() -> None:
+    """What: fail (not skip) when an e2e test is selected without EVALS_E2E=1. Use when: every e2e test.
+    Inputs: env EVALS_E2E. Output: none. Side effects: none. Role: selecting e2e is explicit, so a missing stack is a failure."""
+    if os.environ.get("EVALS_E2E") != "1":
+        pytest.fail("end-to-end: set EVALS_E2E=1 on a running stack")
 
 NOTHING_CHANGED = re.compile(r"nothing was changed", re.I)
 TICKET_ENDING = re.compile(r"ticket,? ending (\d{4})\b", re.I)

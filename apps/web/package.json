@@ -11,7 +11,7 @@
     "dev:mock": "QS_MOCK_API=1 next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:bundle": "vitest run --config vitest.bundle.config.mts"
