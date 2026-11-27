@@ -10,7 +10,7 @@
 #   directory), KEEP_STACK=1 (skip teardown, for debugging), COMMIT_STATUS_NO_POST=1 (run without posting).
 # Output: the summary on stdout; smoke-<time>.txt and .json, status.txt, stack.log and build.log in the output
 #   directory; on a clean, pushed tree the commit status `live-smoke` on HEAD (pending, then success only on PASS,
-#   failure otherwise; scripts/commit_status.sh). Exit 0 PASS, 1 FAIL, 2 refused or setup failed, 3 aborted at the
+#   failure otherwise; the shared scripts/lib/commit_status.sh, owned by PR #74). Exit 0 PASS, 1 FAIL, 2 refused or setup failed, 3 aborted at the
 #   call cap, 130/143/129 interrupted.
 # Side effects: docker compose build, up, run and down -v --rmi local for project cs-smoke-<time>-<hex> only; a run
 #   marker under .tmp/live-smoke/ (removed at exit); one to two GitHub status POSTs; real Anthropic and OpenAI
@@ -97,8 +97,12 @@ elif [ "${COMMIT_STATUS_NO_POST:-}" != 1 ]; then
   git fetch -q origin || die "git fetch origin failed (needed to prove $SMOKE_COMMIT is pushed)"
   [ -n "$(git branch -r --contains "$SHA" 2>/dev/null)" ] || die "commit $SMOKE_COMMIT is not on origin: push it first (the live-smoke status is posted on it)"
 fi
-# shellcheck source=scripts/commit_status.sh
-. "$ROOT/scripts/commit_status.sh"
+# The shared status writer (scripts/lib/commit_status.sh, owned by PR #74; this copy is byte-identical). The lifecycle
+# is the same as scripts/ci_gate.sh: pending at start, success only on a clean pass, failure from the EXIT trap.
+# shellcheck source=lib/commit_status.sh
+. "$ROOT/scripts/lib/commit_status.sh"
+STARTED=0
+FINAL=0
 
 # This run's marker: evals.reseed and `python -m evals smoke` accept only the cs-smoke-* stack whose marker matches.
 MARKER_DIR="$ROOT/.tmp/live-smoke"
@@ -110,7 +114,9 @@ MARKER="$MARKER_DIR/$COMPOSE_PROJECT_NAME.run"
 teardown() {
   local code=$?
   trap - EXIT INT TERM HUP
-  [ "$POST" = 1 ] && commit_status_finish "$code" "$(cat "$OUT/status.txt" 2>/dev/null || echo "did not pass (exit $code)")"
+  if [ "$POST" = 1 ] && [ "$STARTED" = 1 ] && [ "$FINAL" = 0 ]; then
+    commit_status "$SHA" failure live-smoke "$(cat "$OUT/status.txt" 2>/dev/null || echo "did not pass (exit $code)")" >&2 || true
+  fi
   rm -f "$MARKER"
   docker compose logs --no-color >"$OUT/stack.log" 2>&1 || true
   if [ "${KEEP_STACK:-}" = 1 ]; then
@@ -130,7 +136,10 @@ trap 'exit 129' HUP
 
 step() { echo "live_smoke: $*" >&2; }
 step "project $COMPOSE_PROJECT_NAME, edge 127.0.0.1:$EDGE_PORT, pg 127.0.0.1:$PG_TEST_PORT, subnet $EDGE_SUBNET, commit $SMOKE_COMMIT"
-[ "$POST" = 1 ] && commit_status_begin live-smoke "$SHA" "running on $COMPOSE_PROJECT_NAME"
+if [ "$POST" = 1 ]; then
+  commit_status "$SHA" pending live-smoke "running on $COMPOSE_PROJECT_NAME" >&2 || die "cannot post the live-smoke status on $SMOKE_COMMIT"
+  STARTED=1
+fi
 step "build and up (log: $OUT/build.log)"
 if ! { docker compose build && docker compose up -d --wait; } >>"$OUT/build.log" 2>&1; then
   tail -n 30 "$OUT/build.log" >&2; die "stack did not come up"
@@ -154,6 +163,7 @@ uv run --project evals --frozen python -m evals smoke --out-dir "$OUT" --status-
 code=$?
 set -e
 if [ "$code" = 0 ] && [ "$POST" = 1 ]; then
-  commit_status_success "$(cat "$OUT/status.txt")" || { echo "live_smoke: posting the success status failed" >&2; code=1; }
+  if commit_status "$SHA" success live-smoke "$(cat "$OUT/status.txt")" >&2; then FINAL=1
+  else echo "live_smoke: posting the success status failed" >&2; code=1; fi
 fi
 exit "$code"

@@ -3,7 +3,7 @@
 #   by scripts/live_smoke.sh on the exact commit it tested, cap at most 25) and no gated path changed after it;
 #   failure otherwise. It reads commit statuses, never the PR body (PR #73 review I1).
 # Use when: GitHub runs it on PR pushes (pull_request_target) and whenever a `live-smoke` status is posted (status), so
-#   finishing a smoke re-evaluates the PR without a new push. Make `smoke-gate` a required status check.
+#   finishing a smoke re-evaluates the PR without a new push. Whether `smoke-gate` becomes required is the coordinator's call.
 # Inputs: the event payload. Runs the BASE branch's checker and config (pull_request_target and status both run the
 #   default branch's workflow), so a PR cannot shrink the gated list or weaken the check for itself (review I3). No PR
 #   code is executed: the PR head is only fetched for git diff and rev-list.

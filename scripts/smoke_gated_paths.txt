@@ -22,7 +22,7 @@ infra/
 evals/
 !evals/tests/
 scripts/live_smoke.sh
-scripts/commit_status.sh
+scripts/lib/commit_status.sh
 scripts/check_smoke_status.py
 scripts/smoke_gated_paths.txt
 .github/workflows/smoke-gate.yml

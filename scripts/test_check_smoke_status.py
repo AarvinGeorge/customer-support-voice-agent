@@ -1,6 +1,6 @@
 """What: tests for the live smoke gate: scripts/check_smoke_status.py (commit statuses, not PR text), the one gated
 path list (scripts/smoke_gated_paths.txt) against where each gate really lives, the shared helper
-scripts/commit_status.sh, and the refusals of scripts/live_smoke.sh.
+and scripts/live_smoke.sh (its refusals and its commit status lifecycle on the shared scripts/lib/commit_status.sh).
 Use when: CI runs pytest in scripts/. Inputs: throwaway git repositories, a fake `gh`, the real source tree.
 Output: pass or fail. Side effects: writes only inside pytest tmp dirs; runs git and bash there.
 Role: proves each failure reason can fire (a zero must be shown possible to be non-zero) and a correct PR passes."""
@@ -206,52 +206,24 @@ def test_status_events_for_other_contexts_evaluate_nothing() -> None:
     assert css.targets("status", {"context": "local-ci", "sha": "a" * 40}, REPO) == []
 
 
-# --- scripts/commit_status.sh and scripts/live_smoke.sh ---------------------------------------------------------------
+# --- scripts/live_smoke.sh: refusals, and the status lifecycle on the shared helper ----------------------------------
 
-def _fake_gh(tmp: Path) -> tuple[dict[str, str], Path]:
-    """What: a PATH with a recording `gh` and `docker`. Use when: bash tests. Inputs: tmp dir. Output: env, log path.
-    Side effects: writes two scripts. Role: double."""
+def _fake_bin(tmp: Path) -> tuple[dict[str, str], Path]:
+    """What: a PATH whose `gh` and `docker` only record their calls. Use when: refusal tests. Inputs: tmp dir.
+    Output: env, log path. Side effects: writes two scripts. Role: double."""
     bin_ = tmp / "bin"
     bin_.mkdir()
     log = tmp / "calls.log"
     for name in ("gh", "docker"):
         (bin_ / name).write_text(f'#!/bin/sh\necho "{name} $*" >> {log}\n')
         (bin_ / name).chmod(0o755)
-    env = {k: v for k, v in os.environ.items() if k not in ("RUN_REAL", "COMMIT_STATUS_NO_POST")}
+    env = {k: v for k, v in os.environ.items() if k not in ("RUN_REAL", "COMMIT_STATUS_NO_POST", "SMOKE_OUT")}
     env["PATH"] = f"{bin_}:{env.get('PATH', '')}"
     return env, log
 
 
-def _bash(script: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    """What: run a bash snippet that sources the helper. Use when: helper tests. Inputs: snippet, env.
-    Output: result. Side effects: runs bash. Role: helper."""
-    return subprocess.run(["bash", "-c", f". {HERE / 'commit_status.sh'}\n{script}"], env=env, capture_output=True,
-                          text=True, timeout=30)
-
-
-def test_commit_status_posts_pending_then_failure_from_the_trap_unless_success(tmp_path: Path) -> None:
-    env, log = _fake_gh(tmp_path)
-    _bash("trap 'commit_status_finish $?' EXIT\ncommit_status_begin live-smoke abc123\nexit 1", env)
-    calls = log.read_text().splitlines()
-    assert len(calls) == 2 and "state=pending" in calls[0] and "state=failure" in calls[1]
-    assert all("repos/AarvinGeorge/customer-support-voice-agent/statuses/abc123" in c and "context=live-smoke" in c
-               for c in calls)
-    log.unlink()
-    _bash("trap 'commit_status_finish $?' EXIT\ncommit_status_begin live-smoke abc123\ncommit_status_success 'PASS 5/5'", env)
-    calls = log.read_text().splitlines()
-    assert ["state=pending" in calls[0], "state=success" in calls[1], len(calls)] == [True, True, 2]
-
-
-def test_commit_status_without_begin_posts_nothing_and_no_post_mode_prints(tmp_path: Path) -> None:
-    env, log = _fake_gh(tmp_path)
-    _bash("commit_status_finish 1", env)
-    assert not log.exists()
-    r = _bash("commit_status_begin live-smoke abc\ncommit_status_success ok", {**env, "COMMIT_STATUS_NO_POST": "1"})
-    assert not log.exists() and "not posted" in r.stderr
-
-
 def test_live_smoke_refuses_without_run_real_and_calls_no_docker_or_gh(tmp_path: Path) -> None:
-    env, log = _fake_gh(tmp_path)
+    env, log = _fake_bin(tmp_path)
     for value in (None, "0", "true"):
         e = env if value is None else {**env, "RUN_REAL": value}
         r = subprocess.run(["bash", str(HERE / "live_smoke.sh")], env=e, capture_output=True, text=True, timeout=30)
@@ -259,8 +231,108 @@ def test_live_smoke_refuses_without_run_real_and_calls_no_docker_or_gh(tmp_path:
     assert not log.exists()
 
 
-def test_live_smoke_never_names_the_owner_stack_and_traps_interrupts() -> None:
+STUB = """#!/bin/sh
+echo "$(basename "$0") $*" >> "$CALLS"
+case "$(basename "$0") $*" in
+  "docker compose build"*) [ -n "$FAIL_UP" ] && exit 1 ;;
+  *"run --rm ingest_knowledge"*) echo "INGEST ok run=1 articles=10 embedding_calls=1 corpus_version=x" ;;
+  "docker ps"*) ;;
+  "curl "*) echo '{"status":"ready","core":"ok","demo_faults":true}' ;;
+  "uv run"*) out=""; prev=""; for a in "$@"; do [ "$prev" = "--status-out" ] && out="$a"; prev="$a"; done
+             echo "$SMOKE_DESC" > "$out"; echo "LIVE SMOKE x"; exit "$SMOKE_CODE" ;;
+esac
+exit 0
+"""
+
+
+def _smoke_repo(tmp: Path) -> tuple[Path, dict[str, str], Path]:
+    """What: a throwaway repo holding live_smoke.sh, the shared helper, a fake .env and migrate.sh, pushed to a fake
+    origin, plus stub docker, uv, curl and gh. Use when: lifecycle tests. Inputs: tmp dir.
+    Output: (repo, env, calls log). Side effects: files and git in tmp. Role: fixture (no docker, no model call)."""
+    repo = tmp / "repo"
+    (repo / "scripts" / "lib").mkdir(parents=True)
+    for rel in ("scripts/live_smoke.sh", "scripts/lib/commit_status.sh"):
+        (repo / rel).write_text((ROOT / rel).read_text())
+    (repo / "scripts" / "migrate.sh").write_text("#!/bin/sh\nexit 0\n")
+    for f in ("live_smoke.sh", "migrate.sh"):
+        (repo / "scripts" / f).chmod(0o755)
+    (repo / ".gitignore").write_text(".tmp/\n.env\n")
+    (repo / ".env").write_text("CORE_DB_URL=postgresql://c:p@postgres:5432/q\nAGENT_DB_URL=postgresql://a:p@postgres:5432/q\n")
+    def git(*a: str) -> None:
+        """What: git in the repo. Use when: fixture. Inputs: args. Output: none. Side effects: git. Role: helper."""
+        subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.test")
+    git("config", "user.name", "t")
+    git("add", "-A")
+    git("commit", "-q", "-m", "c")
+    subprocess.run(["git", "init", "-q", "--bare", str(tmp / "origin.git")], check=True, capture_output=True)
+    git("remote", "add", "origin", str(tmp / "origin.git"))
+    git("push", "-q", "origin", "main")
+    bin_ = tmp / "bin"
+    bin_.mkdir()
+    for name in ("docker", "uv", "curl", "gh"):
+        (bin_ / name).write_text(STUB)
+        (bin_ / name).chmod(0o755)
+    calls = tmp / "calls.log"
+    env = {k: v for k, v in os.environ.items() if k not in ("COMMIT_STATUS_NO_POST", "SMOKE_OUT", "KEEP_STACK")}
+    env.update(PATH=f"{bin_}:{env.get('PATH', '')}", RUN_REAL="1", CALLS=str(calls), SMOKE_OUT=str(tmp / "out"),
+               SMOKE_CODE="0", SMOKE_DESC="PASS 5/5 cases, 19 calls, cap 25, 4 searches")
+    return repo, env, calls
+
+
+def _statuses(calls: Path) -> list[str]:
+    """What: the states posted, in order. Use when: lifecycle tests. Inputs: calls log. Output: states.
+    Side effects: reads the log. Role: helper."""
+    return [re.search(r"state=(\w+)", c).group(1) for c in calls.read_text().splitlines()  # type: ignore[union-attr]
+            if c.startswith("gh api") and "context=live-smoke" in c]
+
+
+def _run_smoke(repo: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """What: run the copied script. Use when: lifecycle tests. Inputs: repo, env. Output: result.
+    Side effects: runs bash with stubs. Role: helper."""
+    return subprocess.run(["bash", str(repo / "scripts" / "live_smoke.sh")], env=env, capture_output=True, text=True,
+                          timeout=60)
+
+
+def test_a_pass_posts_pending_then_success_and_tears_down(tmp_path: Path) -> None:
+    repo, env, calls = _smoke_repo(tmp_path)
+    r = _run_smoke(repo, env)
+    assert r.returncode == 0, r.stderr
+    assert _statuses(calls) == ["pending", "success"]
+    log = calls.read_text()
+    assert "description=PASS 5/5 cases, 19 calls, cap 25" in log
+    assert "--profile seed --profile jobs down -v --remove-orphans --rmi local" in log
+    assert "-p cs-demo" not in log and not list((repo / ".tmp" / "live-smoke").glob("*.run"))  # marker removed
+
+
+def test_a_failed_smoke_or_stack_posts_failure_from_the_exit_trap(tmp_path: Path) -> None:
+    repo, env, calls = _smoke_repo(tmp_path)
+    r = _run_smoke(repo, {**env, "SMOKE_CODE": "1", "SMOKE_DESC": "FAIL 3/5 cases, 19 calls, cap 25"})
+    assert r.returncode == 1 and _statuses(calls) == ["pending", "failure"]
+    assert "description=FAIL 3/5 cases" in calls.read_text()
+    calls.unlink()
+    r = _run_smoke(repo, {**env, "FAIL_UP": "1"})
+    assert r.returncode == 2 and _statuses(calls) == ["pending", "failure"]
+
+
+def test_a_dirty_tree_runs_but_posts_nothing(tmp_path: Path) -> None:
+    repo, env, calls = _smoke_repo(tmp_path)
+    (repo / "scripts" / "migrate.sh").write_text("#!/bin/sh\nexit 0  # edited\n")
+    r = _run_smoke(repo, env)
+    assert r.returncode == 0 and _statuses(calls) == [] and "no live-smoke status" in r.stderr
+
+
+def test_an_unpushed_commit_is_refused_before_any_docker_call(tmp_path: Path) -> None:
+    repo, env, calls = _smoke_repo(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "local only"], check=True)
+    r = _run_smoke(repo, env)
+    assert r.returncode == 2 and "not on origin" in r.stderr
+    assert "docker compose" not in (calls.read_text() if calls.exists() else "")
+
+
+def test_live_smoke_uses_the_shared_helper_and_never_names_the_owner_stack() -> None:
     text = (HERE / "live_smoke.sh").read_text()
+    assert '. "$ROOT/scripts/lib/commit_status.sh"' in text and not (HERE / "commit_status.sh").exists()
     assert 'COMPOSE_PROJECT_NAME="cs-smoke-$STAMP"' in text and "free_port 3100 3199" in text
-    assert "*demo*|*prod*) die" in text and "trap 'exit 130' INT" in text and "--profile seed --profile jobs down -v --remove-orphans --rmi local" in text
-    assert "LANGSMITH_PROJECT=cs-smoke" in text and "commit_status_finish" in text
+    assert "*demo*|*prod*) die" in text and "trap 'exit 130' INT" in text and "LANGSMITH_PROJECT=cs-smoke" in text
