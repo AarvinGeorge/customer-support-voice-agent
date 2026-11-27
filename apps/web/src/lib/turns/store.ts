@@ -5,7 +5,8 @@
  * Use when: React components read conversation state (useTurnStore) or send a turn.
  * Inputs: SseEvents via apply, TurnRequests via sendTurn, the fault toggle via armFault.
  * Output: store state and actions.
- * Side effects: sendTurn makes one network request; nothing is persisted.
+ * Side effects: sendTurn makes one network request; apply reads the clock (the receipt time
+ *   of a confirmation card); nothing is persisted.
  * Role: the only stateful wrapper around the pure reducer; chat now, the voice relay later.
  */
 import { createStore, useStore, type StoreApi } from "zustand";
@@ -142,7 +143,7 @@ export function createTurnStore(): StoreApi<TurnStoreState> {
     armedFault: null,
     apply: (event) => {
       const prev = get().conversation;
-      const next = reduceEvent(prev, event);
+      const next = reduceEvent(prev, event, Date.now());
       if (next === prev) return;
       const added = next.turnOrder.slice(prev.turnOrder.length).map((turnId): ThreadItem => ({ kind: "turn", id: turnId, turnId }));
       set(added.length > 0 ? { conversation: next, thread: [...get().thread, ...added] } : { conversation: next });
