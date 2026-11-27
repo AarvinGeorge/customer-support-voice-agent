@@ -31,14 +31,14 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from agent.middleware.router import RouterMiddleware
 from agent.middleware.stubs import (
     DeadlineAndFaultMiddleware,
     GroundingMiddleware,
-    RouterMiddleware,
     ToolGuardMiddleware,
-    ToolVisibilityMiddleware,
     retry_on_placeholder,
 )
+from agent.middleware.visibility import ToolVisibilityMiddleware
 from agent.prompt import SYSTEM_PROMPT
 from agent.state import SupportState
 

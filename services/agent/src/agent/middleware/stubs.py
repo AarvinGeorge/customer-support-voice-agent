@@ -3,8 +3,8 @@ Use when: assembling the agent before the tasks that fill them land; each class 
 FILLED_BY. The hook each stub defines is the hook its real version uses, so the graph shape and
 the order test stay valid when it is filled in.
 Inputs: none.
-Output: RouterMiddleware, ToolVisibilityMiddleware, DeadlineAndFaultMiddleware, GroundingMiddleware,
-ToolGuardMiddleware, retry_on_placeholder, STUB_NAMES.
+Output: DeadlineAndFaultMiddleware, GroundingMiddleware, ToolGuardMiddleware, retry_on_placeholder,
+STUB_NAMES. RouterMiddleware and ToolVisibilityMiddleware are real (agent.middleware.router, .visibility).
 Side effects: none.
 Role: slots in the middleware stack. Async hooks only (D-048: the agent runs async only).
 """
@@ -13,44 +13,6 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
-
-
-class RouterMiddleware(AgentMiddleware):
-    """What: PLACEHOLDER for doc 07 s2.5 item 1 (before_model, can_jump_to end). Filled by CS-E-03.S8.T4:
-    reads TurnControl.route and ends the turn with a fixed line for verify, readback, escalate(reason),
-    decline_off_topic.
-    Use when: first in the stack.
-    Inputs: state, runtime.
-    Output: None (pass-through) until filled.
-    Side effects: none.
-    Role: route slot.
-    """
-
-    FILLED_BY = "CS-E-03.S8.T4"
-
-    @hook_config(can_jump_to=["end"])
-    async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
-        """What: pass-through. Use when: before each model call. Inputs: state, runtime.
-        Output: None. Side effects: none. Role: placeholder for the route check."""
-        return None
-
-
-class ToolVisibilityMiddleware(AgentMiddleware):
-    """What: PLACEHOLDER for doc 07 s2.5 item 4 (wrap_model_call). Filled by CS-E-03.S8.T4: picks the
-    V0, V1 or V2 tool set (s5.2) before every model call.
-    Use when: after the model-call limit, outside the fallback.
-    Inputs: model request, handler.
-    Output: the handler's response unchanged until filled.
-    Side effects: none.
-    Role: visibility slot.
-    """
-
-    FILLED_BY = "CS-E-03.S8.T4"
-
-    async def awrap_model_call(self, request: Any, handler: Callable[[Any], Awaitable[Any]]) -> Any:
-        """What: pass-through. Use when: each model call. Inputs: request, handler.
-        Output: handler(request). Side effects: none. Role: placeholder."""
-        return await handler(request)
 
 
 class DeadlineAndFaultMiddleware(AgentMiddleware):
@@ -125,5 +87,4 @@ def retry_on_placeholder(exc: BaseException) -> bool:
 
 retry_on_placeholder.FILLED_BY = "CS-E-07.S1.T2"  # type: ignore[attr-defined]
 
-STUB_NAMES = frozenset({"RouterMiddleware", "ToolVisibilityMiddleware", "DeadlineAndFaultMiddleware",
-                        "GroundingMiddleware", "ToolGuardMiddleware"})
+STUB_NAMES = frozenset({"DeadlineAndFaultMiddleware", "GroundingMiddleware", "ToolGuardMiddleware"})

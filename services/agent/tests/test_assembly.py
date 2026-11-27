@@ -93,8 +93,6 @@ def test_every_stub_names_the_task_that_fills_it():
     fills = {m.name: getattr(m, "FILLED_BY", None) for m in build_middleware(fallback_model=fake("fb"))
              if m.name in stubs.STUB_NAMES}
     assert fills == {
-        "RouterMiddleware": "CS-E-03.S8.T4",
-        "ToolVisibilityMiddleware": "CS-E-03.S8.T4",
         "DeadlineAndFaultMiddleware": "CS-E-07.S1.T2",
         "GroundingMiddleware": "CS-E-02.S4.T2",
         "ToolGuardMiddleware": "CS-E-03.S8.T6",
@@ -189,11 +187,9 @@ async def test_caching_middleware_marks_the_system_prompt_on_anthropic_models():
 @pytest.mark.parametrize("name", sorted(stubs.STUB_NAMES))
 async def test_stubs_are_pass_through(name: str):
     mw = {m.name: m for m in build_middleware(fallback_model=fake("fb"))}[name]
-    if hasattr(type(mw), "abefore_model") and name == "RouterMiddleware":
-        assert await mw.abefore_model({"messages": []}, None) is None  # pyright: ignore[reportArgumentType]  # stub ignores runtime
     if name == "GroundingMiddleware":
         assert await mw.aafter_model({"messages": []}, None) is None  # pyright: ignore[reportArgumentType]  # stub ignores runtime
-    if name in ("ToolVisibilityMiddleware", "DeadlineAndFaultMiddleware"):
+    if name == "DeadlineAndFaultMiddleware":
         out = await mw.awrap_model_call("REQ", _echo)  # pyright: ignore[reportArgumentType]  # pass-through probe
         assert out == ("handled", "REQ")
     if name == "ToolGuardMiddleware":
