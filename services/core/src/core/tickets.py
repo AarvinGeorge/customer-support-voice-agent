@@ -265,3 +265,13 @@ def transition(conn: Any, *, policy: PolicyConfig, clock: Clock, ticket_id: str,
         ticket_id=ticket_id, policy_version=policy.policy_version,
         args={"from_stage": from_stage, "to_stage": to_stage, "outcome": outcome}), clock=clock)
     return _ref(conn.execute(f"SELECT {_REF_COLS} FROM tickets WHERE id = %s", (ticket_id,)).fetchone())
+
+
+def session_lockout_ticket(conn: Any, session_id: uuid.UUID | str) -> TicketRef | None:
+    """What: the newest core-made access ticket of an unverified session (the verify lockout ticket).
+    Use when: a locked session tries to verify again and the answer should name the ticket. Inputs: connection,
+    session id. Output: TicketRef or None. Side effects: one SELECT. Role: lets VERIFY_LOCKED carry the same ticket
+    on every later attempt (doc 07 s3.1 `VERIFY_LOCKED {ticket}`)."""
+    row = conn.execute(f"SELECT {_REF_COLS} FROM tickets WHERE session_id = %s AND verified = false AND origin = 'core' "
+                       "AND category = 'access' ORDER BY created_at DESC, id DESC LIMIT 1", (session_id,)).fetchone()
+    return _ref(row) if row else None
