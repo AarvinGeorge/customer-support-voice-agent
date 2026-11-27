@@ -8,12 +8,12 @@
 set -eu
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-  -v agent_owner_pw="$AGENT_OWNER_PASSWORD" -v agent_app_pw="$AGENT_APP_PASSWORD" \
+  -v DBNAME="$POSTGRES_DB" -v agent_owner_pw="$AGENT_OWNER_PASSWORD" -v agent_app_pw="$AGENT_APP_PASSWORD" \
   -v core_owner_pw="$CORE_OWNER_PASSWORD" -v core_app_pw="$CORE_APP_PASSWORD" \
   -v knowledge_owner_pw="$KNOWLEDGE_OWNER_PASSWORD" -v knowledge_app_pw="$KNOWLEDGE_APP_PASSWORD" <<'SQL'
 CREATE EXTENSION IF NOT EXISTS vector;
 
-REVOKE ALL ON DATABASE quillstack FROM PUBLIC;
+REVOKE ALL ON DATABASE :"DBNAME" FROM PUBLIC;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
 CREATE ROLE agent_owner LOGIN PASSWORD :'agent_owner_pw';
@@ -23,7 +23,7 @@ CREATE ROLE core_app LOGIN PASSWORD :'core_app_pw';
 CREATE ROLE knowledge_owner LOGIN PASSWORD :'knowledge_owner_pw';
 CREATE ROLE knowledge_app LOGIN PASSWORD :'knowledge_app_pw';
 
-GRANT CONNECT ON DATABASE quillstack TO agent_owner, agent_app, core_owner, core_app, knowledge_owner, knowledge_app;
+GRANT CONNECT ON DATABASE :"DBNAME" TO agent_owner, agent_app, core_owner, core_app, knowledge_owner, knowledge_app;
 
 CREATE SCHEMA agent AUTHORIZATION agent_owner;
 CREATE SCHEMA core AUTHORIZATION core_owner;
