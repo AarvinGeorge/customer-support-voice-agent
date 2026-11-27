@@ -170,7 +170,7 @@ function StepNode({ step }: { step: InspectorStep }) {
                 <span
                   className={cn(
                     "inline-flex items-center rounded-full border border-rule bg-raised px-2 py-px font-sans text-label-sm",
-                    g1.provisional ? "text-warning" : "text-success",
+                    g1.calibration === "calibrated" ? "text-success" : "text-warning",
                   )}
                 >
                   <span className="sr-only">calibration </span>

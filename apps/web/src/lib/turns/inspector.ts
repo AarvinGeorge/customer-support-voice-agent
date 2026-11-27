@@ -170,6 +170,35 @@ export interface RetrievalView {
 }
 
 /**
+ * What: the Gate 1 sentence, built from the verdict, code_match and the numbers so it never
+ *   contradicts them (doc 07 s4.1: a code match or unknown code decides before the score bands,
+ *   an error is not evidence about the docs, uncalibrated has no thresholds).
+ * Use when: retrievalView.
+ * Inputs: the gate event, its score and thresholds, and the verdict and decision words.
+ * Output: one sentence.
+ * Side effects: none.
+ * Role: helper; the event carries no reason field, so the reason is inferred from verdict,
+ *   code_match and whether the score is below tau_low.
+ */
+function retrievalWords(g: GateEvent, top: number | null, low: number | null, high: number | null, verdict: string, decision: string): string {
+  if (g.verdict === "pass" && g.code_match === true) return `Matched the error code exactly: ${verdict}, so the agent ${decision}.`;
+  if (g.verdict === "error") return `Search error, so no score decided this: the agent ${decision}.`;
+  if (g.verdict === "uncalibrated") {
+    return `${top === null ? "No score" : `Score ${score(top)}`}, thresholds not calibrated: the agent ${decision}.`;
+  }
+  if (top === null) return `No score: ${verdict}, so the agent ${decision}.`;
+  if (g.verdict === "none" && low !== null && top >= low) {
+    return `Unknown error code (score ${score(top)} did not decide this): ${verdict}, so the agent ${decision}.`;
+  }
+  let band: string;
+  if (low !== null && top < low) band = `below tau_low ${score(low)}`;
+  else if (high !== null && top >= high) band = `at or above tau_high ${score(high)}`;
+  else if (low !== null && high !== null) band = `between tau_low ${score(low)} and tau_high ${score(high)}`;
+  else band = "without thresholds";
+  return `Score ${score(top)} is ${band}: ${verdict}, so the agent ${decision}.`;
+}
+
+/**
  * What: Gate 1 (retrieval) in numbers ("0.41 vs tau_low 0.30 · tau_high 0.45") and in words
  *   ("Score 0.41 is between tau_low 0.30 and tau_high 0.45: weak match, so the agent escalated.").
  * Use when: rendering a retrieval gate.
@@ -187,19 +216,9 @@ export function retrievalView(g: GateEvent): RetrievalView {
   const tone: TrailTone = g.verdict === "pass" ? "success" : g.verdict === "weak" || g.verdict === "uncalibrated" ? "warning" : "error";
   const thresholds = [low !== null ? `tau_low ${score(low)}` : null, high !== null ? `tau_high ${score(high)}` : null].filter(Boolean).join(" · ");
   let numbers: string;
-  let words: string;
-  if (top === null) {
-    numbers = thresholds || "no score";
-    words = `No score: ${verdict}, so the agent ${decision}.`;
-  } else {
-    numbers = thresholds ? `${score(top)} vs ${thresholds}` : score(top);
-    let band: string;
-    if (low !== null && top < low) band = `below tau_low ${score(low)}`;
-    else if (high !== null && top >= high) band = `at or above tau_high ${score(high)}`;
-    else if (low !== null && high !== null) band = `between tau_low ${score(low)} and tau_high ${score(high)}`;
-    else band = "without thresholds";
-    words = `Score ${score(top)} is ${band}: ${verdict}, so the agent ${decision}.`;
-  }
+  if (top === null) numbers = thresholds || "no score";
+  else numbers = thresholds ? `${score(top)} vs ${thresholds}` : score(top);
+  const words = retrievalWords(g, top, low, high, verdict, decision);
   const calibration = g.calibration_status ?? null;
   return {
     numbers,
@@ -315,7 +334,7 @@ export function inspectorSteps(turn: TurnView): InspectorStep[] {
     .map((step) => {
       const row = stepRow(step, turn);
       const done = step.completed;
-      const retrieval = step.gates.find((g) => g.gate === "retrieval");
+      const retrieval = step.gates.findLast((g) => g.gate === "retrieval");
       const grounding = step.gates.find((g) => g.gate === "grounding");
       const rule = done?.rule ?? null;
       const model =
@@ -441,7 +460,7 @@ export function decisionRows(turn: TurnView): DecisionRow[] {
   } else if (turn.verificationRequired !== null) {
     rows.push({ key: "identity", label: "Identity", text: `asked to verify (${turn.verificationRequired.reason.replace("_", " ")})`, tone: "muted" });
   }
-  const g1 = turn.gates.find((g) => g.gate === "retrieval");
+  const g1 = turn.gates.findLast((g) => g.gate === "retrieval");
   if (g1) {
     const r = retrievalView(g1);
     const top = g1.top_cosine;
@@ -529,6 +548,15 @@ export function inspectorSelection(order: readonly string[], picked: string | nu
  * Role: the drawer's way into the full trace (the trace proxy is designed only, D-035).
  */
 export function langsmithRunUrl(turnId: string, projectUrl: string | undefined): string | null {
-  if (!projectUrl || !/^https:\/\//.test(projectUrl)) return null;
-  return `${projectUrl.replace(/\/+$/, "")}/r/${encodeURIComponent(turnId)}?poll=true`;
+  if (!projectUrl) return null;
+  let url: URL;
+  try {
+    url = new URL(projectUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:") return null;
+  url.search = "";
+  url.hash = "";
+  return `${url.toString().replace(/\/+$/, "")}/r/${encodeURIComponent(turnId)}?poll=true`;
 }
