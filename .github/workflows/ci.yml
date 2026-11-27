@@ -5,6 +5,7 @@
 # Output: one green or red check per job: python (ruff, pyright, pytest per project incl. infra), repo tests, web, gitleaks, contracts-sync, import-guard, descriptors, compose, pg tests.
 # Side effects: none beyond the run itself. Role: the merge gate. ONE source of truth (D-068): every job only sets up the
 #   toolchain and runs `scripts/ci_local.sh <job>`; the commands, versions and skip rules live in that script.
+#   Images are built after this gate passes on main, by .github/workflows/images.yml (D-072), never here.
 name: ci
 
 on:

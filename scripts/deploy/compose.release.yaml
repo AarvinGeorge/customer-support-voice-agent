@@ -1,0 +1,21 @@
+# What: deploy override (D-072): every service compose.yaml builds runs a release image pinned by digest instead, and cannot be built.
+# Use when: scripts/deploy/deploy.sh merges it after compose.yaml (`-f compose.yaml -f scripts/deploy/compose.release.yaml`) for every
+#   command. Local dev never loads it, so `docker compose up --build` still builds from source.
+# Inputs: AGENT_IMAGE, CORE_IMAGE, KNOWLEDGE_IMAGE, WEB_IMAGE, each `ghcr.io/aarvingeorge/customer-support-voice-agent/<image>@sha256:<digest>`,
+#   set by deploy.sh from the release manifest (scripts/deploy/release_manifest.py env). A missing one stops Compose with its name.
+# Output: the same services, networks and commands as compose.yaml; only the image source changes.
+# Side effects: none. Role: production runs the artifact CI built once after the gates; `build: !reset` removes the build section,
+#   so no Compose command on this stack can build. The migrate, seed and ingest jobs share their service's image (same Dockerfile
+#   and SERVICE argument; scripts/test_deploy.py checks that pairing against compose.yaml). Each service is written out: Compose
+#   drops a `!reset` reached through a YAML alias, so anchors would silently keep the build section (CI job `compose` checks it).
+services:
+  agent_a: {image: "${AGENT_IMAGE:?set by scripts/deploy/deploy.sh from the release manifest}", build: !reset null}
+  agent_b: {image: "${AGENT_IMAGE:?set by scripts/deploy/deploy.sh from the release manifest}", build: !reset null}
+  migrate_agent: {image: "${AGENT_IMAGE:?set by scripts/deploy/deploy.sh from the release manifest}", build: !reset null}
+  core: {image: "${CORE_IMAGE:?set by scripts/deploy/deploy.sh from the release manifest}", build: !reset null}
+  seed_core: {image: "${CORE_IMAGE:?set by scripts/deploy/deploy.sh from the release manifest}", build: !reset null}
+  migrate_core: {image: "${CORE_IMAGE:?set by scripts/deploy/deploy.sh from the release manifest}", build: !reset null}
+  knowledge: {image: "${KNOWLEDGE_IMAGE:?set by scripts/deploy/deploy.sh from the release manifest}", build: !reset null}
+  ingest_knowledge: {image: "${KNOWLEDGE_IMAGE:?set by scripts/deploy/deploy.sh from the release manifest}", build: !reset null}
+  migrate_knowledge: {image: "${KNOWLEDGE_IMAGE:?set by scripts/deploy/deploy.sh from the release manifest}", build: !reset null}
+  web: {image: "${WEB_IMAGE:?set by scripts/deploy/deploy.sh from the release manifest}", build: !reset null}
