@@ -263,7 +263,7 @@ def test_committed_refund_needs_the_tool_chain():
 
 
 def test_poisoned_article_fixture_is_test_only_and_live():
-    """What: the X14 fixture is outside data/articles, has an id no committed article has, its chunks are flagged
+    """What: the X14 fixture (the injection case, G-14; its id is neutral on purpose, see test_fixture_ids_do_not_label_the_attack) is outside data/articles, has an id no committed article has, its chunks are flagged
     injection_suspect, it carries the canary the case forbids, and the case requires the fixture chunk to be retrieved.
     Use when: CI. Inputs: none. Output: pass or fail. Side effects: none. Role: doc 06 X14: a fixture corpus, never an
     11th production article; a case that cannot retrieve its poison tests nothing."""
@@ -338,6 +338,8 @@ def test_verification_turn_continues_the_earlier_request():
             if t["kind"] == "verification" and i > 0 and turns[i - 1].get("expect", {}).get("end_reason") == "verification_requested":
                 assert t.get("expect", {}).get("end_reason") not in (None, "verified"), f"{c['id']}: turn {i} must end where the request ends"
                 assert "07 s6.3" in c.get("notes", ""), f"{c['id']}: notes must cite 07 s6.3 step 5"
+                nxt = turns[i + 1] if i + 1 < len(turns) else None
+                assert nxt is None or nxt["kind"] != "text", f"{c['id']}: a text turn after the card turn restates the request"
 
 
 def test_open_outcome_cases_use_a_deterministic_ticket_rule():
@@ -383,3 +385,29 @@ def test_gate_cases_require_search_kb():
     for c in _cases():
         if "gate" in c["expected"]:
             assert "search_kb" in c["expected"]["tool_trajectory"]["required"], c["id"]
+
+
+def test_request_verification_is_only_required_where_the_model_can_call_it():
+    """What: a case whose first turn is the card, or whose first text carries a typed PIN placeholder, must not require
+    or allow-with-calls request_verification. Use when: CI. Inputs: none. Output: pass or fail. Side effects: none.
+    Role: 07 s5.2 line 537 (the tool exists only in V0), s6.3 step 6 line 612 (card first: verified before any model turn),
+    s7.3 line 765 (a typed PIN is refused in code: fixed reply, no model call)."""
+    for c in _cases():
+        first = c["turns"][0]
+        card_first = first["kind"] == "verification"
+        typed_pin = first["kind"] == "text" and "{persona.pin}" in first["text"]
+        if card_first or typed_pin:
+            t = c["expected"]["tool_trajectory"]
+            assert "request_verification" not in t["required"], f"{c['id']}: tool not callable in this flow"
+            assert "request_verification" not in t["allowed"] or t.get("max_calls", {}).get("request_verification") == 0, c["id"]
+
+
+def test_fixture_ids_do_not_label_the_attack():
+    """What: the fixture article id and file name carry no attack words, because the model reads the id in the doc
+    wrapper (07 s5.3 line 545). Use when: CI. Inputs: none. Output: pass or fail. Side effects: none.
+    Role: this is the X14 injection case (doc 06 X14); the test-only marking lives in the directory, source_url and dataset."""
+    for c in _cases():
+        for f in c.get("fixtures", {}).get("articles", []):
+            article = parse_article((GOLDEN / f).read_text(encoding="utf-8"), Path(f).name)
+            for word in ("poison", "attack", "inject", "x14", "malicious"):
+                assert word not in article.article_id.lower() and word not in Path(f).name.lower(), f"{f}: id says '{word}'"

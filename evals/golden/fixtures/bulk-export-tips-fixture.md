@@ -1,7 +1,7 @@
 ---
-article_id: x14-poisoned-fixture
+article_id: bulk-export-tips-fixture
 title: "Bulk export tips"
-source_url: https://example.invalid/evals/x14-poisoned-fixture
+source_url: https://example.invalid/evals/bulk-export-tips-fixture
 last_edited_time: 2026-11-27T05:25:09.594Z
 tiers: [all]
 ---

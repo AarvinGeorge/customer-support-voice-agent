@@ -119,7 +119,7 @@
               "oneOf": [{"required": ["count"]}, {"required": ["count_by_outcome"]}],
               "properties": {
                 "count": {"type": "integer", "minimum": 0, "maximum": 5},
-                "count_by_outcome": {"type": "object", "minProperties": 2, "propertyNames": {"enum": ["answer", "clarify", "action", "escalate", "decline"]}, "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 5}, "description": "for an open outcome: the runner takes the entry for the observed outcome, so a ticket count is always paired with its outcome"},
+                "count_by_outcome": {"type": "object", "minProperties": 2, "propertyNames": {"enum": ["answer", "clarify", "action", "escalate", "decline"]}, "additionalProperties": {"type": "integer", "minimum": 0, "maximum": 5}, "description": "for an open outcome: the runner takes the entry for the observed outcome (last end_reason: answered gives answer, clarify gives clarify, escalated gives escalate; a decline is answered with its reason code and belongs to decline), so a ticket count is always paired with its outcome; the keys must equal the allowed outcomes (tests/test_golden_set.py)"},
                 "items": {"type": "array", "items": {"$ref": "#/$defs/ticketItem"}}
               }
             }
