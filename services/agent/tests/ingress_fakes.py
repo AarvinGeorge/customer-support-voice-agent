@@ -60,6 +60,12 @@ class MemoryTurnStore:
         s = self.sessions[session_id]
         self.sessions[session_id] = replace(s, user_turns=s.user_turns + 1)
 
+    async def last_turn(self, session_id: str, before_turn_id: str) -> tuple[str, str] | None:
+        """What: (turn_id, status) of the session's latest turn other than before_turn_id. Use when: adjacency (I1).
+        Inputs: ids. Output: pair or None. Side effects: none. Role: fake (insertion order is start order)."""
+        rows = [t for t in self.turns.values() if t.session_id == session_id and t.turn_id != before_turn_id]
+        return (rows[-1].turn_id, rows[-1].status) if rows else None
+
     async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None:
         """What: final row. Use when: step 16. Inputs: id, outcome, time. Output: none. Side effects: updates. Role: fake."""
         t = self.turns[turn_id]

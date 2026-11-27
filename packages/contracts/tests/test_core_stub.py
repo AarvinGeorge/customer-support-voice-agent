@@ -187,3 +187,39 @@ def test_unknown_path_and_bad_query_use_envelope(client):
     r = tc.get("/v1/me/charges?since_days=9999", headers=HEAD)
     err = ErrorEnvelope.model_validate(r.json()).error
     assert r.status_code == 422 and err.code == "VALIDATION_ERROR" and err.trace_id == "trace-1"
+
+
+PREPARE_BODY = {"charge_ref": {"ending": "0413", "on": "2026-11-21"}, "reason": "duplicate", "note": "charged twice"}
+
+
+def test_prepare_opens_the_pending_that_me_context_reports_until_commit(client):
+    """What: after a prepare, me/context carries the open pending (PendingPublic card fields); a commit in the same
+    turn is 409 CONFIRMATION_REQUIRED; a commit in a later turn succeeds and the pending leaves me/context.
+    Use when: CI. Inputs: client. Output: assertion. Side effects: none. Role: doc 07 s3.1 MeContext.pending_action,
+    s3.3 commit "X-Turn-Id differs from prepare_turn_id"."""
+    tc, _ = client
+    _verify(tc)
+    assert tc.get("/v1/me/context", headers=HEAD).json()["pending_action"] is None
+    tc.post("/v1/actions/refund/prepare", json=PREPARE_BODY, headers={**HEAD, "X-Turn-Id": "turn-1",
+                                                                      "Idempotency-Key": "k1"})
+    pending = c.MeContext.model_validate(tc.get("/v1/me/context", headers=HEAD).json()).pending_action
+    assert pending is not None and pending.pending_action_id == STUB_PENDING_ID and pending.state == "prepared"
+    same = tc.post(f"/v1/actions/pending/{STUB_PENDING_ID}/commit", json={}, headers={**HEAD, "X-Turn-Id": "turn-1"})
+    assert same.status_code == 409 and same.json()["error"]["code"] == "CONFIRMATION_REQUIRED"
+    later = tc.post(f"/v1/actions/pending/{STUB_PENDING_ID}/commit", json={}, headers={**HEAD, "X-Turn-Id": "turn-2"})
+    assert later.status_code == 200
+    assert tc.get("/v1/me/context", headers=HEAD).json()["pending_action"] is None
+
+
+def test_cancel_closes_the_pending_and_a_second_cancel_is_not_active(client):
+    """What: cancel returns changed false and removes the pending from me/context; a second cancel is 409
+    PENDING_NOT_ACTIVE. Use when: CI. Inputs: client. Output: assertion. Side effects: none. Role: s3.3 cancel."""
+    tc, _ = client
+    _verify(tc)
+    tc.post("/v1/actions/refund/prepare", json=PREPARE_BODY, headers={**HEAD, "X-Turn-Id": "turn-1",
+                                                                      "Idempotency-Key": "k1"})
+    first = tc.post(f"/v1/actions/pending/{STUB_PENDING_ID}/cancel", json={}, headers={**HEAD, "X-Turn-Id": "turn-2"})
+    assert first.status_code == 200 and first.json()["changed"] is False
+    assert tc.get("/v1/me/context", headers=HEAD).json()["pending_action"] is None
+    again = tc.post(f"/v1/actions/pending/{STUB_PENDING_ID}/cancel", json={}, headers={**HEAD, "X-Turn-Id": "turn-3"})
+    assert again.status_code == 409 and again.json()["error"]["code"] == "PENDING_NOT_ACTIVE"

@@ -105,22 +105,53 @@ class TurnStore(Protocol):
     """What: the agent.sessions and agent.turns operations ingress uses. Use when: typing.
     Inputs: see methods. Output: see methods. Side effects: database. Role: storage port."""
 
-    async def get_session(self, session_id: str) -> SessionRow | None: ...
+    async def get_session(self, session_id: str) -> SessionRow | None:
+        """What: read one session. Use when: step 1. Inputs: id. Output: row or None.
+        Side effects: SELECT. Role: port method."""
+        ...
     async def find_turn(self, session_id: str, client_turn_id: str,
-                        realtime_call_id: str | None = None) -> TurnRow | None: ...
-    async def sweep(self, session_id: str, now: datetime) -> int: ...
-    async def insert_turn(self, row: TurnRow) -> None: ...
-    async def count_turn(self, session_id: str) -> None: ...
-    async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None: ...
-    async def mark_events_incomplete(self, turn_ids: set[str]) -> None: ...
+                        realtime_call_id: str | None = None) -> TurnRow | None:
+        """What: replay lookup. Use when: step 4. Inputs: ids. Output: row or None.
+        Side effects: SELECT. Role: port method."""
+        ...
+    async def sweep(self, session_id: str, now: datetime) -> int:
+        """What: mark overdue running turns failed. Use when: step 6. Inputs: id, now. Output: rows swept.
+        Side effects: UPDATE. Role: port method."""
+        ...
+    async def insert_turn(self, row: TurnRow) -> None:
+        """What: insert the running row. Use when: step 9. Inputs: row. Output: none.
+        Side effects: INSERT; DuplicateTurn. Role: port method."""
+        ...
+    async def count_turn(self, session_id: str) -> None:
+        """What: user_turns + 1. Use when: step 9. Inputs: id. Output: none.
+        Side effects: UPDATE. Role: port method."""
+        ...
+    async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None:
+        """What: write the final row. Use when: step 16. Inputs: id, outcome, end time. Output: none.
+        Side effects: UPDATE. Role: port method."""
+        ...
+    async def last_turn(self, session_id: str, before_turn_id: str) -> tuple[str, str] | None:
+        """What: (turn_id, status) of the session's latest other turn. Use when: s7.3 adjacency. Inputs: session id, current turn id. Output: pair or None.
+        Side effects: SELECT. Role: port method (delivery record)."""
+        ...
+    async def mark_events_incomplete(self, turn_ids: set[str]) -> None:
+        """What: set events_complete false. Use when: trajectory writer drops. Inputs: turn ids. Output: none.
+        Side effects: UPDATE. Role: port method."""
+        ...
 
 
 class TurnLock(Protocol):
     """What: per-session turn lock with an owner token. Use when: typing.
     Inputs: see methods. Output: see methods. Side effects: Redis. Role: lock port."""
 
-    async def acquire(self, session_id: str, token: str, ttl_ms: int) -> bool: ...
-    async def release(self, session_id: str, token: str) -> bool: ...
+    async def acquire(self, session_id: str, token: str, ttl_ms: int) -> bool:
+        """What: SET NX PX with the owner token. Use when: step 8. Inputs: id, token, ttl. Output: True when taken.
+        Side effects: Redis. Role: port method."""
+        ...
+    async def release(self, session_id: str, token: str) -> bool:
+        """What: compare-and-delete. Use when: turn end. Inputs: id, token. Output: True when released.
+        Side effects: Redis. Role: port method."""
+        ...
 
 
 class CallKeys(Protocol):
@@ -128,7 +159,10 @@ class CallKeys(Protocol):
     Inputs: session id, call id. Output: True when this request claimed the key. Side effects: Redis.
     Role: voice call dedupe port."""
 
-    async def claim(self, session_id: str, call_id: str) -> bool: ...
+    async def claim(self, session_id: str, call_id: str) -> bool:
+        """What: SET NX EX 120 on the call key. Use when: step 7, voice. Inputs: session id, call id. Output: True when claimed.
+        Side effects: Redis. Role: port method."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -504,6 +538,18 @@ class PgTurnStore:
         async with self.pool.connection() as conn:
             await conn.execute("UPDATE agent.sessions SET user_turns = user_turns + 1, last_active_at = now() "
                                "WHERE session_id = %s", (session_id,))
+
+    async def last_turn(self, session_id: str, before_turn_id: str) -> tuple[str, str] | None:
+        """What: (turn_id, status) of the session's latest turn other than before_turn_id (the current one).
+        Use when: the s7.3 adjacency rule (StructuredInput last_turn): a yes commits only when this is the read-back
+        turn and it is completed. Inputs: session id, current turn id. Output: pair or None. Side effects: SELECT.
+        Role: read (the turn's final row status is the delivery record)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT turn_id::text, status FROM agent.turns WHERE session_id = %s AND turn_id <> %s "
+                "ORDER BY started_at DESC, turn_id DESC LIMIT 1", (session_id, before_turn_id))
+            r = await cur.fetchone()
+        return (r[0], r[1]) if r else None
 
     async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None:
         """What: the final row. Use when: step 16. Inputs: id, outcome, end time. Output: none.
