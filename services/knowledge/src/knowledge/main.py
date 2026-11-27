@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Request
 
 from contracts.knowledge_api import SearchRequest, SearchResponse
-from knowledge import auth, config, db, errors, search
+from knowledge import auth, config, db, errors, gate, search
 from knowledge.embeddings import EmbeddingError, OpenAIEmbedder
 from knowledge.ids import uuid7
 
@@ -45,12 +45,14 @@ def _id_or(value: str | None, make) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """What: startup and shutdown hook. Use when: the server starts. Inputs: app.
-    Output: yields while serving. Side effects: raises RuntimeError if a token is unset; sets app.state.db.
+    Output: yields while serving. Side effects: raises RuntimeError if a token is unset; sets app.state.db and app.state.calibration (None when
+    the file is absent; a bad file stops startup with CalibrationError).
     Role: fail loudly instead of serving without auth."""
     auth.check_configured()
     if not os.environ.get("KNOWLEDGE_DB_URL"):
         raise RuntimeError("KNOWLEDGE_DB_URL is not set")
     app.state.db = db.Database(os.environ.get("KNOWLEDGE_DB_URL", ""))
+    app.state.calibration = gate.load_calibration(gate.calibration_path())
     try:
         app.state.embedder = OpenAIEmbedder()
     except EmbeddingError as exc:  # no key: search runs keyword-only instead of the service refusing to start
@@ -91,8 +93,8 @@ def create_app() -> FastAPI:
     def readyz(request: Request) -> dict:
         """What: readiness: database answers and at least one chunk is ingested. Use when: callers and checks.
         Inputs: request. Output: {"status": "ready", "database": "ok", "corpus_version", "chunks", "embedding_model"}
-        or a 503 envelope (details carry chunks). Side effects: two SELECTs.
-        Role: doc 07 s4.2; the calibration-file check arrives with CS-E-02.S3.T3."""
+        calibration_status, or a 503 envelope (details carry chunks, or the model mismatch). Side effects: two SELECTs.
+        Role: doc 07 s4.2: a calibration file whose embedding model differs from the configured one is not ready."""
         st = request.app.state.db.status()
         if st is None:
             raise errors.ApiError(503, "RETRIEVAL_UNAVAILABLE", "db_unavailable", "The knowledge database is not reachable.",
@@ -101,8 +103,15 @@ def create_app() -> FastAPI:
             raise errors.ApiError(503, "RETRIEVAL_UNAVAILABLE", "retrieval_failed",
                                   "The knowledge base has no content yet.", retryable=True, retry_after_s=5,
                                   details={"chunks": st["chunks"]})
+        cal = request.app.state.calibration
+        if cal is not None and cal.embedding_model != config.embedding_model():
+            raise errors.ApiError(503, "RETRIEVAL_UNAVAILABLE", "retrieval_failed",
+                                  "The calibration file was made for a different embedding model.", retryable=False,
+                                  details={"calibration_model": cal.embedding_model,
+                                           "embedding_model": config.embedding_model()})
         return {"status": "ready", "database": "ok", "corpus_version": st["corpus_version"], "chunks": st["chunks"],
-                "embedding_model": config.embedding_model()}
+                "embedding_model": config.embedding_model(),
+                "calibration_status": cal.status if cal else "none"}
 
     @app.post("/v1/search", response_model=SearchResponse, dependencies=[Depends(auth.require_scope("search"))])
     async def search_route(req: SearchRequest, request: Request) -> SearchResponse:
@@ -110,7 +119,7 @@ def create_app() -> FastAPI:
         Inputs: SearchRequest body, bearer token with scope search. Output: SearchResponse (200), 401, 422 or 503
         envelopes. Side effects: one embedding call, two SQL queries. Role: doc 07 s4.1."""
         return await search.run_search(req, request.app.state.db, request.app.state.embedder,
-                                       request.state.request_id, request.state.trace_id)
+                                       request.state.request_id, request.state.trace_id, request.app.state.calibration)
 
     @app.get("/v1/corpus", dependencies=[Depends(auth.require_scope("corpus.read"))])
     def corpus(request: Request) -> dict:
