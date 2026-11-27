@@ -22,6 +22,17 @@ from pathlib import Path
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
+DB_SERVICES = ("agent", "core", "knowledge")
+DB_ROLES = ("owner", "app")
+DB_NAME = "quillstack"
+DB_HOST = "postgres:5432"
+# (service, role, env name) for the six URLs of doc 07 section 15.2: *_app is the runtime role, *_owner migrates.
+DB_URL_PLAN = tuple(
+    (svc, role, f"{svc.upper()}_DB_URL" if role == "app" else f"{svc.upper()}_DB_OWNER_URL")
+    for svc in DB_SERVICES for role in DB_ROLES
+)
+
+
 @dataclass(frozen=True)
 class KeySpec:
     """What: description of one secret the app needs.
@@ -31,7 +42,7 @@ class KeySpec:
     name: str
     purpose: str
     prefixes: tuple[str, ...]  # accepted prefixes; empty means no prefix check
-    source: str  # "provider" (a person pastes it) or "generated" (random, made by gen)
+    source: str  # "provider" (pasted), "generated" (random, made by gen) or "composed" (built by gen from others)
     verify_url: str | None = None
 
 
@@ -54,6 +65,10 @@ REGISTRY: tuple[KeySpec, ...] = (
     KeySpec("DEMO_ACCESS_CODE", "Gate on the demo URL (shared with reviewers)", (), "generated"),
     KeySpec("OPERATOR_ACCESS_CODE", "Gate on the operator approvals page", (), "generated"),
     KeySpec("POSTGRES_PASSWORD", "Local and VM Postgres password (Compose)", (), "generated"),
+    *(KeySpec(f"{svc.upper()}_{role.upper()}_PASSWORD", f"Postgres password of role {svc}_{role}", (),
+              "generated") for svc in DB_SERVICES for role in DB_ROLES),
+    *(KeySpec(name, f"Database URL for role {svc}_{role} (composed from its password)", (), "composed")
+      for svc, role, name in DB_URL_PLAN),
 )
 SPECS = {s.name: s for s in REGISTRY}
 
@@ -209,6 +224,7 @@ def cmd_verify() -> int:
 def generate_missing(path: Path) -> list[str]:
     """What: create a random value for every generated secret that is not set yet.
     Use when: first setup, or after adding a new generated secret. Inputs: env file path.
+    Then composes the six database URLs (doc 07 s15.2) from the role passwords.
     Output: names that were created (empty if nothing was missing); never overwrites a set value.
     Side effects: writes the env file. Role: generator for internal secrets."""
     env = read_env(path)
@@ -219,6 +235,13 @@ def generate_missing(path: Path) -> list[str]:
         short = spec.name in ("DEMO_ACCESS_CODE", "OPERATOR_ACCESS_CODE")
         upsert_env(path, spec.name, secrets.token_urlsafe(9 if short else 32))
         made.append(spec.name)
+    env = read_env(path)
+    for svc, role, name in DB_URL_PLAN:
+        if env.get(name):
+            continue
+        pw = env[f"{svc.upper()}_{role.upper()}_PASSWORD"]
+        upsert_env(path, name, f"postgresql://{svc}_{role}:{pw}@{DB_HOST}/{DB_NAME}")
+        made.append(name)
     return made
 
 
