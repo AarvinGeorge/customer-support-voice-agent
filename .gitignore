@@ -17,3 +17,5 @@ next-env.d.ts
 apps/web/AGENTS.md
 *.tsbuildinfo
 apps/web/AGENTS.md
+# Deploy state written by scripts/deploy/deploy.sh (current and previous tag)
+.deploy/

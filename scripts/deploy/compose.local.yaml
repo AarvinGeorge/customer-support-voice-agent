@@ -1,0 +1,6 @@
+# What: local overlay for the deploy dry-run (scripts/deploy/deploy.sh --local). Use when: proving the VM step order on a laptop.
+# Inputs: EDGE_PORT. Output: publishes Caddy on 127.0.0.1:EDGE_PORT instead of the VM's 80 and 443.
+# Side effects: none. Role: the only difference from the VM form is the published port; images, networks and commands match.
+services:
+  caddy:
+    ports: !override ["127.0.0.1:${EDGE_PORT:-8088}:80"]
