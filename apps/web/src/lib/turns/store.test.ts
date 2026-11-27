@@ -106,8 +106,83 @@ describe("turn store", () => {
     await expect(store.getState().sendTurn(SID, req(0), { deps: { fetch: fetchMock as unknown as typeof fetch } })).rejects.toBeInstanceOf(NetworkError);
     const conv = store.getState().conversation;
     expect(conv.turns[turnIds[0] as string]?.lastSeq).toBe(4);
-    expect(conv.turns[turnIds[0] as string]?.phase).toBe("streaming");
+    expect(conv.turns[turnIds[0] as string]?.phase).toBe("failed");
+    expect(conv.turns[turnIds[0] as string]?.failure).toEqual({ reason: "dropped", retryable: true, message: "The connection dropped before this reply finished." });
     expect((store.getState().connection.error as NetworkError).reason).toBe("dropped");
+  });
+
+  it("an aborted turn ends in the failed state, not streaming (review PR #16, I1)", async () => {
+    const store = createTurnStore();
+    const partial = s1.filter((e) => e.turn_id === turnIds[0]).slice(0, 3);
+    const ctrl = new AbortController();
+    const fetchMock = vi.fn(async (_u: RequestInfo | URL, init?: RequestInit) => {
+      const enc = new TextEncoder();
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(enc.encode(toWire(partial)));
+          init?.signal?.addEventListener("abort", () => c.error(new DOMException("aborted", "AbortError")));
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    });
+    const p = store.getState().sendTurn(SID, req(0), { signal: ctrl.signal, deps: { fetch: fetchMock as unknown as typeof fetch } });
+    await vi.waitFor(() => expect(store.getState().conversation.turns[turnIds[0] as string]?.lastSeq).toBe(3));
+    ctrl.abort();
+    await expect(p).rejects.toBeInstanceOf(NetworkError);
+    const t = store.getState().conversation.turns[turnIds[0] as string];
+    expect(t?.phase).toBe("failed");
+    expect(t?.failure?.reason).toBe("aborted");
+  });
+
+  it("a watchdog expiry ends the turn in the failed state with its reason", async () => {
+    const store = createTurnStore();
+    const partial = s1.filter((e) => e.turn_id === turnIds[0]).slice(0, 2);
+    const fetchMock = vi.fn(async () => {
+      const enc = new TextEncoder();
+      const body = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(enc.encode(toWire(partial))); } });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    });
+    await expect(store.getState().sendTurn(SID, req(0), { noBytesMs: 30, deps: { fetch: fetchMock as unknown as typeof fetch } })).rejects.toBeInstanceOf(NetworkError);
+    const t = store.getState().conversation.turns[turnIds[0] as string];
+    expect(t?.phase).toBe("failed");
+    expect(t?.failure).toEqual({ reason: "no_bytes_timeout", retryable: true, message: "The reply stopped arriving." });
+  });
+
+  it("the failed state survives the next sendTurn clearing connection.error", async () => {
+    const store = createTurnStore();
+    const partial = s1.filter((e) => e.turn_id === turnIds[0]).slice(0, 4);
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      const events = call++ === 0 ? partial : s1.filter((e) => e.turn_id === turnIds[1]);
+      return new Response(toWire(events), { status: 200, headers: { "content-type": "text/event-stream" } });
+    });
+    const deps = { fetch: fetchMock as unknown as typeof fetch };
+    await expect(store.getState().sendTurn(SID, req(0), { deps })).rejects.toBeInstanceOf(NetworkError);
+    await store.getState().sendTurn(SID, req(1), { deps });
+    expect(store.getState().connection.error).toBeNull();
+    expect(store.getState().conversation.turns[turnIds[0] as string]?.phase).toBe("failed");
+  });
+
+  it("sendTurn with text adds a chat user item before the turn item in the thread", async () => {
+    const store = createTurnStore();
+    await store.getState().sendTurn(SID, req(0), { deps: { fetch: fixtureFetch() as unknown as typeof fetch } });
+    const thread = store.getState().thread;
+    expect(thread.map((i) => i.kind)).toEqual(["user", "turn"]);
+    expect(thread[0]).toMatchObject({ kind: "user", text: "message 0", mode: "chat" });
+    expect(thread[1]).toEqual({ kind: "turn", id: turnIds[0], turnId: turnIds[0] });
+  });
+
+  it("addUserMessage and apply build one unified thread for chat and voice", () => {
+    const store = createTurnStore();
+    const voice = loadFixture("voice_turn.jsonl").map((e) => ({ ...e, session_id: SID }));
+    store.getState().addUserMessage("refund please", "chat");
+    for (const e of s1.filter((e) => e.turn_id === turnIds[0])) store.getState().apply(e);
+    store.getState().addUserMessage("when will it arrive", "voice");
+    for (const e of voice) store.getState().apply(e);
+    const thread = store.getState().thread;
+    expect(thread.map((i) => (i.kind === "user" ? `user:${i.mode}` : "turn"))).toEqual(["user:chat", "turn", "user:voice", "turn"]);
+    store.getState().reset();
+    expect(store.getState().thread).toEqual([]);
   });
 
   it("reset returns to the initial conversation and keeps nothing armed", () => {
