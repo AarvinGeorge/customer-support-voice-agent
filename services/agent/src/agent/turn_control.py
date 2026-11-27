@@ -50,12 +50,12 @@ class Route:
 class TurnControl:
     """What: one turn's mutable control state: route, model attempt role, tool counters, failure counts.
     Use when: created once per turn by ingress or stream_agent_turn; read and mutated by tools, ToolGuard,
-    RouterMiddleware and (later) DeadlineAndFaultMiddleware.
+    RouterMiddleware and DeadlineAndFaultMiddleware.
     Inputs: session_id, turn_id, mode, deadline (time.monotonic() value; None means no deadline),
     demo_fault (already gated by DEMO_FAULTS_ENABLED at ingress), events (the turn stream or None).
     Output: the object. Side effects: none.
     Role: D-048 counters live here (executed tool calls only; incremented before the first await); the model
-    attempt fields (attempt_role, model_attempts, fallback_used, primary_error, fault_fired) are written by
+    attempt fields (attempt_role, model_attempts, fallback_used, primary_error, primary_model, fault_fired) are written by
     DeadlineAndFaultMiddleware and read by the retry predicate and the usage builder.
     """
 
@@ -71,6 +71,7 @@ class TurnControl:
     model_attempts: int = 0          # provider calls actually sent (DeadlineAndFaultMiddleware), for Usage.model_calls
     fallback_used: bool = False      # set when the fallback model ran this turn
     primary_error: BaseException | None = None  # last primary failure, for model.fallback reason
+    primary_model: str | None = None  # id of the primary client, for model.fallback from_model
     fault_fired: bool = False        # an injected llm_429 was raised this turn
     tool_calls: int = 0
     per_tool: dict[str, int] = field(default_factory=dict)

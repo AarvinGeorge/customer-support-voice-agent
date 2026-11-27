@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -32,7 +33,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.utils.uuid import uuid7
 from pydantic import ValidationError
 
+from agent.deadline import TurnBudgetExhausted
 from agent.sse import TurnMeta, TurnOutcome, TurnStream, start_turn
+from agent.turn_control import TurnControl, bind_turn_control
 
 log = logging.getLogger("agent.ingress")
 
@@ -131,7 +134,8 @@ class CallKeys(Protocol):
 @dataclass(frozen=True)
 class IngressInput:
     """What: one turn request after auth and body parsing. Use when: Ingress.handle.
-    Inputs: session, visitor, client turn id, mode, input kind, redacted text, realtime call id, raw body
+    Inputs: session, visitor, client turn id, mode, input kind, redacted text, realtime call id, raw body, the
+    gated demo fault
     (TurnRequest or VoiceAskRequest); merged_transcript is set by ingress at step 12 (the wrapped
     <voice_transcript> user message for the agent body to place before this turn's message, or None);
     redact_context is the session's scanner context (doc 07 s11.1 conditions) for text that ingress hooks store.
@@ -145,6 +149,7 @@ class IngressInput:
     text: str | None = None
     realtime_call_id: str | None = None
     body: Any = None
+    demo_fault: str | None = None  # already gated by demo_fault_from_header (doc 07 s10), request-scoped
     merged_transcript: str | None = None
     redact_context: RedactContext | None = None
 
@@ -337,16 +342,23 @@ class Ingress:
         stream = TurnStream(TurnMeta(inp.session_id, row.turn_id, inp.mode, self.served_by, inp.input_kind),
                             sink=self.trajectory.add if self.trajectory is not None else None)  # doc 07 s12 turn_events
         loop_budget = max(budget - self.reserve_s, 0.0)  # the reserve is kept for the escalation ticket
+        deadline_mono = time.monotonic() + budget  # TurnControl.deadline: clamps take the reserve off this
 
         async def body(s: TurnStream) -> TurnOutcome:
-            """What: the agent loop under asyncio.timeout. Use when: the turn task. Inputs: stream.
-            Output: outcome (deadline outcome on timeout). Side effects: model and tools. Role: step 14."""
+            """What: the agent loop under asyncio.timeout, with the turn's one TurnControl bound (deadline = the 45 s
+            or 20 s turn deadline, so every clamp subtracts the 3 s reserve from it; the request's demo fault).
+            Use when: the turn task. Inputs: stream.
+            Output: outcome (deadline outcome on timeout or on a call skipped by the clamp). Side effects: model
+            and tools; binds TURN_CONTROL in this task. Role: step 14; doc 07 s8.2 deadline path."""
+            control = TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
+                                  deadline=deadline_mono, demo_fault=inp.demo_fault, events=s)
+            bind_turn_control(control)  # the turn task's own context; the only .set() (spike 15)
             cm = asyncio.timeout(loop_budget)
             try:
                 async with cm:
                     return await self.run_agent(s, await self._merge(inp, row), row)
-            except TimeoutError:
-                if not cm.expired():  # an inner timeout (httpx, wait_for) is an error, not the deadline
+            except (TimeoutError, TurnBudgetExhausted) as exc:
+                if isinstance(exc, TimeoutError) and not cm.expired():  # an inner timeout is an error, not the deadline
                     raise
                 err = ErrorBody.model_validate({"class": "turn_deadline_exceeded", "code": "TURN_DEADLINE",
                                                 "message": DEADLINE_MESSAGE, "retryable": True, "changed": None,
