@@ -91,7 +91,7 @@ class FormatTests(unittest.TestCase):
 
     def test_only_provider_keys_are_typed_by_a_person(self):
         typed = {s.name for s in keys.REGISTRY if s.source == "provider"}
-        self.assertEqual(typed, {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LANGSMITH_API_KEY"})
+        self.assertEqual(typed, {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LANGSMITH_API_KEY", "NOTION_TOKEN"})
 
     def test_mask_never_shows_more_than_last_four(self):
         self.assertEqual(keys.mask("lsv2_sk_abcdefghijkl"), "set (ends ...ijkl)")

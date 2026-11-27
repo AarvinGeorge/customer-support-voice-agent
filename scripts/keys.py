@@ -42,6 +42,8 @@ REGISTRY: tuple[KeySpec, ...] = (
             "https://api.openai.com/v1/models"),
     KeySpec("LANGSMITH_API_KEY", "LangSmith tracing and drawer reads (service key)",
             ("lsv2_sk_", "lsv2_pt_"), "provider", "https://api.smith.langchain.com/api/v1/sessions?limit=1"),
+    KeySpec("NOTION_TOKEN", "Read-only Notion integration for the help-center source (D-034)",
+            ("ntn_", "secret_"), "provider", "https://api.notion.com/v1/users/me"),
     KeySpec("CORE_TOKEN_AGENT", "Agent tool wrappers to core (no commit scope)", (), "generated"),
     KeySpec("CORE_TOKEN_COMMIT", "Agent ingress confirmation code to core (commit scope)", (), "generated"),
     KeySpec("CORE_TOKEN_OPS", "Agent ops router to core (approvals)", (), "generated"),
@@ -132,6 +134,8 @@ def verify(spec: KeySpec, value: str) -> str:
     headers = {"User-Agent": "cs-voice-agent-keys/1"}
     if spec.name == "ANTHROPIC_API_KEY":
         headers |= {"x-api-key": value, "anthropic-version": "2023-06-01"}
+    elif spec.name == "NOTION_TOKEN":
+        headers |= {"Authorization": f"Bearer {value}", "Notion-Version": "2022-06-28"}
     elif spec.name == "LANGSMITH_API_KEY":
         headers |= {"x-api-key": value}
     else:
