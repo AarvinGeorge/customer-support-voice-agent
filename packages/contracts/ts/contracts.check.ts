@@ -19,5 +19,21 @@ export function finalText(ev: SseEvent): string | null {
   return null;
 }
 
+/**
+ * What: a minimal TurnRequest.
+ * Use when: compile check only.
+ * Inputs: none.
+ * Output: a TurnRequest.
+ * Side effects: none.
+ * Role: proves the request type accepts the contract's required fields.
+ */
 export const sample: TurnRequest = { client_turn_id: "00000000-0000-4000-8000-000000000000", text: "hi" };
+/**
+ * What: the chat turn deadline in milliseconds.
+ * Use when: compile check only.
+ * Inputs: none.
+ * Output: a number.
+ * Side effects: none.
+ * Role: proves the generated LIMITS constants are usable as numbers.
+ */
 export const chatDeadlineMs: number = LIMITS.CHAT_TURN_DEADLINE_S * 1000;
