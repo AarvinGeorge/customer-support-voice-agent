@@ -70,3 +70,11 @@ def test_system_prompt_forbids_advice_the_article_does_not_state():
     # Browser pass 2b (S1 follow-up): the draft added "if it hasn't appeared after a reasonable wait, your bank is
     # the best place to check", which no article says, and Gate 2 replaced the whole answer with the clarify line.
     assert "Do not add tips, advice or next steps of your own" in SYSTEM_PROMPT
+
+
+def test_system_prompt_requires_a_search_in_the_same_turn_as_gate_2():
+    # Browser pass 2b (S1 follow-up, second run): the model skipped search_kb, answered from the refund receipt line
+    # and named the Refund policy article; Gate 2 only sees this turn's chunks (doc 07 s6.4), so it failed. The prompt
+    # must not allow article text from earlier turns.
+    assert "or earlier in this conversation" not in SYSTEM_PROMPT
+    assert "call search_kb in this turn" in SYSTEM_PROMPT
