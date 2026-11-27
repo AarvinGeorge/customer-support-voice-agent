@@ -3,10 +3,12 @@ results (verified, failed, locked, conflict, unavailable), with the thread line 
 that never contains the account id or the PIN.
 Use when: ingress step 13, first in order, when the TurnRequest carries `verification`.
 Inputs: the turn stream, the turn's TurnControl, the VerificationInput, the agent-token core client, optional
-session flags writer, the turn mode and whether the thread was verified before.
+session flags writer and escalator (its hold store, D-070).
 Output: verify_card, the fixed lines.
 Side effects: one core verify (0 retries), a MeContext load on success, verification.result and (on failure)
-verification.required events, a verify step, agent.sessions.awaiting_verification cleared on success.
+verification.required events, a verify step, agent.sessions.awaiting_verification cleared on success; D-070: on
+success a held escalation becomes a ticket for the verified person (one attempt) and the hold is cleared; a lockout
+clears the hold and opens nothing.
 Role: the PIN goes to core only; nothing here returns or logs it.
 """
 from __future__ import annotations
@@ -20,8 +22,9 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from agent.clients.core_agent import CoreAgentClient
 from agent.clients.http import ToolCallError
+from agent.escalation import Escalator, fallback_clause
 from agent.memory import refresh_memory
-from agent.middleware.router import VERIFY_LINE
+from agent.middleware.router import TICKET_CLAUSE, VERIFY_LINE
 from agent.middleware.tool_guard import clamp_timeout
 from agent.sse import TurnOutcome, TurnStream
 from agent.steps import Step
@@ -32,8 +35,11 @@ from agent.turn_control import TurnControl
 VERIFIED_THREAD_LINE = "[customer verified via secure card]"
 CARD_SUBMITTED_LINE = "[customer submitted the secure verification card]"
 FAILED_LINE = "That account ID and PIN didn't match. You have {n} {tries} left."
-LOCKED_LINE = "I couldn't verify you after three tries, so I've opened a ticket for our team, {display}."
-LOCKED_NO_TICKET_LINE = "I couldn't verify you after three tries, so verification is locked for this conversation."
+# D-070: a locked session has no requester, so no ticket; the line points at the existing article section.
+LOCKED_LINE = ("I couldn't verify you after three tries, so verification is locked for this conversation and I "
+               "can't open a ticket for you. The How to reach support section of our Support, response times and "
+               "escalation article explains what to do next.")
+HELD_TICKET_LINE = "Thanks, {name}. {clause}"
 CONFLICT_LINE = ("This conversation is already verified as someone else. Please start a new conversation to verify "
                  "as another person.")
 UNAVAILABLE_LINE = "I couldn't check your details just now. Please try the card again in a moment."
@@ -59,11 +65,13 @@ def _retry_prompt(stream: TurnStream, text: str, attempts_left: int) -> None:
 
 
 async def verify_card(stream: TurnStream, control: TurnControl, body: Any, core: CoreAgentClient,
-                      flags: SessionFlags | None = None) -> StructuredResult:
+                      flags: SessionFlags | None = None, escalator: Escalator | None = None) -> StructuredResult:
     """What: run the card verification and decide the turn.
-    Use when: step 13 with TurnRequest.verification. Inputs: stream, control, VerificationInput, core client, flags.
-    Output: StructuredResult: on success no outcome (continue into the agent loop with the thread line, turn context
-    verification "just_verified" and the new claims and MeContext in state); otherwise a fixed reply.
+    Use when: step 13 with TurnRequest.verification. Inputs: stream, control, VerificationInput, core client, flags,
+    escalator (its hold store; None: nothing is held).
+    Output: StructuredResult: on success with a held escalation, a fixed reply naming the ticket opened for the
+    verified person (D-070); on success otherwise no outcome (continue into the agent loop with the thread line, turn
+    context verification "just_verified" and the new claims and MeContext in state); otherwise a fixed reply.
     Side effects: see module. Role: s6.3 steps 4 and 5."""
     step = Step.start(control.events, "verify", "verify", "Checking your details")
     timeout = clamp_timeout(limits.CORE_VERIFY_TIMEOUT_S, control.remaining_s())
@@ -82,14 +90,12 @@ async def verify_card(stream: TurnStream, control: TurnControl, body: Any, core:
             _retry_prompt(stream, text, n)
             return _fixed(stream, control, text, "verification_requested")
         if code == "VERIFY_LOCKED":
-            ticket = err.details.get("ticket")
             step.done("error", "Verification locked")
-            stream.emit("verification.result", status="locked", attempts_left=0, ticket=ticket)
-            # L1 s7 "verification fails 3 times": core owns this ticket (doc 07 s3.4), so origin core, no agent ticket
-            stream.emit("escalated", reason="verify_locked", ticket=ticket, origin="core", offer_ticket_button=False)
-            text = (LOCKED_LINE.format(display=ticket.get("display") or f"ticket ending {ticket.get('short_id')}")
-                    if ticket else LOCKED_NO_TICKET_LINE)
-            return _fixed(stream, control, text, "escalated", ticket=ticket, escalated=True)
+            stream.emit("verification.result", status="locked", attempts_left=0, ticket=None)
+            # D-070: no ticket without a known requester (L1 s7 "verification fails 3 times" no longer escalates)
+            if escalator is not None:
+                await escalator.hold(control, None)
+            return _fixed(stream, control, LOCKED_LINE, "answered")
         if code == "IDENTITY_CONFLICT":
             step.done("error", "Already verified as someone else")
             stream.emit("verification.result", status="conflict")
@@ -109,5 +115,18 @@ async def verify_card(stream: TurnStream, control: TurnControl, body: Any, core:
     state: dict[str, Any] = {"verified": True, "claims_snapshot": claims}
     if memory.snapshot is not None:
         state["context_snapshot"] = memory.snapshot
+    held = await escalator.held_ticket(control) if escalator is not None else None
+    if held is not None:  # D-070: the escalation held while unverified becomes this person's ticket now
+        _reason, ticket = held
+        clause = (TICKET_CLAUSE.format(display=ticket.get("display") or f"ticket ending {ticket.get('short_id')}")
+                  if ticket else fallback_clause(control))
+        text = HELD_TICKET_LINE.format(name=person.display_name, clause=clause)
+        outcome = TurnOutcome.fixed(text, end_reason="escalated" if ticket else "verified")
+        outcome.final = FinalAnswer.model_validate({**outcome.final.model_dump(mode="json"),
+                                                    "escalated": ticket is not None, "ticket": ticket})
+        line = outcome.final.say if control.mode == "voice" else text
+        return StructuredResult(outcome=outcome, state=state,  # the code record: what the system did, in the thread
+                                messages=[HumanMessage(VERIFIED_THREAD_LINE),
+                                          AIMessage(line, id=ingress_message_id(control.turn_id))])
     return StructuredResult(model_text=VERIFIED_THREAD_LINE, verification="just_verified", state=state,
                             context_stale=memory.stale)

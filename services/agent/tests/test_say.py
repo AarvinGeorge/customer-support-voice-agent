@@ -70,8 +70,11 @@ def fixed_lines() -> dict[str, str]:
         "handler.verify_expired": handler.VERIFY_EXPIRED_LINE, "voice_yes.reprompt": voice_yes.REPROMPT_LINE,
         "confirm.verify_lapsed": confirm.VERIFY_LAPSED_LINE,
         "verification.failed": verification.FAILED_LINE.format(n=2, tries="tries"),
-        "verification.locked": verification.LOCKED_LINE.format(display=DISPLAY),
-        "verification.locked_no_ticket": verification.LOCKED_NO_TICKET_LINE,
+        "verification.locked": verification.LOCKED_LINE, "verification.held_ticket":
+            verification.HELD_TICKET_LINE.format(name="Priya", clause=router.TICKET_CLAUSE.format(display=DISPLAY)),
+        "escalation.hold": f"{router.ESCALATION_LEADS['not_in_docs']} {escalation.HOLD_SAY}",
+        "escalation.hold_chat": f"{router.ESCALATION_LEADS['not_in_docs']} {escalation.HOLD_LINE}",
+        "escalation.card_pending": escalation.CARD_PENDING_LINE, "escalation.no_requester": escalation.NO_REQUESTER_LINE,
         "verification.conflict": verification.CONFLICT_LINE, "verification.unavailable": verification.UNAVAILABLE_LINE,
         "confirm.cancelled": confirm.CANCELLED_LINE, "confirm.timed_out": confirm.TIMED_OUT_LINE,
         "confirm.not_active": confirm.NOT_ACTIVE_LINE, "confirm.step_up": confirm.STEP_UP_LINE,

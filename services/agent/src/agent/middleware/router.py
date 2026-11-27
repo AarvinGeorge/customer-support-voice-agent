@@ -7,7 +7,8 @@ Inputs: the bound TurnControl (route, mode, turn id, Gate 1 scope_check); option
 callers that want the ticket inside the loop; by default the escalation module, agent.escalation, opens the
 failure-path ticket AFTER the loop, in the 3 s reserve, and replaces the line in the thread, CS-E-03.S4.T1);
 optional ScopeClassifier (Gate 1 verdict none, doc 07 s6.5 row 3).
-Output: RouteReply, route_reply, route_message, escalate_from_hook, RouterMiddleware, the fixed line constants.
+Output: RouteReply, route_reply, route_message, escalate_from_hook, escalation_lead, RouterMiddleware, the fixed
+line constants.
 RouterMiddleware also writes weak_streak once per run (after_agent).
 Side effects: writes one AI message (and, for readback, state.pending) to the thread; may call open_ticket.
 Role: deterministic replies skip the model and Gate 2 (after_model hooks do not run after a jump, spike 1).
@@ -72,13 +73,22 @@ class RouteReply:
     verification_reason: str | None = None
 
 
+def escalation_lead(control: TurnControl) -> str:
+    """What: the lead sentence of an escalate route (per reason; tool_failure per tool). Use when: route_reply, and
+    the escalation module when an unverified session gets the D-070 clause instead of a ticket clause.
+    Inputs: control with an escalate route. Output: text. Side effects: none. Role: one source for the lead."""
+    route = control.route
+    assert route is not None
+    return (TOOL_FAILURE_LEADS.get(route.tool or "") if route.reason == "tool_failure" else None) \
+        or ESCALATION_LEADS.get(route.reason or "", GENERIC_ESCALATION_LEAD)
+
+
 def _escalation_text(control: TurnControl) -> str:
     """What: lead plus ticket clause for an escalate route. Use when: route_reply. Inputs: control.
     Output: text. Side effects: none. Role: helper."""
     route = control.route
     assert route is not None
-    lead = (TOOL_FAILURE_LEADS.get(route.tool or "") if route.reason == "tool_failure" else None) \
-        or ESCALATION_LEADS.get(route.reason or "", GENERIC_ESCALATION_LEAD)
+    lead = escalation_lead(control)
     ticket = route.ticket
     clause = (TICKET_CLAUSE.format(display=ticket.get("display") or f"ticket ending {ticket.get('short_id')}")
               if ticket else NO_TICKET_CLAUSE.format(ref=control.turn_id.replace("-", "")[-4:]))

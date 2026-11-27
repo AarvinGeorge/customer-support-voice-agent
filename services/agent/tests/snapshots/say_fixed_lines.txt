@@ -14,9 +14,13 @@ confirm.submit_unconfirmed_no_ticket: I couldn't confirm whether your request re
 confirm.submitted_from_status: I've sent this to our team for approval: ticket ending eight two one three. You'll see the outcome when you ask about your ticket.
 confirm.timed_out: That request timed out, so nothing was changed. Shall I set it up again?
 confirm.verify_lapsed: Your verification has expired, so nothing was changed. Please verify again in the secure card, then confirm.
+escalation.card_pending: Please finish verifying in the secure card first, then I can open a ticket for our team.
 escalation.deadline_no_ticket: I couldn't finish that in time. I couldn't open a ticket just now. If you contact us, please quote reference zero A one F.
 escalation.deadline_ticket: I couldn't finish that in time, so I've opened a ticket for our team: ticket ending eight two one three.
+escalation.hold: Our help articles don't cover that. To open a ticket for our team, I need to know who you are first. Please enter your account ID and support PIN in the secure card on your screen. I can't take them by voice.
+escalation.hold_chat: Our help articles don't cover that. To open a ticket for our team, I need to know who you are first. Please enter your account ID and support PIN in the secure card.
 escalation.model_unavailable: Our assistant is having trouble right now, so I haven't changed anything. Would you like me to open a ticket for our team?
+escalation.no_requester: I can't open a ticket without verifying who you are, and I can't verify you in this conversation. The How to reach support section of our Support, response times and escalation article explains what to do next.
 escalation.nothing_to_offer: There's nothing waiting for a ticket right now. What can I help you with?
 escalation.ticket_offer_opened: I've opened ticket ending eight two one three for our team.
 handler.not_current: That request is no longer active. Ask me again if you still need it.
@@ -56,7 +60,7 @@ router.verify: To look at your account I need to verify you. Please enter your a
 router.verify_say: To look at your account I need to verify you. Please enter your account ID and support PIN in the secure card on your screen. I can't take them by voice.
 verification.conflict: This conversation is already verified as someone else. Please start a new conversation to verify as another person.
 verification.failed: That account ID and PIN didn't match. You have two tries left.
-verification.locked: I couldn't verify you after three tries, so I've opened a ticket for our team, ticket ending eight two one three.
-verification.locked_no_ticket: I couldn't verify you after three tries, so verification is locked for this conversation.
+verification.held_ticket: Thanks, Priya. I've opened a ticket for our team, ticket ending eight two one three.
+verification.locked: I couldn't verify you after three tries, so verification is locked for this conversation and I can't open a ticket for you. The How to reach support section of our Support, response times and escalation article explains what to do next.
 verification.unavailable: I couldn't check your details just now. Please try the card again in a moment.
 voice_yes.reprompt: I didn't catch that clearly. Please say yes, or press Confirm on screen.

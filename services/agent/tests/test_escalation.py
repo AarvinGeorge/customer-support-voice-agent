@@ -179,6 +179,7 @@ async def test_customer_asks_for_a_human_gives_one_model_ticket_and_no_code_tick
     args = {"category": "human_requested", "summary": "Customer asked for a person about SSO setup.",
             "steps_tried": [], "blocking": False}
     w = World([call("create_ticket", args), AIMessage("I've opened ticket ending 8213 for our team.")])
+    await w.seed({"messages": [], **OWNER})  # D-070: the model's create_ticket is offered to verified customers only
     outcome, events = await w.send(text="I want to talk to a human")
     bodies = ticket_bodies(w)
     assert len(bodies) == 1 and bodies[0][0]["origin"] == "model" and bodies[0][1] == f"{SID}:c1"
@@ -188,13 +189,14 @@ async def test_customer_asks_for_a_human_gives_one_model_ticket_and_no_code_tick
     assert outcome.final.ticket.short_id == "8213"
 
 
-async def test_verify_lockout_is_core_owned_with_an_escalated_event_and_no_agent_ticket() -> None:
+async def test_verify_lockout_opens_no_ticket_and_no_escalated_event() -> None:
+    """D-070: a locked session has no requester, so nobody opens a ticket (core used to, inside verify)."""
     w = World(verified=False)
     for _ in range(2):
         await w.send(verification={"account_id": ex.ACCOUNT_ID, "pin": "0000"})
     outcome, events = await w.send(verification={"account_id": ex.ACCOUNT_ID, "pin": "0000"})
-    assert outcome.end_reason == "escalated"
-    assert [(e.reason, e.origin) for e in of(events, "escalated")] == [("verify_locked", "core")]
+    assert outcome.end_reason == "answered" and outcome.final.ticket is None
+    assert of(events, "escalated") == []
     assert w.transport.tickets == []
 
 

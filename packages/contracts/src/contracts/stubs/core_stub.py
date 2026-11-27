@@ -303,10 +303,17 @@ def create_app() -> FastAPI:
         app.state.open.pop(_sid(request), None)
         return _dump(ex.CANCEL_RESULT)
 
-    @app.post("/v1/tickets")
-    def create_ticket(body: TicketCreate) -> dict[str, Any]:
-        """What: ticket created (fixed ticket ending 8213). Use when: create_ticket or escalation.
-        Inputs: TicketCreate. Output: TicketCreateResponse. Side effects: none. Role: s3.4."""
+    @app.post("/v1/tickets", response_model=None)
+    def create_ticket(body: TicketCreate, request: Request) -> Any:
+        """What: ticket created (fixed ticket ending 8213) for a verified session; an unverified one gets 403
+        REQUESTER_UNKNOWN {reason, verify_locked}, as core does. Use when: create_ticket or escalation.
+        Inputs: TicketCreate, X-Session-Id. Output: TicketCreateResponse or error. Side effects: none.
+        Role: s3.4 and D-070 (every ticket has a verified requester)."""
+        sid = _sid(request)
+        if sid not in app.state.verified:
+            return error_response("REQUESTER_UNKNOWN", "A ticket needs a verified customer.",
+                                  details={"reason": "requester_unknown",
+                                           "verify_locked": app.state.failed.get(sid, 0) >= VERIFY_FAILURES_PER_SESSION})
         return _dump(ex.TICKET_CREATED)
 
     return app
