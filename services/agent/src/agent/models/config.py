@@ -51,7 +51,7 @@ class RoleSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
     provider: Literal["anthropic", "openai"]
     model: str
-    effort: Literal["low", "medium", "high"] | None = None
+    effort: Literal["none", "low", "medium", "high"] | None = None  # "none": OpenAI only (tools on chat completions)
     attempt_timeout_s: float | None = None
     first_token_timeout_s: float | None = None
     max_tokens: int | None = None

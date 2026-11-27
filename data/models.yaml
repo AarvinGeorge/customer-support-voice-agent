@@ -20,7 +20,9 @@ roles:
     # (listed by GET /v1/models; $5 in, $0.50 cached, $30 out).
     provider: openai
     model: gpt-5.4-mini
-    effort: low
+    # none, not low: chat completions rejects function tools with reasoning_effort on gpt-5.4-mini (400, seen live
+    # on the first llm_429 fallback, wiring part 1; OpenAI's error names 'none' as the supported value).
+    effort: none
     attempt_timeout_s: 10
     first_token_timeout_s: 6
     max_tokens: 2048
