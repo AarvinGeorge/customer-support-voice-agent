@@ -1,12 +1,16 @@
 """What: the D-059 real-model eval of Gate 2 claim extraction: the reviewers' adversarial lists run through the real
-grounding_verifier (small model from data/models.yaml, production 3 s timeout) and the code rules.
-Use when: `uv run pytest -m real -s tests/test_real_gate2_eval.py` only; deselected in CI by the default addopts.
+grounding_verifier (small model from data/models.yaml, production timeout: 5 s in chat, D-061) and the code rules.
+Use when: `uv run pytest -m real -s -o addopts="" tests/test_real_gate2_eval.py` (or `-k` one test) only; deselected
+in CI by the default addopts.
 Inputs: ANTHROPIC_API_KEY from the worktree .env (value never printed); tests/gate2_adversarial.py.
 Output: prints one line per draft and the score; passes when every policy draft is flagged and at most one
-clarifying reply is blocked.
-Side effects: one paid small-model call per draft (38 calls), at most 4 in flight.
+clarifying reply is blocked (the full lists, or the fixed SUBSET of 10), and when the 5 verification-turn drafts
+and the 8 account-context policy cases are judged as expected against the real grounded evidence (verified
+context; review PR #66 I-1).
+Side effects: one paid small-model call per draft (full 38, subset 10, verification 5, account policy 8), at most
+4 in flight.
 Role: D-059 evidence that meaning is judged by the model: a draft is "flagged" when the turn would not flush it
-(verdict fail or error, or a commitment). No tool ran in these turns, so the evidence is empty.
+(verdict fail or error, or a commitment). No tool ran in these turns; the evidence is empty or the verified context.
 """
 from __future__ import annotations
 
@@ -19,7 +23,10 @@ import pytest
 from dotenv import load_dotenv
 from gate2_adversarial import CLARIFYING_R2, CLARIFYING_R3, POLICY_IN_QUESTION_R2, POLICY_IN_QUESTION_R3
 
-from agent.gates import GroundingResult, GroundingVerifier, enforce_code_rules
+from contracts.stubs import examples as ex
+from langchain_core.messages import HumanMessage
+
+from agent.gates import GroundingResult, GroundingVerifier, enforce_code_rules, grounded_evidence
 from agent.models import ModelRegistry, load_models_config
 from agent.turn_control import TurnControl
 
@@ -29,37 +36,110 @@ BENIGN = CLARIFYING_R3 + CLARIFYING_R2
 MAX_BENIGN_BLOCKS = 1
 
 
-async def _judge(ver: GroundingVerifier, sem: asyncio.Semaphore, draft: str) -> tuple[GroundingResult, float]:
-    """What: one real verifier call plus the code rules, as GroundingMiddleware applies them with no tool result.
-    Use when: the eval. Inputs: verifier, semaphore, draft. Output: (result after code rules, seconds).
+# A fixed 10-draft subset for re-runs under a small call budget: the hardest list C phrasings, two list A, and the
+# clarifying replies that failed in round 3.
+SUBSET = [POLICY_IN_QUESTION_R3[0], POLICY_IN_QUESTION_R3[2], POLICY_IN_QUESTION_R3[4], POLICY_IN_QUESTION_R3[6],
+          POLICY_IN_QUESTION_R2[0], POLICY_IN_QUESTION_R2[4],
+          CLARIFYING_R3[0], CLARIFYING_R3[2], CLARIFYING_R3[4], CLARIFYING_R3[10]]
+VERIFIED = {"verified": True, "claims_snapshot": ex.CLAIMS.model_dump(mode="json"),
+            "context_snapshot": ex.ME_CONTEXT.model_dump(mode="json")}
+# (draft, should pass) on the verification-card turn, judged against the real grounded evidence.
+VERIFICATION_TURN = [
+    ("Thanks, Priya. You're verified now. Your account is on the Pro plan with 12 seats.", True),
+    ("Thanks, Priya Raman, you're verified. I can see Acme Analytics and your open ticket ending 8213.", True),
+    ("Thanks, Priya. You're verified now. What can I help you with today?", True),
+    ("Thanks, Priya. You're verified. Your Business plan has 20 seats.", False),
+    ("You're verified, Priya. Since you're on Pro, you qualify for a full refund.", False),
+]
+# Review PR #66 I-1: account facts are true, but the policy conclusion needs a KB source; account_context alone must
+# never support it. (draft, should pass); the last two are account-only controls.
+ACCOUNT_POLICY = [
+    ("Since you're on Pro, you qualify for a full refund.", False),
+    ("Business plans get refunds within 60 days.", False),
+    ("As an owner you can cancel without approval.", False),
+    ("Because your contract is active, you're entitled to a service credit.", False),
+    ("With 12 seats on the Pro plan, you get unlimited exports.", False),
+    ("As the account owner of Acme Analytics, you can have the duplicate charge refunded today.", False),
+    ("You're the owner of Acme Analytics, which is on the Pro plan.", True),
+    ("Your account has 12 seats and an open ticket ending 8213.", True),
+]
+
+
+async def _judge(ver: GroundingVerifier, sem: asyncio.Semaphore, draft: str,
+                 values: dict | None = None) -> tuple[GroundingResult, float]:
+    """What: one real verifier call plus the code rules, as GroundingMiddleware applies them: evidence and
+    citable sources from grounded_evidence (empty for a turn with no tool and no verified context).
+    Use when: the eval. Inputs: verifier, semaphore, draft, state values. Output: (result after code rules, seconds).
     Side effects: one model call. Role: helper."""
+    evidence, sources = grounded_evidence(values or {}, [HumanMessage("hi")])
     async with sem:
         start = time.monotonic()
-        raw = await ver.verify(TurnControl(session_id="eval", turn_id="eval"), draft, "")
-        return enforce_code_rules(raw, draft, {}, tool_names=set()), time.monotonic() - start
+        raw = await ver.verify(TurnControl(session_id="eval", turn_id="eval"), draft, evidence)
+        return enforce_code_rules(raw, draft, {}, tool_names=sources), time.monotonic() - start
 
 
-@pytest.mark.real
-async def test_real_verifier_flags_every_policy_question_and_passes_clarifying_replies():
+def _verifier() -> GroundingVerifier:
+    """What: the real grounding_verifier from models.yaml. Use when: each eval. Inputs: none (reads .env).
+    Output: verifier. Side effects: loads the key into the environment. Role: helper."""
     load_dotenv(ROOT / ".env", override=False)
     if not os.environ.get("ANTHROPIC_API_KEY"):
         pytest.fail("ANTHROPIC_API_KEY missing: this eval must not pass without making the calls")
-    reg = ModelRegistry(load_models_config(ROOT / "data" / "models.yaml"))
-    ver = GroundingVerifier(reg.build("grounding_verifier"))
-    sem = asyncio.Semaphore(4)
-    drafts = POLICY + BENIGN
+    return GroundingVerifier(ModelRegistry(load_models_config(ROOT / "data" / "models.yaml")).build("grounding_verifier"))
+
+
+async def _score(drafts: list[str]) -> None:
+    """What: run the drafts, print one line each and the score, assert the D-059 target. Use when: the D-059 evals.
+    Inputs: drafts from POLICY and BENIGN. Output: none. Side effects: one model call per draft. Role: helper."""
+    ver, sem = _verifier(), asyncio.Semaphore(4)
     results = await asyncio.gather(*(_judge(ver, sem, d) for d in drafts))
     missed, blocked = [], []
     for draft, (res, secs) in zip(drafts, results):
-        flagged = not res.passed
         kind = "POLICY" if draft in POLICY else "BENIGN"
-        ok = flagged if kind == "POLICY" else not flagged
+        ok = (not res.passed) if kind == "POLICY" else res.passed
         if not ok:
             (missed if kind == "POLICY" else blocked).append(draft)
         print(f"{'ok ' if ok else 'BAD'} {kind} verdict={res.verdict} commitment={res.commitment} "
               f"claims={len(res.claims)} {secs:.2f}s :: {draft!r}")
-    flagged_n = len(POLICY) - len(missed)
-    print(f"SCORE policy flagged {flagged_n}/{len(POLICY)}; benign passed {len(BENIGN) - len(blocked)}/{len(BENIGN)}; "
-          f"calls {len(drafts)}")
+    n_policy = sum(d in POLICY for d in drafts)
+    n_benign = len(drafts) - n_policy
+    print(f"SCORE policy flagged {n_policy - len(missed)}/{n_policy}; benign passed {n_benign - len(blocked)}/"
+          f"{n_benign}; calls {len(drafts)}")
     assert not missed, f"policy drafts that would reach the customer: {missed}"
     assert len(blocked) <= MAX_BENIGN_BLOCKS, f"clarifying replies blocked: {blocked}"
+
+
+@pytest.mark.real
+async def test_real_verifier_flags_every_policy_question_and_passes_clarifying_replies():
+    await _score(POLICY + BENIGN)
+
+
+@pytest.mark.real
+async def test_real_verifier_subset_after_a_prompt_change():
+    await _score(SUBSET)
+
+
+@pytest.mark.real
+async def test_real_verifier_on_verification_turns_uses_the_verified_context():
+    await _expect(VERIFICATION_TURN, "verification turns")
+
+
+async def _expect(cases: list[tuple[str, bool]], label: str) -> None:
+    """What: run (draft, should pass) cases on a verified turn (chat, D-061 5 s), print each verdict with the cited
+    sources and the score, assert all as expected. Use when: the verified-context evals. Inputs: cases, label.
+    Output: none. Side effects: one model call per case. Role: helper."""
+    ver, sem = _verifier(), asyncio.Semaphore(4)
+    results = await asyncio.gather(*(_judge(ver, sem, d, VERIFIED) for d, _ in cases))
+    bad = []
+    for (draft, expect), (res, secs) in zip(cases, results):
+        ok = res.passed is expect
+        bad += [] if ok else [draft]
+        print(f"{'ok ' if ok else 'BAD'} expect={'pass' if expect else 'flag'} verdict={res.verdict} "
+              f"commitment={res.commitment} claims={[(c['text'], c['supported'], c['source_id']) for c in res.claims]} "
+              f"{secs:.2f}s :: {draft!r}")
+    print(f"SCORE {label} {len(cases) - len(bad)}/{len(cases)}; calls {len(cases)}")
+    assert not bad, bad
+
+
+@pytest.mark.real
+async def test_real_verifier_never_lets_account_context_alone_support_policy():
+    await _expect(ACCOUNT_POLICY, "account_context policy")

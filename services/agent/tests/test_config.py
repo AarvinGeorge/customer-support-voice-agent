@@ -26,7 +26,7 @@ def test_repo_yaml_loads_and_has_every_doc07_role():
     assert cfg.roles["agent"].model == "claude-sonnet-5-5"
     assert cfg.roles["agent"].provider == "anthropic"
     assert cfg.roles["agent_fallback"].provider == "openai"
-    assert cfg.roles["grounding_verifier"].attempt_timeout_s == 3
+    assert cfg.roles["grounding_verifier"].attempt_timeout_s == 5  # D-061 chat budget
     assert cfg.roles["scope_classifier"].attempt_timeout_s == 2
 
 

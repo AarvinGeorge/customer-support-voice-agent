@@ -20,7 +20,8 @@ MODEL_RETRY_BACKOFF_S = 0.5
 MODEL_FALLBACK_RETRIES = 0
 MODEL_MIN_ATTEMPT_S = 2
 SLOW_STATUS_AFTER_S = 4
-GATE2_VERIFIER_TIMEOUT_S = 3
+GATE2_VERIFIER_TIMEOUT_CHAT_S = 5   # D-061 (amends doc 07 s9): chat has budget to spare
+GATE2_VERIFIER_TIMEOUT_VOICE_S = 3  # D-061: voice keeps 3 s (20 s deadline)
 SCOPE_CLASSIFIER_TIMEOUT_S = 2
 
 # Knowledge and core calls (agent side)

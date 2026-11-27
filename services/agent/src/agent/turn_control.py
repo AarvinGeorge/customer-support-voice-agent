@@ -118,6 +118,9 @@ class TurnControl:
     grounding: str = "not_run"
     citations: list[dict[str, Any]] = field(default_factory=list)
     gate_message_id: str | None = None
+    # Gate model calls sent this turn (scope classifier, verifier): (model name, usage metadata or None), added to
+    # Usage by stream_agent_turn so model_calls keeps matching LangSmith's llm run count (doc 07 s2.3).
+    gate_calls: list[tuple[str, Any]] = field(default_factory=list)
     ticket: dict[str, Any] | None = None
     model_node_failed: bool = False  # the agent model node raised (primary and fallback failed or skipped), s6.7
     clock: Callable[[], float] = loop_clock

@@ -341,7 +341,8 @@ async def stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[st
     (default: the bound one, else a new one for this stream; it is bound here, once, before astream, when not
     already bound), cost_of(model_name, usage) -> USD (ModelRegistry.cost_for_model; None: cost 0).
     Output: TurnOutcome with usage (tokens, cached tokens, cost_usd_est, model_calls = provider attempts counted by
-    DeadlineAndFaultMiddleware, tool_calls, models_used, fallback_used).
+    DeadlineAndFaultMiddleware plus the gate calls on TurnControl.gate_calls, doc 07 s2.3; tool_calls, models_used,
+    fallback_used).
     Side effects: model and tool calls through the agent; a limit line is replaced in the thread; binds
     TURN_CONTROL for the run and resets it afterwards.
     Role: adapter between LangGraph streams (messages, tasks, values) and doc 07 s6.2 events."""
@@ -424,10 +425,14 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
                 usage = usage.model_copy(update={"tool_calls": usage.tool_calls + _tool_messages(chunk["result"])})
     finally:
         stop_timer()
-    # Gate 2 note: verifier and classifier calls are LangSmith llm runs but are not in model_attempts; the Gate 2
-    # task decides the rule (recommended: count every provider call so this keeps matching LangSmith).
     if control.model_attempts:  # provider calls made (retries and fallback included), as LangSmith counts llm runs
         usage = usage.model_copy(update={"model_calls": control.model_attempts})
+    # Gate calls (scope classifier, Gate 2 verifier) are llm runs too (doc 07 s2.3): count them, with tokens and cost.
+    for gate_model, meta in control.gate_calls:
+        call = normalize_usage(meta) if meta else token_usage()
+        cost = cost_of(gate_model, call) if cost_of is not None and meta else 0.0
+        usage = add_usage(usage, call.model_copy(update={"model_calls": 1, "models_used": [gate_model],
+                                                         "cost_usd_est": cost}))
     usage = usage.model_copy(update={"fallback_used": usage.fallback_used or control.fallback_used})
     messages = list(values.get("messages") or [])
     outcome = classify_final(stream, messages, model_ids, usage, model_used, control)
