@@ -32,6 +32,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from agent.gates import ScopeClassifier
 from agent.middleware.router import RouterMiddleware
 from agent.middleware.deadline_fault import DeadlineAndFaultMiddleware, fault_run_metadata, model_retry_on
 from agent.middleware.stubs import GroundingMiddleware
@@ -57,17 +58,18 @@ MIDDLEWARE_ORDER: tuple[str, ...] = (
 CheckpointerFactory = Callable[[], Any]  # returns an async context manager yielding a saver
 
 
-def build_middleware(fallback_model: Any, deadline_kwargs: dict[str, Any] | None = None
-                     ) -> list[AgentMiddleware[Any, Any]]:
+def build_middleware(fallback_model: Any, deadline_kwargs: dict[str, Any] | None = None, *,
+                     scope_classifier: ScopeClassifier | None = None) -> list[AgentMiddleware[Any, Any]]:
     """What: the middleware list in MIDDLEWARE_ORDER.
     Use when: build_agent; the order test.
-    Inputs: the fallback chat model (role agent_fallback); optional DeadlineAndFaultMiddleware overrides (tests).
+    Inputs: the fallback chat model (role agent_fallback); optional DeadlineAndFaultMiddleware overrides (tests);
+    the Gate 1 ScopeClassifier (role scope_classifier; None: a `none` verdict counts as on-topic).
     Output: new middleware instances (fresh per agent, no shared state).
     Side effects: none.
     Role: single source of the stack order and the built-in settings (doc 07 s2.5, s8.1).
     """
     return [
-        RouterMiddleware(),
+        RouterMiddleware(scope_classifier=scope_classifier),
         ModelCallLimitMiddleware(run_limit=limits.MODEL_CALLS_PER_TURN, exit_behavior="end"),
         ToolVisibilityMiddleware(),
         ModelFallbackMiddleware(fallback_model),
@@ -82,31 +84,34 @@ def build_middleware(fallback_model: Any, deadline_kwargs: dict[str, Any] | None
 
 
 def build_agent(model: Any, *, fallback_model: Any, checkpointer: BaseCheckpointSaver,
-                tools: Sequence[Any] = (), deadline_kwargs: dict[str, Any] | None = None) -> Any:
+                tools: Sequence[Any] = (), deadline_kwargs: dict[str, Any] | None = None,
+                scope_classifier: ScopeClassifier | None = None) -> Any:
     """What: compile the support agent graph.
     Use when: at startup inside an entered checkpointer factory; tests pass InMemorySaver.
     Inputs: primary model, fallback model, checkpointer, tools (agent.tools.build_tools in the service),
-    DeadlineAndFaultMiddleware overrides (tests only).
+    DeadlineAndFaultMiddleware overrides (tests only), the Gate 1 ScopeClassifier.
     Output: CompiledStateGraph over SupportState.
     Side effects: none.
     Role: create_agent call site.
     """
     return create_agent(model, tools=list(tools), system_prompt=SYSTEM_PROMPT,
-                        middleware=build_middleware(fallback_model, deadline_kwargs), state_schema=SupportState,
+                        middleware=build_middleware(fallback_model, deadline_kwargs, scope_classifier=scope_classifier),
+                        state_schema=SupportState,
                         checkpointer=checkpointer, name="quillstack_support")
 
 
 def build_agent_from_registry(registry: Any, *, checkpointer: BaseCheckpointSaver,
                               tools: Sequence[Any] = ()) -> Any:
-    """What: build_agent with the agent and agent_fallback roles from models.yaml.
+    """What: build_agent with the agent, agent_fallback and scope_classifier roles from models.yaml.
     Use when: the service and the real two-turn cache check.
     Inputs: ModelRegistry, checkpointer, tools.
     Output: compiled agent.
     Side effects: none (clients make no request until called).
-    Role: wiring helper.
+    Role: wiring helper; the one place the gate models are attached in the service.
     """
     return build_agent(registry.build("agent"), fallback_model=registry.build("agent_fallback"),
-                       checkpointer=checkpointer, tools=tools)
+                       checkpointer=checkpointer, tools=tools,
+                       scope_classifier=ScopeClassifier(registry.build("scope_classifier")))
 
 
 def run_config(session_id: str, **extra: Any) -> dict[str, Any]:

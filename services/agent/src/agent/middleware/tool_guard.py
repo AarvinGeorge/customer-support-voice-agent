@@ -2,7 +2,8 @@
 layer around every tool call. In order: hidden-tool block, the combined tool limiter (total 8, search_kb 3,
 request_verification 1), one prepare per turn, then the call with a clamped timeout, one budget-checked retry
 on a timeout or an unavailable service, failure counting (the second failure of the same tool in a turn sets
-route escalate(tool_failure)), step events, and untrusted wrapping of every result.
+route escalate(tool_failure); a failed search_kb sets escalate(retrieval_unavailable) at once, Gate 1 row 4),
+step events, and untrusted wrapping of every result.
 Use when: last in the create_agent stack (wrap_tool_call). The agent runs async only (D-048), so only
 awrap_tool_call is defined.
 Inputs: the tool call request (call, state) and the handler that runs the tool; TurnControl bound for the turn.
@@ -29,6 +30,7 @@ from langchain_core.messages import ToolMessage
 
 from agent.clients.http import ToolCallError
 from agent.deadline import clamp_timeout, retry_fits  # shared doc 07 s8.2 helpers (re-exported)
+from agent.gates import retrieval_unavailable
 from agent.middleware.visibility import visible_tool_names
 from agent.turn_control import CURRENT_CALL, CallScope, Route, TurnControl, require_control
 from agent.untrusted import unknown_result, wrap_result, wrap_search
@@ -240,6 +242,8 @@ class ToolGuardMiddleware(AgentMiddleware):
                 continue
             self._done(control, step, "timeout" if err.kind == "timeout" else "error", spec.failed, attempt,
                        detail="The service did not respond")
+            if name == "search_kb":  # Gate 1 row 4: a failed search is retrieval_unavailable at once (doc 07 s6.5)
+                retrieval_unavailable(control)
             if failures >= limits.SAME_TOOL_FAILURES_BEFORE_TICKET:
                 control.set_route(Route("escalate", reason="tool_failure", tool=name))
             status = "timeout" if err.kind == "timeout" else "error"

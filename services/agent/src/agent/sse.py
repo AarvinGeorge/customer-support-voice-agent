@@ -258,6 +258,15 @@ def _tool_messages(result: Any) -> int:
     return 0
 
 
+def final_confidence(control: TurnControl | None) -> FinalConfidence:
+    """What: FinalAnswer.confidence for a turn with a model draft: the last Gate 1 verdict and scores, and the
+    Gate 2 result ("not_run" until Gate 2 records one). Use when: classify_final.
+    Inputs: the turn's control or None. Output: FinalConfidence. Side effects: none. Role: doc 07 s6.2."""
+    r = (control.retrieval if control is not None else None) or {}
+    return FinalConfidence(retrieval_verdict=r.get("verdict"), top_cosine=r.get("top_cosine"),
+                           tau_low=r.get("tau_low"), tau_high=r.get("tau_high"), grounding="not_run")
+
+
 def route_outcome(stream: TurnStream, control: TurnControl, usage: Usage, model_used: str | None) -> TurnOutcome:
     """What: the outcome of a turn the router ended: its fixed line, say and end_reason; a verify route also
     emits verification.required (doc 07 s6.3 step 3).
@@ -295,9 +304,11 @@ def classify_final(stream: TurnStream, messages: list[Any], model_ids: set[str],
     if last.id in model_ids and not last.tool_calls:
         for piece in chunk_text(text):
             stream.emit("token", text=piece)
-        final = FinalAnswer(text=text, say=text, citations=[], escalated=False,
-                            confidence=FinalConfidence(grounding="not_run"))
-        return TurnOutcome(final=final, usage=usage, end_reason="answered", model_used=model_used)
+        final = FinalAnswer(text=text, say=text, citations=[], escalated=False, confidence=final_confidence(control))
+        # Gate 1 row 2: a first weak turn ends with the model's one clarifying question.
+        clarify = control is not None and (control.retrieval or {}).get("decision") == "clarify"
+        return TurnOutcome(final=final, usage=usage, end_reason="clarify" if clarify else "answered",
+                           model_used=model_used)
     # Another hook-written line (Gate 2): deterministic, no tokens.
     return replace(TurnOutcome.fixed(text, end_reason="answered"), usage=usage, model_used=model_used)
 

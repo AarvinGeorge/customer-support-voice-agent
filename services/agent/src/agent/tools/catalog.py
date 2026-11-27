@@ -34,11 +34,11 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from agent.clients.core_agent import CoreAgentClient
 from agent.clients.knowledge import KnowledgeClient
+from agent.gates import apply_retrieval_gate
 from agent.turn_control import CURRENT_CALL, CallScope, Route, TurnControl, require_control
 
 TOOL_NAMES: tuple[str, ...] = ("search_kb", "request_verification", "get_account_summary", "list_charges",
                                "list_tickets", "prepare_refund", "create_ticket")
-WEAK_VERDICTS = frozenset({"weak", "uncalibrated"})
 Result = tuple[str, Any]
 A = TypeVar("A", bound=StrictModel)
 
@@ -92,9 +92,12 @@ def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseT
     Role: tool factory."""
 
     async def search_kb(**raw: Any) -> Result:
-        """What: knowledge search with tier and verified from claims; relevant chunks only (s4.1, s5.1 row 1).
+        """What: knowledge search with tier and verified from claims; relevant chunks only (s4.1, s5.1 row 1),
+        then Gate 1 (agent.gates.apply_retrieval_gate: the clarify instruction on a first weak turn, the route on
+        escalate, the scope check on none).
         Use when: the model searches help articles. Inputs: query, error_code. Output: ("ok", artifact with
-        verdict, instruction, docs, chunk_ids, confidence). Side effects: one knowledge call. Role: tool."""
+        verdict, instruction, docs, chunk_ids, confidence). Side effects: one knowledge call; gate events and
+        TurnControl gate fields. Role: tool."""
         args = _args(SearchKbArgs, "search_kb", raw)
         control, scope = require_control(), _scope()
         verified = bool(_state_get(scope.state, "verified"))
@@ -105,12 +108,12 @@ def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseT
             body["error_code"] = args.error_code
         resp = await knowledge.search(control, body)
         verdict = resp["confidence"]["verdict"]
-        weak_before = int(_state_get(scope.state, "weak_streak") or 0) > 0
+        decision = apply_retrieval_gate(control, resp, int(_state_get(scope.state, "weak_streak") or 0))
         docs = [{"id": c["chunk_id"], "article": c["article_slug"], "section": " > ".join(c["section_path"]),
                  "text": c["text"], "injection_suspect": "injection_suspect" in c.get("flags", [])}
                 for c in resp["chunks"] if c.get("relevant")]
         return "ok", {"verdict": verdict,
-                      "instruction": WEAK_RETRIEVAL_INSTRUCTION if verdict in WEAK_VERDICTS and not weak_before else None,
+                      "instruction": WEAK_RETRIEVAL_INSTRUCTION if decision == "clarify" else None,
                       "docs": docs, "chunk_ids": [c["chunk_id"] for c in resp["chunks"]],
                       "confidence": resp["confidence"]}
 

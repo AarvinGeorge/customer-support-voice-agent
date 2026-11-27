@@ -54,6 +54,8 @@ class TurnControl:
     Inputs: session_id, turn_id, mode, deadline (time.monotonic() value; None means no deadline),
     demo_fault (already gated by DEMO_FAULTS_ENABLED at ingress), events (the turn stream or None).
     Output: the object. Side effects: none.
+    Gate fields (retrieval, retrieval_chunks, scope_check) are written by agent.gates and read by the router,
+    GroundingMiddleware and the SSE adapter.
     Role: D-048 counters live here (executed tool calls only; incremented before the first await); the model
     attempt fields (attempt_role, model_attempts, fallback_used, primary_error, primary_model, fault_fired) are written by
     DeadlineAndFaultMiddleware and read by the retry predicate and the usage builder.
@@ -79,6 +81,11 @@ class TurnControl:
     failures: dict[str, int] = field(default_factory=dict)
     awaiting_verification: bool = False
     verify_attempts_left: int = 3
+    # Gate 1 (agent.gates, doc 07 s6.5): the last search's verdict facts, the relevant chunks the model saw (for
+    # citations), and a pending scope check (verdict none) that RouterMiddleware runs before the next model call.
+    retrieval: dict[str, Any] | None = None
+    retrieval_chunks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    scope_check: bool = False
 
     def remaining_s(self) -> float:
         """What: seconds left before the turn deadline. Use when: clamping a call. Inputs: none.
