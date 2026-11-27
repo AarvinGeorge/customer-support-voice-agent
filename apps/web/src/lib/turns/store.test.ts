@@ -93,6 +93,16 @@ describe("turn store", () => {
     expect([faultHeader(fetchMock, 0), faultHeader(fetchMock, 1)]).toEqual(["tool_error", null]);
   });
 
+  it("remembers which fault the last request carried, so the toggle can say it switched off", async () => {
+    const store = createTurnStore();
+    const fetchMock = fixtureFetch();
+    store.getState().armFault("llm_429");
+    await store.getState().sendTurn(SID, req(0), { deps: { fetch: fetchMock as unknown as typeof fetch } });
+    expect(store.getState().lastFault).toBe("llm_429");
+    await store.getState().sendTurn(SID, req(1), { deps: { fetch: fetchMock as unknown as typeof fetch } });
+    expect(store.getState().lastFault).toBeNull();
+  });
+
   it("clears the armed fault even when the request fails before the stream opens", async () => {
     const store = createTurnStore();
     store.getState().armFault("llm_429");
@@ -292,14 +302,37 @@ describe("session scoping and New conversation mid-reply (review PR #20, I1)", (
 });
 
 describe("a send that fails before the first event (review PR #20, I2)", () => {
-  it("a 429 adds a retryable error item with the server's message after the user item", async () => {
+  it("a 429 shows no bubble or error row: it records a limit notice that keeps the draft (CS-E-07.S1.T4)", async () => {
     const store = createTurnStore();
-    const body = { error: { class: "rate_limited", code: "SESSION_TURNS", message: "You're sending messages quickly. Please wait a moment.", retryable: true, changed: false, retry_after_s: 5, fault_injected: false, details: {} } };
+    const body = { error: { class: "rate_limited", code: "SESSION_TURNS", message: "You're sending messages quickly. Please wait a moment.", retryable: true, changed: false, retry_after_s: 42, fault_injected: false, details: { limit: "10/minute", scope: "session" } } };
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status: 429, headers: { "content-type": "application/json" } }));
+    const before = Date.now();
     await expect(store.getState().sendTurn(SID, req(0), { deps: { fetch: fetchMock as unknown as typeof fetch } })).rejects.toBeInstanceOf(ApiError);
-    const thread = store.getState().thread;
-    expect(thread.map((i) => i.kind)).toEqual(["user", "error"]);
-    expect(thread[1]).toMatchObject({ kind: "error", message: "You're sending messages quickly. Please wait a moment. Try again in 5 s.", retryable: true, text: "message 0" });
+    expect(store.getState().thread).toEqual([]);
+    const notice = store.getState().limit;
+    expect(notice).toMatchObject({ status: 429, code: "SESSION_TURNS", retryAfterS: 42, limit: "10/minute", scope: "session", draft: "message 0" });
+    expect(notice?.untilMs).toBeGreaterThanOrEqual(before + 42_000);
+    store.getState().clearLimit();
+    expect(store.getState().limit).toBeNull();
+  });
+
+  it("a 503 BUSY records a notice with its Retry-After, and the next accepted send clears it", async () => {
+    const store = createTurnStore();
+    const body = { error: { class: "admission_rejected", code: "BUSY", message: "We're busy right now.", retryable: true, changed: false, retry_after_s: 3, fault_injected: false, details: {} } };
+    const busy = vi.fn(async () => new Response(JSON.stringify(body), { status: 503, headers: { "content-type": "application/json", "retry-after": "3" } }));
+    await store.getState().sendTurn(SID, req(0), { deps: { fetch: busy as unknown as typeof fetch } }).catch(() => undefined);
+    expect(store.getState().limit).toMatchObject({ status: 503, code: "BUSY", retryAfterS: 3, draft: "message 0" });
+    await store.getState().sendTurn(SID, req(1), { deps: { fetch: fixtureFetch() as unknown as typeof fetch } });
+    expect(store.getState().limit).toBeNull();
+  });
+
+  it("other pre-stream API errors still add a retryable error row after the user item", async () => {
+    const store = createTurnStore();
+    const body = { error: { class: "core_conflict", code: "TURN_IN_PROGRESS", message: "A reply is still being written.", retryable: true, changed: false, retry_after_s: null, fault_injected: false, details: {} } };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(body), { status: 409, headers: { "content-type": "application/json" } }));
+    await expect(store.getState().sendTurn(SID, req(0), { deps: { fetch: fetchMock as unknown as typeof fetch } })).rejects.toBeInstanceOf(ApiError);
+    expect(store.getState().thread.map((i) => i.kind)).toEqual(["user", "error"]);
+    expect(store.getState().limit).toBeNull();
   });
 
   it("a network failure and an empty stream each add an error item in plain words", async () => {

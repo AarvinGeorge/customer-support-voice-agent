@@ -4,7 +4,7 @@ Use when: Ingress runs scan_input on every turn right after turn.started, before
 body, the thread, turn_events, transcript_items, logs or LangSmith see the text; a refused turn runs TypedPinRefusal.
 Inputs: the IngressInput and the session row (awaiting_verification, verified_user_id).
 Output: session_redact_context, scan_input, Scanned, TypedPinRefusal, refuse_without_thread, AwaitingFlag,
-PgAwaitingFlag, TYPED_PIN_LINE.
+TYPED_PIN_LINE (production flag writer: agent.turn_body.PgSessionFlags).
 Side effects: the refusal emits verification.required, appends the redacted text and the fixed line to the thread,
 and sets agent.sessions.awaiting_verification.
 Role: the only place raw customer text is turned into the redacted text that travels further (D-031: PIN never in
@@ -74,25 +74,12 @@ def scan_input(inp: Any, ctx: RedactContext) -> Scanned:
 
 class AwaitingFlag(Protocol):
     """What: writes agent.sessions.awaiting_verification. Use when: typing. Inputs: see method. Output: none.
-    Side effects: database. Role: port."""
-
-    async def set_awaiting_verification(self, session_id: str, awaiting: bool) -> None: ...
-
-
-class PgAwaitingFlag:
-    """What: AwaitingFlag over the agent_app pool. Use when: production. Inputs: psycopg pool.
-    Output: set_awaiting_verification. Side effects: one UPDATE. Role: adapter."""
-
-    def __init__(self, pool: Any) -> None:
-        """What: keep the pool. Use when: app start. Inputs: pool. Output: none. Side effects: none. Role: constructor."""
-        self.pool = pool
+    Side effects: database. Role: port (agent.turn_body.PgSessionFlags satisfies it)."""
 
     async def set_awaiting_verification(self, session_id: str, awaiting: bool) -> None:
-        """What: set the flag. Use when: the typed-PIN refusal. Inputs: session id, flag. Output: none.
-        Side effects: UPDATE agent.sessions. Role: write."""
-        async with self.pool.connection() as conn:
-            await conn.execute("UPDATE agent.sessions SET awaiting_verification = %s WHERE session_id = %s",
-                               (awaiting, session_id))
+        """What: set or clear the flag. Use when: the typed-PIN refusal. Inputs: session id, flag. Output: none.
+        Side effects: one write. Role: port method."""
+        ...
 
 
 def _emit_refusal(stream: TurnStream) -> TurnOutcome:

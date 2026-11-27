@@ -31,8 +31,9 @@ from agent.clients.core_agent import CoreAgentClient
 from agent.clients.knowledge import KnowledgeClient
 from agent.ingress import AgentBody, CallKeys, Ingress, IngressInput, MergeTranscript, PgTurnStore, RedisTurnLock, \
     TurnLock, TurnRow, TurnStore
-from agent.pin_guard import AwaitingFlag, PgAwaitingFlag, TypedPinRefusal
+from agent.pin_guard import AwaitingFlag, TypedPinRefusal
 from agent.prompt import TurnContext, build_turn_message
+from agent.turn_body import PgSessionFlags
 from agent.settings import Settings
 from agent.sse import TurnOutcome, TurnStream, stream_agent_turn
 from agent.tools.catalog import build_tools
@@ -163,7 +164,7 @@ def wire_app(app: FastAPI, cfg: Settings) -> Ingress | None:
     ingress = build_ingress(runtime.agent, store=PgTurnStore(state.pg_pool), lock=RedisTurnLock(state.redis),
                             served_by=cfg.served_by, call_keys=RedisCallKeys(state.redis),
                             merge_transcript=TranscriptMerger(PgVoiceStore(state.pg_pool)),
-                            flags=PgAwaitingFlag(state.pg_pool), **extra)
+                            flags=PgSessionFlags(state.pg_pool), **extra)
     state.ingress = ingress
     if getattr(state, "voice", None) is not None:
         state.voice.ingress = ingress

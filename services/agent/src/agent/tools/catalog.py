@@ -34,6 +34,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from agent.clients.core_agent import CoreAgentClient
 from agent.clients.knowledge import KnowledgeClient
+from agent.structured.pending import card_from_prepare
 from agent.turn_control import CURRENT_CALL, CallScope, Route, TurnControl, require_control
 
 TOOL_NAMES: tuple[str, ...] = ("search_kb", "request_verification", "get_account_summary", "list_charges",
@@ -148,6 +149,7 @@ def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseT
     async def prepare_refund(**raw: Any) -> Result:
         """What: prepare a refund; core decides (s5.1 row 6, s3.3). An allowed or needs_approval result with a
         read-back sets route readback, so the model never writes the read-back.
+        The route carries the confirmation card (core's PrepareResult.card, else built from the PrepareResult).
         Use when: the customer asks for a refund. Inputs: charge_id or ending and on, reason, note.
         Output: ("ok", {decision, reason_codes, message, policy_refs, ticket}). Side effects: one core call
         (same key on the retry); may set TurnControl.route. Role: tool."""
@@ -158,7 +160,8 @@ def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseT
         if res.get("decision") in ("allowed", "needs_approval") and res.get("readback"):
             control.set_route(Route("readback", readback=res["readback"], pending={
                 "id": res.get("pending_action_id"), "kind": res.get("pending_kind"), "action_type": "refund",
-                "requires_step_up": bool(res.get("requires_step_up")), "expires_at": res.get("expires_at")}))
+                "requires_step_up": bool(res.get("requires_step_up")), "expires_at": res.get("expires_at"),
+                "card": card_from_prepare(res, "refund")}))
         return "ok", {"decision": res["decision"], "reason_codes": res.get("reason_codes", []),
                       "message": res.get("message"), "policy_refs": res.get("policy_refs", []),
                       "ticket": res.get("ticket")}

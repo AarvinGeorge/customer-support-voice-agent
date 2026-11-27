@@ -36,11 +36,12 @@ from agent.assembly import postgres_checkpointer_factory
 from agent.ingress import PgTurnStore
 from agent.logs import LOG_FORMAT, RedactingFormatter
 from agent.main import create_app
-from agent.pin_guard import TYPED_PIN_LINE, PgAwaitingFlag
+from agent.pin_guard import TYPED_PIN_LINE
 from agent.realtime import SessionSummary
 from agent.sessions import PgSessionStore
 from agent.settings import Settings
 from agent.tracing import build_langsmith_client
+from agent.turn_body import PgSessionFlags
 from agent.voice import PgVoiceStore, TranscriptMerger, VoiceDeps, VoiceSessionRow
 
 pytestmark = pytest.mark.pg
@@ -283,7 +284,7 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                 ingress = composition.build_ingress(
                     runtime.agent, store=PgTurnStore(pool), lock=Lock(), served_by="agent_pg",
                     call_keys=Keys(), merge_transcript=TranscriptMerger(PgVoiceStore(pool)),
-                    flags=PgAwaitingFlag(pool))
+                    flags=PgSessionFlags(pool))
 
                 async def summary(_: str, ctx: Any = None) -> SessionSummary:
                     """What: empty summary. Use when: never (no token mint here). Inputs: sid, ctx.

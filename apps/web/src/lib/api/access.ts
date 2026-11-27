@@ -1,13 +1,14 @@
 /**
- * What: typed calls for the landing page: access code, persona list, new session (doc 07 s2.2).
- * Use when: the access gate and persona list talk to the agent.
+ * What: typed calls for the landing page and console: access code, persona list, new session,
+ *   and the visitor's flags from GET /api/me (doc 07 s2.2).
+ * Use when: the access gate, persona list and the drawer's Demo controls talk to the agent.
  * Inputs: the code or nothing, plus optional ApiDeps for tests.
- * Output: promises of the contract bodies (Persona list, SessionCreated) or void.
+ * Output: promises of the contract bodies (Persona list, SessionCreated, Me) or void.
  * Side effects: network requests through apiFetch; 401 is always thrown to the caller
  *   (on401 "throw"), because the landing page itself is the access gate.
- * Role: the only place the web app names these three routes.
+ * Role: the only place the web app names these four routes.
  */
-import type { AccessRequest, Persona, SessionCreated } from "@contracts/contracts";
+import type { AccessRequest, Me, Persona, SessionCreated } from "@contracts/contracts";
 
 import { apiFetch, type ApiDeps } from "./client";
 
@@ -46,6 +47,19 @@ export async function listPersonas(deps: ApiDeps = {}): Promise<Persona[]> {
  */
 export async function createSession(deps: ApiDeps = {}): Promise<SessionCreated> {
   return apiFetch<SessionCreated>("/api/sessions", { method: "POST", body: {} }, { ...deps, on401: "throw" });
+}
+
+/**
+ * What: GET /api/me: the visitor's flags.
+ * Use when: the drawer's Demo controls decide whether to show the fault toggle.
+ * Inputs: deps.
+ * Output: Me {visitor, operator, demo_faults_enabled}.
+ * Side effects: network request.
+ * Role: flag read (doc 07 s10: the toggle shows only when demo_faults_enabled is true); throws
+ *   ApiError 401 instead of redirecting, so a failed read only hides the toggle.
+ */
+export async function getMe(deps: ApiDeps = {}): Promise<Me> {
+  return apiFetch<Me>("/api/me", {}, { ...deps, on401: "throw" });
 }
 
 /**

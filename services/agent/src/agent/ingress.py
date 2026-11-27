@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -33,8 +34,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.utils.uuid import uuid7
 from pydantic import ValidationError
 
+from agent.deadline import TurnBudgetExhausted
 from agent.pin_guard import refuse_without_thread, scan_input, session_redact_context
 from agent.sse import TurnMeta, TurnOutcome, TurnStream, start_turn
+from agent.turn_control import TurnControl, bind_turn_control
 
 log = logging.getLogger("agent.ingress")
 
@@ -104,21 +107,53 @@ class TurnStore(Protocol):
     """What: the agent.sessions and agent.turns operations ingress uses. Use when: typing.
     Inputs: see methods. Output: see methods. Side effects: database. Role: storage port."""
 
-    async def get_session(self, session_id: str) -> SessionRow | None: ...
+    async def get_session(self, session_id: str) -> SessionRow | None:
+        """What: read one session. Use when: step 1. Inputs: id. Output: row or None.
+        Side effects: SELECT. Role: port method."""
+        ...
     async def find_turn(self, session_id: str, client_turn_id: str,
-                        realtime_call_id: str | None = None) -> TurnRow | None: ...
-    async def sweep(self, session_id: str, now: datetime) -> int: ...
-    async def insert_turn(self, row: TurnRow) -> None: ...
-    async def count_turn(self, session_id: str) -> None: ...
-    async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None: ...
+                        realtime_call_id: str | None = None) -> TurnRow | None:
+        """What: replay lookup. Use when: step 4. Inputs: ids. Output: row or None.
+        Side effects: SELECT. Role: port method."""
+        ...
+    async def sweep(self, session_id: str, now: datetime) -> int:
+        """What: mark overdue running turns failed. Use when: step 6. Inputs: id, now. Output: rows swept.
+        Side effects: UPDATE. Role: port method."""
+        ...
+    async def insert_turn(self, row: TurnRow) -> None:
+        """What: insert the running row. Use when: step 9. Inputs: row. Output: none.
+        Side effects: INSERT; DuplicateTurn. Role: port method."""
+        ...
+    async def count_turn(self, session_id: str) -> None:
+        """What: user_turns + 1. Use when: step 9. Inputs: id. Output: none.
+        Side effects: UPDATE. Role: port method."""
+        ...
+    async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None:
+        """What: write the final row. Use when: step 16. Inputs: id, outcome, end time. Output: none.
+        Side effects: UPDATE. Role: port method."""
+        ...
+    async def last_turn(self, session_id: str, before_turn_id: str) -> tuple[str, str] | None:
+        """What: (turn_id, status) of the session's latest other turn. Use when: s7.3 adjacency. Inputs: session id, current turn id. Output: pair or None.
+        Side effects: SELECT. Role: port method (delivery record)."""
+        ...
+    async def mark_events_incomplete(self, turn_ids: set[str]) -> None:
+        """What: set events_complete false. Use when: trajectory writer drops. Inputs: turn ids. Output: none.
+        Side effects: UPDATE. Role: port method."""
+        ...
 
 
 class TurnLock(Protocol):
     """What: per-session turn lock with an owner token. Use when: typing.
     Inputs: see methods. Output: see methods. Side effects: Redis. Role: lock port."""
 
-    async def acquire(self, session_id: str, token: str, ttl_ms: int) -> bool: ...
-    async def release(self, session_id: str, token: str) -> bool: ...
+    async def acquire(self, session_id: str, token: str, ttl_ms: int) -> bool:
+        """What: SET NX PX with the owner token. Use when: step 8. Inputs: id, token, ttl. Output: True when taken.
+        Side effects: Redis. Role: port method."""
+        ...
+    async def release(self, session_id: str, token: str) -> bool:
+        """What: compare-and-delete. Use when: turn end. Inputs: id, token. Output: True when released.
+        Side effects: Redis. Role: port method."""
+        ...
 
 
 class CallKeys(Protocol):
@@ -126,13 +161,17 @@ class CallKeys(Protocol):
     Inputs: session id, call id. Output: True when this request claimed the key. Side effects: Redis.
     Role: voice call dedupe port."""
 
-    async def claim(self, session_id: str, call_id: str) -> bool: ...
+    async def claim(self, session_id: str, call_id: str) -> bool:
+        """What: SET NX EX 120 on the call key. Use when: step 7, voice. Inputs: session id, call id. Output: True when claimed.
+        Side effects: Redis. Role: port method."""
+        ...
 
 
 @dataclass(frozen=True)
 class IngressInput:
     """What: one turn request after auth and body parsing. Use when: Ingress.handle.
-    Inputs: session, visitor, client turn id, mode, input kind, redacted text, realtime call id, raw body
+    Inputs: session, visitor, client turn id, mode, input kind, redacted text, realtime call id, raw body, the
+    gated demo fault
     (TurnRequest or VoiceAskRequest); merged_transcript is set by ingress at step 12 (the wrapped
     <voice_transcript> user message for the agent body to place before this turn's message, or None);
     redact_context is the session's scanner context (doc 07 s11.1 conditions) for text that ingress hooks store.
@@ -146,6 +185,7 @@ class IngressInput:
     text: str | None = None
     realtime_call_id: str | None = None
     body: Any = None
+    demo_fault: str | None = None  # already gated by demo_fault_from_header (doc 07 s10), request-scoped
     merged_transcript: str | None = None
     redact_context: RedactContext | None = None
 
@@ -217,17 +257,20 @@ class Ingress:
     """What: the callable ingress entry. Use when: one instance per app; handle() per request.
     Inputs: store, lock, replica name, agent body, deadlines and reserve (overridable for tests), clock,
     call keys (voice step 7 dedupe; production RedisCallKeys), merge_transcript (step 12; production
-    agent.voice.TranscriptMerger), refuse_typed_pin (step 9a refusal body; production agent.pin_guard.TypedPinRefusal,
-    default: event and fixed line without a thread write).
+    agent.voice.TranscriptMerger), trajectory writer (app.state.trajectory, or None: events are not persisted),
+    refuse_typed_pin (step 9a refusal body; production agent.pin_guard.TypedPinRefusal, default: event and fixed
+    line without a thread write).
     Output: handle(). Side effects: see module. Role: doc 07 s2.4 orchestration."""
 
     def __init__(self, store: TurnStore, lock: TurnLock, *, served_by: str, run_agent: AgentBody,
                  turn_deadline_s: dict[str, float] | None = None, reserve_s: float = limits.ESCALATION_RESERVE_S,
                  now: Callable[[], datetime] = lambda: datetime.now(UTC), call_keys: CallKeys | None = None,
-                 merge_transcript: MergeTranscript | None = None, refuse_typed_pin: AgentBody | None = None) -> None:
+                 merge_transcript: MergeTranscript | None = None, trajectory: Any = None,
+                 refuse_typed_pin: AgentBody | None = None) -> None:
         """What: wire dependencies. Use when: app start or tests. Inputs: see class. Output: none.
         Side effects: none. Role: constructor."""
         self.store, self.lock, self.served_by, self.run_agent = store, lock, served_by, run_agent
+        self.trajectory = trajectory
         self.deadline_s = turn_deadline_s or TURN_DEADLINE_S
         self.reserve_s, self.now = reserve_s, now
         self.call_keys, self.merge_transcript = call_keys, merge_transcript
@@ -337,22 +380,30 @@ class Ingress:
             await release(TurnOutcome.fixed("", end_reason="error"))
             return _conflict()
         await self.store.count_turn(inp.session_id)
-        stream = TurnStream(TurnMeta(inp.session_id, row.turn_id, inp.mode, self.served_by, inp.input_kind))
+        stream = TurnStream(TurnMeta(inp.session_id, row.turn_id, inp.mode, self.served_by, inp.input_kind),
+                            sink=self.trajectory.add if self.trajectory is not None else None)  # doc 07 s12 turn_events
         loop_budget = max(budget - self.reserve_s, 0.0)  # the reserve is kept for the escalation ticket
+        deadline_mono = time.monotonic() + budget  # TurnControl.deadline: clamps take the reserve off this
 
         async def body(s: TurnStream) -> TurnOutcome:
-            """What: step 9a (PIN scan; a credential-looking chat message is refused), then the agent loop under
-            asyncio.timeout. Use when: the turn task. Inputs: stream.
-            Output: outcome (deadline outcome on timeout). Side effects: model and tools. Role: steps 9a to 14."""
-            scanned = scan_input(inp, session_redact_context(session))  # only redacted text travels further
+            """What: the agent loop under asyncio.timeout, with the turn's one TurnControl bound (deadline = the 45 s
+            or 20 s turn deadline, so every clamp subtracts the 3 s reserve from it; the request's demo fault).
+            Step 9a runs first: the PIN scan (only redacted text travels further) and the typed-PIN refusal.
+            Use when: the turn task. Inputs: stream.
+            Output: outcome (deadline outcome on timeout or on a call skipped by the clamp). Side effects: model
+            and tools; binds TURN_CONTROL in this task. Role: steps 9a to 14; doc 07 s8.2 deadline path."""
+            scanned = scan_input(inp, session_redact_context(session))  # step 9a
+            control = TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
+                                  deadline=deadline_mono, demo_fault=inp.demo_fault, events=s)
+            bind_turn_control(control)  # the turn task's own context; the only .set() (spike 15)
             cm = asyncio.timeout(loop_budget)
             try:
                 async with cm:
                     if scanned.refuse:
                         return await self.refuse_typed_pin(s, scanned.inp, row)
                     return await self.run_agent(s, await self._merge(scanned.inp, row), row)
-            except TimeoutError:
-                if not cm.expired():  # an inner timeout (httpx, wait_for) is an error, not the deadline
+            except (TimeoutError, TurnBudgetExhausted) as exc:
+                if isinstance(exc, TimeoutError) and not cm.expired():  # an inner timeout is an error, not the deadline
                     raise
                 err = ErrorBody.model_validate({"class": "turn_deadline_exceeded", "code": "TURN_DEADLINE",
                                                 "message": DEADLINE_MESSAGE, "retryable": True, "changed": None,
@@ -432,7 +483,7 @@ class RedisTurnLock:
 class PgTurnStore:
     """What: TurnStore over the agent_app psycopg pool (schema agent).
     Use when: production. Inputs: psycopg AsyncConnectionPool. Output: TurnStore methods.
-    Side effects: SQL on agent.sessions and agent.turns. Role: storage adapter."""
+    Side effects: SQL on agent.sessions and agent.turns (including events_complete). Role: storage adapter."""
 
     def __init__(self, pool: Any) -> None:
         """What: keep the pool. Use when: app start. Inputs: pool. Output: none. Side effects: none. Role: constructor."""
@@ -499,6 +550,18 @@ class PgTurnStore:
             await conn.execute("UPDATE agent.sessions SET user_turns = user_turns + 1, last_active_at = now() "
                                "WHERE session_id = %s", (session_id,))
 
+    async def last_turn(self, session_id: str, before_turn_id: str) -> tuple[str, str] | None:
+        """What: (turn_id, status) of the session's latest turn other than before_turn_id (the current one).
+        Use when: the s7.3 adjacency rule (StructuredInput last_turn): a yes commits only when this is the read-back
+        turn and it is completed. Inputs: session id, current turn id. Output: pair or None. Side effects: SELECT.
+        Role: read (the turn's final row status is the delivery record)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT turn_id::text, status FROM agent.turns WHERE session_id = %s AND turn_id <> %s "
+                "ORDER BY started_at DESC, turn_id DESC LIMIT 1", (session_id, before_turn_id))
+            r = await cur.fetchone()
+        return (r[0], r[1]) if r else None
+
     async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None:
         """What: the final row. Use when: step 16. Inputs: id, outcome, end time. Output: none.
         Side effects: UPDATE. Role: write (turns.final makes GET /api/turns/{id} work without events)."""
@@ -510,3 +573,13 @@ class PgTurnStore:
                 (outcome.status, outcome.end_reason, ended_at, json.dumps(outcome.final.model_dump(mode="json")),
                  json.dumps(outcome.usage.model_dump(mode="json")), json.dumps(error) if error else None,
                  outcome.model_used, outcome.fallback_used, turn_id))
+
+    async def mark_events_incomplete(self, turn_ids: set[str]) -> None:
+        """What: events_complete = false for turns whose turn_events rows were dropped.
+        Use when: TrajectoryWriter(on_incomplete=...). Inputs: turn ids. Output: none.
+        Side effects: one UPDATE on this store's pool (not the writer's). Role: doc 07 s12 events_complete."""
+        ids = [i for i in turn_ids if i]
+        if not ids:
+            return
+        async with self.pool.connection() as conn:
+            await conn.execute("UPDATE agent.turns SET events_complete = false WHERE turn_id = ANY(%s::uuid[])", (ids,))

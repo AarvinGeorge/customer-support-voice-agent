@@ -29,7 +29,7 @@ PIN = "4821"
 class Flags:
     """What: fake agent.sessions flag writer that also updates the memory session row.
     Use when: these tests. Inputs: the World. Output: set_awaiting_verification. Side effects: mutates the row.
-    Role: fake of PgAwaitingFlag."""
+    Role: fake of PgSessionFlags."""
 
     def __init__(self, w: World) -> None:
         """What: keep the world. Use when: tests. Inputs: world. Output: none. Side effects: none. Role: fake."""

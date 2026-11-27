@@ -26,6 +26,7 @@ from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 
 from agent.middleware.router import route_reply
 from agent.models.usage import add_usage, normalize_usage, token_usage
+from agent.structured.pending import confirm_label
 from agent.turn_control import TURN_CONTROL, TurnControl, bind_turn_control
 
 log = logging.getLogger("agent.sse")
@@ -86,13 +87,16 @@ class TurnOutcome:
 class TurnStream:
     """What: one turn's event stream: builds envelopes, validates every event with the contracts union,
     renders SSE frames into a queue and remembers non-token events (for turn_events, T8).
-    Use when: one per turn. Inputs: TurnMeta, keepalive interval. Output: emit(), frames(), events, timings.
-    Side effects: queue writes. Role: wire format owner."""
+    Use when: one per turn. Inputs: TurnMeta, keepalive interval, optional sink (TrajectoryWriter.add) that
+    receives every non-token event. Output: emit(), frames(), events, timings.
+    Side effects: queue writes; sink calls. Role: wire format owner."""
 
-    def __init__(self, meta: TurnMeta, *, keepalive_s: float = limits.KEEPALIVE_INTERVAL_S) -> None:
-        """What: empty stream. Use when: ingress step 9. Inputs: meta, keepalive. Output: none.
+    def __init__(self, meta: TurnMeta, *, keepalive_s: float = limits.KEEPALIVE_INTERVAL_S,
+                 sink: Callable[[Envelope], None] | None = None) -> None:
+        """What: empty stream. Use when: ingress step 9. Inputs: meta, keepalive, sink (None: events are not
+        persisted, for example the capped turn, which has no turns row). Output: none.
         Side effects: none. Role: constructor."""
-        self.meta, self.keepalive_s = meta, keepalive_s
+        self.meta, self.keepalive_s, self.sink = meta, keepalive_s, sink
         self.seq, self.step_n = 0, 0
         self.events: list[Envelope] = []
         self.completed = False
@@ -115,7 +119,7 @@ class TurnStream:
     def emit(self, type_: str, **fields: Any) -> Envelope:
         """What: build, validate and queue one event. Use when: anything is sent to the client.
         Inputs: event type and its fields. Output: the typed event.
-        Side effects: queue write; timings; raises RuntimeError on a second turn.completed and
+        Side effects: queue write; sink call (errors logged, never raised); timings; raises RuntimeError on a second turn.completed and
         ValidationError on a malformed event (a bug, never sent). Role: the single emit point."""
         if self.completed:
             raise RuntimeError("turn.completed already sent for this turn")
@@ -131,6 +135,11 @@ class TurnStream:
             self.ttft_ms = now
         if type_ != "token":
             self.events.append(ev)
+            if self.sink is not None:
+                try:
+                    self.sink(ev)
+                except Exception:  # noqa: BLE001 - doc 07 s12 G6: persistence never fails a turn
+                    log.exception("event sink failed turn_id=%s", m.turn_id)
         self._queue.put_nowait(format_sse(ev))
         if type_ == "turn.completed":
             self.completed = True
@@ -252,7 +261,8 @@ def _tool_messages(result: Any) -> int:
 
 def route_outcome(stream: TurnStream, control: TurnControl, usage: Usage, model_used: str | None) -> TurnOutcome:
     """What: the outcome of a turn the router ended: its fixed line, say and end_reason; a verify route also
-    emits verification.required (doc 07 s6.3 step 3).
+    emits verification.required (doc 07 s6.3 step 3); a readback route with a card emits confirmation.required and
+    puts the card in FinalAnswer.pending_action (CS-E-03.S7.T8).
     Use when: classify_final sees the router's line as the last message. Inputs: stream, control, usage,
     model id. Output: TurnOutcome. Side effects: one verification.required event for verify. Role: helper."""
     reply = route_reply(control)
@@ -260,8 +270,12 @@ def route_outcome(stream: TurnStream, control: TurnControl, usage: Usage, model_
             "account_lookup", "action", "ticket_status"):
         stream.emit("verification.required", reason=reply.verification_reason, prompt_text=reply.text,
                     attempts_left=control.verify_attempts_left, fields=["account_id", "pin"])
-    final = FinalAnswer(text=reply.text, say=reply.say, citations=[], escalated=reply.escalated,
-                        ticket=reply.ticket)  # type: ignore[arg-type]  # dict validated into TicketRef
+    card = (control.route.pending or {}).get("card") if control.route is not None else None
+    if reply.end_reason == "readback" and card:  # doc 07 s6.2: the card is shown on the read-back turn
+        stream.emit("confirmation.required", pending=card, confirm_label=confirm_label(card))
+    final = FinalAnswer.model_validate({"text": reply.text, "say": reply.say, "citations": [],
+                                        "escalated": reply.escalated, "ticket": reply.ticket,
+                                        "pending_action": card if reply.end_reason == "readback" else None})
     return TurnOutcome(final=final, usage=usage, end_reason=reply.end_reason, model_used=model_used)
 
 
@@ -296,12 +310,15 @@ def classify_final(stream: TurnStream, messages: list[Any], model_ids: set[str],
 
 async def stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[str, Any], config: dict[str, Any], *,
                             slow_after_s: float = limits.SLOW_STATUS_AFTER_S,
-                            control: TurnControl | None = None) -> TurnOutcome:
+                            control: TurnControl | None = None,
+                            cost_of: Callable[[str, Usage], float] | None = None) -> TurnOutcome:
     """What: run the agent loop and translate it into step, status and token events.
     Use when: ingress step 14 for a turn that goes to the model. Inputs: stream, compiled agent, input,
-    run config (thread_id = session_id), slow threshold, the turn's TurnControl (default: the bound one, else a
-    new one for this stream; it is bound here, once, before astream, when not already bound).
-    Output: TurnOutcome with usage (tokens, model_calls, tool_calls, models_used).
+    run config (turn_run_config: thread_id = session_id, run_id = turn_id), slow threshold, the turn's TurnControl
+    (default: the bound one, else a new one for this stream; it is bound here, once, before astream, when not
+    already bound), cost_of(model_name, usage) -> USD (ModelRegistry.cost_for_model; None: cost 0).
+    Output: TurnOutcome with usage (tokens, cached tokens, cost_usd_est, model_calls = provider attempts counted by
+    DeadlineAndFaultMiddleware, tool_calls, models_used, fallback_used).
     Side effects: model and tool calls through the agent; a limit line is replaced in the thread; binds
     TURN_CONTROL for the run and resets it afterwards.
     Role: adapter between LangGraph streams (messages, tasks, values) and doc 07 s6.2 events."""
@@ -311,14 +328,15 @@ async def stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[st
         control.events = stream
     token = bind_turn_control(control) if TURN_CONTROL.get() is not control else None
     try:
-        return await _stream_agent_turn(stream, agent, agent_input, config, slow_after_s, control)
+        return await _stream_agent_turn(stream, agent, agent_input, config, slow_after_s, control, cost_of)
     finally:
         if token is not None:
             TURN_CONTROL.reset(token)
 
 
 async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[str, Any], config: dict[str, Any],
-                             slow_after_s: float, control: TurnControl) -> TurnOutcome:
+                             slow_after_s: float, control: TurnControl,
+                             cost_of: Callable[[str, Usage], float] | None = None) -> TurnOutcome:
     """What: the body of stream_agent_turn with the control already bound. Use when: stream_agent_turn.
     Inputs: as stream_agent_turn. Output: TurnOutcome. Side effects: as stream_agent_turn. Role: helper."""
     usage = token_usage()
@@ -369,7 +387,9 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
                         call = add_usage(call, normalize_usage(m.usage_metadata))
                         model_name = (m.response_metadata or {}).get("model_name") or model_name
                     model_used = model_name
-                    usage = add_usage(usage, call.model_copy(update={"model_calls": 1, "models_used": [model_name]}))
+                    cost = cost_of(model_name, call) if cost_of is not None and msgs else 0.0
+                    usage = add_usage(usage, call.model_copy(update={"model_calls": 1, "models_used": [model_name],
+                                                                     "cost_usd_est": cost}))
                     stream.emit("step.completed", step_id=attempt.get("step_id") or stream.next_step_id(),
                                 status="error" if chunk.get("error") else "ok", ms=stream.ms() - attempt.get("t", 0),
                                 title="Thought it through", summary={}, attempt=1, model=model_name,
@@ -379,8 +399,14 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
                 usage = usage.model_copy(update={"tool_calls": usage.tool_calls + _tool_messages(chunk["result"])})
     finally:
         stop_timer()
+    # Gate 2 note: verifier and classifier calls are LangSmith llm runs but are not in model_attempts; the Gate 2
+    # task decides the rule (recommended: count every provider call so this keeps matching LangSmith).
+    if control.model_attempts:  # provider calls made (retries and fallback included), as LangSmith counts llm runs
+        usage = usage.model_copy(update={"model_calls": control.model_attempts})
+    usage = usage.model_copy(update={"fallback_used": usage.fallback_used or control.fallback_used})
     messages = list(values.get("messages") or [])
     outcome = classify_final(stream, messages, model_ids, usage, model_used, control)
+    outcome.fallback_used = outcome.usage.fallback_used
     if outcome.end_reason == "limit_reached" and messages:
         # doc 07 s2.4 step 15 / spike 17a: replace the framework line in the thread with ours.
         await agent.aupdate_state(config, {"messages": [RemoveMessage(id=messages[-1].id), AIMessage(LIMIT_LINE)]})

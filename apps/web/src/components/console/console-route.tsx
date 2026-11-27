@@ -4,7 +4,7 @@
  *   and wires New conversation to a fresh session.
  * Use when: rendered by src/app/console/page.tsx inside Suspense (useSearchParams).
  * Inputs: the URL query.
- * Output: ConsoleShell bound to the app turn store.
+ * Output: ConsoleShell bound to the app turn store, with the Demo controls in the drawer slot.
  * Side effects: store reset on a session change (review PR #16, M5); New conversation makes one
  *   POST /api/sessions and replaces the URL; a failure shows a toast.
  * Role: route glue between the landing flow (consolePath) and the console shell.
@@ -17,6 +17,7 @@ import { consolePath, createSession } from "@/lib/api/access";
 import { turnStore } from "@/lib/turns/store";
 
 import { ConsoleShell } from "./console-shell";
+import { DemoControls } from "./demo-controls";
 
 /**
  * What: the ConsoleRoute component.
@@ -59,5 +60,11 @@ export function ConsoleRoute() {
     }
   };
 
-  return <ConsoleShell sessionId={sessionId} onNewConversation={() => void newConversation()} />;
+  return (
+    <ConsoleShell
+      sessionId={sessionId}
+      onNewConversation={() => void newConversation()}
+      demoControls={<DemoControls store={turnStore} />}
+    />
+  );
 }
