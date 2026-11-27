@@ -17,5 +17,6 @@ def leaks(text: str, secret: str) -> bool:
     blanked out. Letter, digit and hyphen neighbours still count as leaks (QS-10423-4821, pin4821, 4821x).
     Use when: PIN-absence assertions, paired with a first half that proves the PIN is present in the fixture.
     Inputs: text, secret. Output: bool. Side effects: none. Role: chance-proof secret match; a standalone number
-    such as an amount of 4821 cents would still match, so do not put one in a fixture."""
+    such as an amount of 4821 cents would still match, as do random short ids (QS-14821) and timestamps with
+    fractional seconds (.482100Z): fix the fixture ids and clock, or probe only the fields that hold the secret."""
     return secret in _NOISE.sub(" ", text)

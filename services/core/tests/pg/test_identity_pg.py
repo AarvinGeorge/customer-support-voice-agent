@@ -30,6 +30,19 @@ NY = ZoneInfo("America/New_York")
 POLICY_PATH = Path(__file__).resolve().parents[4] / "data" / "policy.yaml"
 PEPPER = "test-pepper-not-a-secret"
 START = datetime(2026, 11, 27, 9, 30, tzinfo=NY)
+BANNED_PINS = ("4821", "7352", "1357", "6093")  # every PIN these tests use: no random id may contain one
+
+
+def pick_ids(draw) -> tuple[str, str, str, str, str]:
+    """What: random account and user ids, redrawn until none contains a PIN used in these tests.
+    Use when: building a World. Inputs: draw, a callable returning a random int. Output: (a, b, owner, member, owner_b).
+    Side effects: none. Role: keeps PIN-absence probes free of chance matches on ids."""
+    while True:
+        n = draw() % 40000 + 10000
+        suffix = draw() % 900 + 100
+        ids = (f"QS-{n}", f"QS-{n + 40000}", f"U-{suffix}1", f"U-{suffix}2", f"U-{suffix}3")
+        if not any(p in i for i in ids for p in BANNED_PINS):
+            return ids
 
 
 class World:
@@ -40,10 +53,7 @@ class World:
     def __init__(self, conn: psycopg.Connection) -> None:
         """What: insert the rows. Use when: constructing. Inputs: connection. Output: none.
         Side effects: two accounts, three users. Role: credentials for verify."""
-        n = uuid.uuid4().int % 40000 + 10000
-        self.a, self.b = f"QS-{n}", f"QS-{n + 40000}"
-        suffix = uuid.uuid4().int % 900 + 100
-        self.owner, self.member, self.owner_b = f"U-{suffix}1", f"U-{suffix}2", f"U-{suffix}3"
+        self.a, self.b, self.owner, self.member, self.owner_b = pick_ids(lambda: uuid.uuid4().int)
         self.pins = {self.owner: "4821", self.member: "7352", self.owner_b: "1357"}
         conn.execute("INSERT INTO accounts (id, name, tier, contract_status, seats, grace_until) "
                      "VALUES (%s,'Acme','pro','active',5,NULL)", (self.a,))
@@ -53,6 +63,19 @@ class World:
                                       (self.owner_b, self.b, "Gina", "billing_admin")):
             conn.execute("INSERT INTO users (id, account_id, display_name, role, pin_hmac) VALUES (%s,%s,%s,%s,%s)",
                          (uid, acct, name, role, pin_hmac(PEPPER, acct, self.pins[uid])))
+
+
+def test_fixture_ids_never_contain_a_fixture_pin():
+    """What: pick_ids redraws when the first draw is unlucky (n=14821 gives QS-14821, which holds 4821).
+    Use when: always. Inputs: none. Output: assertions. Side effects: none.
+    Role: forced reproduction of the PIN-probe chance flake on random account ids, and the fix."""
+    draws = iter([4821, 5, 7, 7])  # attempt 1: QS-14821 (bad), attempt 2: QS-10007 (fine)
+    a, b, owner, member, owner_b = pick_ids(lambda: next(draws))
+    assert a == "QS-10007" and b == "QS-50007"
+    assert not any(p in i for i in (a, b, owner, member, owner_b) for p in BANNED_PINS)
+    unlucky_user = iter([5000, 482, 6000, 3])  # user id suffix 482 gives U-4821
+    ids = pick_ids(lambda: next(unlucky_user))
+    assert not any(p in i for i in ids for p in BANNED_PINS)
 
 
 def count_tickets(conn: psycopg.Connection, sid: str) -> int:
