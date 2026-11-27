@@ -98,5 +98,65 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(keys.mask(""), "MISSING")
 
 
+SECTION_15_2_NAMES = (
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LANGSMITH_API_KEY", "LANGSMITH_TRACING", "LANGSMITH_PROJECT",
+    "CORE_TOKEN_AGENT", "CORE_TOKEN_COMMIT", "CORE_TOKEN_OPS", "KNOWLEDGE_TOKEN_AGENT",
+    "SESSION_SIGNING_KEY", "PIN_PEPPER", "OPERATOR_TOKEN_KEY", "DEMO_ACCESS_CODE", "OPERATOR_ACCESS_CODE",
+    "POSTGRES_PASSWORD", "AGENT_DB_URL", "CORE_DB_URL", "KNOWLEDGE_DB_URL",
+    "AGENT_DB_OWNER_URL", "CORE_DB_OWNER_URL", "KNOWLEDGE_DB_OWNER_URL", "REDIS_URL", "CORE_URL",
+    "KNOWLEDGE_URL", "SITE_ORIGIN", "FORWARDED_ALLOW_IPS", "DEMO_FAULTS_ENABLED", "FEATURE_A4", "DEMO_RESEED",
+)
+DB_URL_NAMES = ("AGENT_DB_URL", "CORE_DB_URL", "KNOWLEDGE_DB_URL",
+                "AGENT_DB_OWNER_URL", "CORE_DB_OWNER_URL", "KNOWLEDGE_DB_OWNER_URL")
+
+
+class EnvParityTests(unittest.TestCase):
+    """What: tests that .env.example matches doc 07 section 15.2 and that gen composes the database URLs.
+    Use when: changing keys.py or .env.example. Inputs: none. Output: assertions.
+    Side effects: temp files. Role: fails if a 15.2 name is missing or gen is not idempotent."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.path = Path(self.dir.name) / ".env"
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_env_example_has_every_section_15_2_name(self):
+        example = keys.read_env(Path(keys.__file__).resolve().parent.parent / ".env.example")
+        missing = [n for n in SECTION_15_2_NAMES if n not in example]
+        self.assertEqual(missing, [])
+
+    def test_gen_composes_six_urls_from_role_passwords(self):
+        keys.generate_missing(self.path)
+        env = keys.read_env(self.path)
+        for svc in ("agent", "core", "knowledge"):
+            for role in ("owner", "app"):
+                pw = env[f"{svc.upper()}_{role.upper()}_PASSWORD"]
+                self.assertGreaterEqual(len(pw), 32)
+                suffix = "_DB_OWNER_URL" if role == "owner" else "_DB_URL"
+                self.assertEqual(env[svc.upper() + suffix],
+                                 f"postgresql://{svc}_{role}:{pw}@postgres:5432/quillstack")
+        self.assertEqual(len({env[n] for n in DB_URL_NAMES}), 6)
+
+    def test_second_gen_changes_nothing(self):
+        keys.generate_missing(self.path)
+        first = self.path.read_text()
+        self.assertEqual(keys.generate_missing(self.path), [])
+        self.assertEqual(self.path.read_text(), first)
+
+    def test_gen_never_overwrites_existing_url_or_password(self):
+        self.path.write_text("CORE_DB_URL=postgresql://custom\nAGENT_APP_PASSWORD=keepme-already-set-1234567890\n")
+        keys.generate_missing(self.path)
+        env = keys.read_env(self.path)
+        self.assertEqual(env["CORE_DB_URL"], "postgresql://custom")
+        self.assertEqual(env["AGENT_APP_PASSWORD"], "keepme-already-set-1234567890")
+        self.assertIn("keepme-already-set-1234567890", env["AGENT_DB_URL"])
+
+    def test_registry_lists_urls_and_passwords(self):
+        for n in DB_URL_NAMES + ("AGENT_OWNER_PASSWORD", "KNOWLEDGE_APP_PASSWORD"):
+            self.assertIn(n, keys.SPECS)
+
+
 if __name__ == "__main__":
     unittest.main()
