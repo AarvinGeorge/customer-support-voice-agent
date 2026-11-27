@@ -8,20 +8,44 @@
  *   announces, review PR #20 M3), or the empty state.
  * Side effects: none (card presses go to the `cards` callbacks).
  * Role: CS-E-04.S5.T1 unified thread (doc 06 s16, D-002); CS-E-04.S6.T1 adds the verification
- *   result line, receipts and the two cards. Citations, tickets and markdown arrive with
- *   CS-E-04.S5.T3.
+ *   result line, receipts and the two cards; CS-E-04.S5.T3 adds markdown answers, the answer
+ *   states (Gate 2 hold, slow, retrying), error rows with Retry, decline notes, the Sources row,
+ *   ticket chips, the escalation line and the fallback badge.
  */
 import { CircleAlert, Mic, RotateCcw } from "lucide-react";
+import type { StatusEvent } from "@contracts/contracts";
 import type { RefObject } from "react";
 import type { ConfirmInput, VerificationInput } from "@contracts/contracts";
 
 import { Button } from "@/components/ui/button";
 
 import { cardIndex, receiptFor, ruleTitleIn, verificationCardState, type CardIndex } from "@/lib/turns/cards";
+import {
+  answerState,
+  citationViews,
+  declineNotes,
+  errorRows,
+  escalationWords,
+  fallbackNotice,
+  isPrepareDecline,
+  ticketChip,
+  turnTickets,
+} from "@/lib/turns/furniture";
 import type { ConversationState, TurnView } from "@/lib/turns/reducer";
 import type { ThreadItem } from "@/lib/turns/store";
 
 import { ConfirmationCard, ReceiptLine, VerificationCard, VerificationResultLine } from "./cards";
+import {
+  AnswerMarkdown,
+  DeclineNoteBlock,
+  EscalationLine,
+  FallbackBadge,
+  HeldAnswer,
+  SourcesRow,
+  StatusLine,
+  TicketChip,
+  TurnErrorRow,
+} from "./furniture";
 import { StepTrajectory } from "./step-trajectory";
 
 /**
@@ -94,45 +118,70 @@ function UserMessage({ text, mode }: { text: string; mode: "chat" | "voice" }) {
 }
 
 /**
- * What: one agent turn: trail, verification result and receipt lines, answer text, the cards,
- *   the terminal failure row, footer.
+ * What: the subject word of a decline note per action type.
+ * Use when: titling a DeclineNoteBlock ("Refund declined").
+ * Inputs: none.
+ * Output: a frozen map.
+ * Side effects: none.
+ * Role: copy table (action_type is a free string; unknown types use "Request").
+ */
+const DECLINE_SUBJECT: Readonly<Record<string, string>> = Object.freeze({
+  refund: "Refund",
+  billing_email: "Billing email change",
+  grace_extension: "Grace extension",
+});
+
+/**
+ * What: one agent turn: trail, verification result and receipt lines, the answer (markdown, or
+ *   the held, slow or retrying state), decline notes, the cards, Sources, ticket chips, the
+ *   escalation line, error rows and the footer with the fallback badge.
  * Use when: a turn thread item.
- * Inputs: { turn, conversation, index, cards }.
+ * Inputs: { turn, conversation, index, cards, onResend? } (onResend is set when the customer's
+ *   typed text for this turn is known, so a retryable error row can offer Retry).
  * Output: an <article>.
  * Side effects: none.
- * Role: assistant message (plain text paragraphs until Streamdown lands in CS-E-04.S5.T3); the
- *   order follows Figma S1 (receipt above the text, cards below it).
+ * Role: assistant message; the order follows Figma S1 and States (receipts and the quoted
+ *   decline policy above the text, so the text's closing question comes last; cards below it,
+ *   chips and footer last).
  */
 function AssistantMessage({
   turn,
   conversation,
   index,
   cards,
+  onResend,
 }: {
   turn: TurnView;
   conversation: ConversationState;
   index: CardIndex;
   cards: CardActions;
+  onResend?: () => void;
 }) {
-  const paragraphs = turn.text.split(/\n{2,}/).filter((p) => p.trim() !== "");
   const latency = turn.completed ? `${(turn.completed.usage.latency_ms / 1000).toFixed(2)} s` : null;
   const verifyState = verificationCardState(conversation, turn.turnId, index);
+  const state = answerState(turn);
+  const status: StatusEvent | null = turn.status;
+  const declines = declineNotes(turn);
+  const sources = citationViews(turn.completed?.final.citations ?? []);
+  const tickets = turnTickets(turn).map(ticketChip);
+  const fallback = fallbackNotice(turn);
+  const errors = errorRows(turn);
   return (
     <article aria-label="Assistant" className="flex flex-col items-start gap-3.5">
       <StepTrajectory turn={turn} />
       {turn.verificationResult && <VerificationResultLine result={turn.verificationResult} />}
-      {turn.actionResults.map((r) => (
-        <ReceiptLine key={r.seq} receipt={receiptFor(r, (r.pending_action_id && index.pendings[r.pending_action_id]) || null)} />
-      ))}
-      {paragraphs.length > 0 && (
-        <div className="flex max-w-[70ch] flex-col gap-3 text-body text-ink">
-          {paragraphs.map((p, i) => (
-            <p key={i} className="whitespace-pre-wrap">
-              {p}
-            </p>
-          ))}
-        </div>
-      )}
+      {turn.actionResults
+        .filter((r) => !isPrepareDecline(r))
+        .map((r) => (
+          <ReceiptLine key={r.seq} receipt={receiptFor(r, (r.pending_action_id && index.pendings[r.pending_action_id]) || null)} />
+        ))}
+      {declines.map((note) => {
+        const action = turn.actionResults.find((r) => String(r.seq) === note.key)?.action_type ?? "";
+        return <DeclineNoteBlock key={note.key} note={note} action={DECLINE_SUBJECT[action] ?? "Request"} />;
+      })}
+      {turn.text.trim() !== "" && <AnswerMarkdown text={turn.text} streaming={turn.phase === "streaming"} />}
+      {state === "checking_policy" && <HeldAnswer />}
+      {(state === "slow" || state === "retrying") && status && <StatusLine state={state} message={status.message} />}
       {verifyState !== "hidden" && (
         <VerificationCard
           request={conversation.awaitingVerification ?? turn.verificationRequired}
@@ -155,21 +204,28 @@ function AssistantMessage({
           onDecide={cards.decide}
         />
       )}
-      {turn.failure && (
-        <p className="inline-flex items-start gap-2 text-body-sm text-ink">
-          <CircleAlert aria-hidden className="mt-0.5 size-4 shrink-0 text-error" />
-          <span>
-            <span className="font-medium text-error">Couldn&apos;t finish. </span>
-            <span>{turn.failure.message}</span>
-            {turn.failure.retryable && <span className="text-muted"> You can send your message again.</span>}
-          </span>
-        </p>
+      <SourcesRow views={sources} />
+      {turn.escalation && <EscalationLine text={escalationWords(turn.escalation)} />}
+      {tickets.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {tickets.map((t) => (
+            <TicketChip key={t.ticketId} chip={t} />
+          ))}
+        </div>
       )}
-      {latency !== null && (
-        <p className="font-mono text-mono-sm text-muted tabular">
-          <span>{modeWord(turn.mode)}</span>
-          <span> · {latency}</span>
-        </p>
+      {errors.map((row) => (
+        <TurnErrorRow key={row.key} row={row} onRetry={row.retryable && !cards.disabled ? onResend : undefined} />
+      ))}
+      {(latency !== null || fallback !== null) && (
+        <div className="flex flex-wrap items-center gap-2.5">
+          {fallback && <FallbackBadge notice={fallback} />}
+          {latency !== null && (
+            <p className="font-mono text-mono-sm text-muted tabular">
+              <span>{modeWord(turn.mode)}</span>
+              <span> · {latency}</span>
+            </p>
+          )}
+        </div>
       )}
     </article>
   );
@@ -208,7 +264,9 @@ function SendError({ item, onRetry }: { item: Extract<ThreadItem, { kind: "error
 /**
  * What: the conversation log component.
  * Use when: see module.
- * Inputs: { thread, conversation } from the turn store, the card actions, onRetry for error rows.
+ * Inputs: { thread, conversation } from the turn store, the card actions, onRetry for send error
+ *   rows, onResend for a retryable error inside the latest turn only (sends the customer's chat
+ *   text again; an older error never resends out of order).
  * Output: JSX.
  * Side effects: none.
  * Role: see module.
@@ -218,11 +276,13 @@ export function ConversationLog({
   conversation,
   cards = NO_ACTIONS,
   onRetry,
+  onResend,
 }: {
   thread: readonly ThreadItem[];
   conversation: ConversationState;
   cards?: CardActions;
   onRetry?: (errorId: string) => void;
+  onResend?: (text: string) => void;
 }) {
   const turns = conversation.turns;
   const index = cardIndex(conversation);
@@ -239,11 +299,17 @@ export function ConversationLog({
   }
   return (
     <div role="log" aria-label="Conversation" aria-live="off" className="flex flex-col gap-7">
-      {thread.map((item) => {
+      {thread.map((item, i) => {
         if (item.kind === "user") return <UserMessage key={item.id} text={item.text} mode={item.mode} />;
         if (item.kind === "error") return <SendError key={item.id} item={item} onRetry={onRetry} />;
         const turn = turns[item.turnId];
-        return turn ? <AssistantMessage key={item.id} turn={turn} conversation={conversation} index={index} cards={cards} /> : null;
+        const prev = thread[i - 1];
+        const typed = prev?.kind === "user" && prev.mode === "chat" ? prev.text : null;
+        const latest = i === thread.length - 1;
+        const resend = latest && typed !== null && onResend !== undefined ? () => onResend(typed) : undefined;
+        return turn ? (
+          <AssistantMessage key={item.id} turn={turn} conversation={conversation} index={index} cards={cards} onResend={resend} />
+        ) : null;
       })}
     </div>
   );

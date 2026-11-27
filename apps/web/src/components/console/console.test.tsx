@@ -55,7 +55,7 @@ describe("console shell with the S1 fixture", () => {
       "You said", "Assistant", "Assistant", "You said", "Assistant", "You said", "Assistant",
     ]);
     expect(within(log).getByText("Hi, we were charged twice.")).toBeTruthy();
-    expect(within(log).getByText(/Refunds reach your card in 5 to 10 business days/)).toBeTruthy();
+    expect(within(log).getByText(/Refunds reach your card in 5 to 10 business days after/, { selector: "p" })).toBeTruthy();
   });
 
   it("each trail is a collapsed disclosure button that expands into its step rows", () => {
