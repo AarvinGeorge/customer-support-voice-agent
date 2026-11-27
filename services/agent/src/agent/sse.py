@@ -26,6 +26,7 @@ from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 
 from agent.middleware.router import route_reply
 from agent.models.usage import add_usage, normalize_usage, token_usage
+from agent.say import speak
 from agent.structured.pending import confirm_label
 from agent.turn_control import TURN_CONTROL, TurnControl, bind_turn_control
 
@@ -88,8 +89,8 @@ class TurnOutcome:
               error: ErrorBody | None = None) -> "TurnOutcome":
         """What: an outcome for a code-written line (no model draft). Use when: cap, deadline, routes, errors.
         Inputs: text, end reason, optional say, status, error. Output: TurnOutcome (confidence null).
-        Side effects: none. Role: constructor. `say` defaults to text until the say builder (CS-E-05.S2.T1)."""
-        return cls(final=FinalAnswer(text=text, say=say if say is not None else text, citations=[],
+        Side effects: none. Role: constructor. `say` is the spoken form (agent.say.speak) of say, else of text."""
+        return cls(final=FinalAnswer(text=text, say=speak(say if say is not None else text), citations=[],
                                      escalated=False), end_reason=end_reason, status=status, error=error)
 
 
@@ -205,6 +206,8 @@ async def _drive(stream: TurnStream, body: Callable[[TurnStream], Awaitable[Turn
         if outcome.error is not None and outcome.status == "failed" and \
                 not any(getattr(e, "type", None) == "error" for e in stream.events):
             _emit_error(stream, outcome.error)
+        # doc 07 s6.2 FinalAnswer.say: every final is speakable (no markdown, ids as endings, amounts in words)
+        outcome.final = outcome.final.model_copy(update={"say": speak(outcome.final.say)})
         latency = stream.ms()
         outcome.usage = outcome.usage.model_copy(update={
             "latency_ms": latency, "first_status_ms": stream.first_status_ms,

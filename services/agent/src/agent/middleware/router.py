@@ -18,6 +18,7 @@ from typing import Any, Awaitable, Callable
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import AIMessage, RemoveMessage
 
+from agent.say import speak
 from agent.turn_control import Route, TurnControl, current_control
 
 VERIFY_LINE = ("To look at your account I need to verify you. Please enter your account ID and support PIN in "
@@ -88,15 +89,15 @@ def route_reply(control: TurnControl) -> RouteReply:
     if route is None:
         raise ValueError("no route set")
     if route.kind == "verify":
-        return RouteReply(VERIFY_LINE, VERIFY_SAY, "verification_requested", verification_reason=route.reason)
+        return RouteReply(VERIFY_LINE, speak(VERIFY_SAY), "verification_requested", verification_reason=route.reason)
     if route.kind == "readback":
         rb = route.readback or {}
-        return RouteReply(str(rb.get("chat", "")), str(rb.get("voice") or rb.get("chat", "")), "readback")
+        return RouteReply(str(rb.get("chat", "")), speak(str(rb.get("voice") or rb.get("chat", ""))), "readback")
     if route.kind == "decline_off_topic":
-        return RouteReply(DECLINE_OFF_TOPIC_LINE, DECLINE_OFF_TOPIC_LINE, "declined_off_topic")
+        return RouteReply(DECLINE_OFF_TOPIC_LINE, speak(DECLINE_OFF_TOPIC_LINE), "declined_off_topic")
     text = _escalation_text(control)
     end_reason = route.reason if route.reason in ("deadline", "limit_reached") else "escalated"
-    return RouteReply(text, text, end_reason, escalated=True, ticket=route.ticket)
+    return RouteReply(text, speak(text), end_reason, escalated=True, ticket=route.ticket)
 
 
 def route_message(control: TurnControl) -> AIMessage:
