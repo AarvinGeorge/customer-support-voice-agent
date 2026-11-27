@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # What: run every Postgres-backed test suite (pytest marker `pg`) against one throwaway Compose stack.
-# Use when: you change SQL, grants, indexes or migrations (services/core, services/knowledge), and in CI (job "pg tests").
+# Use when: you change SQL, grants, indexes or migrations (services/core, services/knowledge, services/agent), and in CI (job "pg tests").
 # Inputs: optional env COMPOSE_PROJECT_NAME (default cs-pgtest), EDGE_SUBNET (default 172.31.77.0/24), PG_TEST_PORT
-#         (default 55432), PG_SERVICES (default "core knowledge"; any subset). Uses NO real keys: it writes a temporary
+#         (default 55432), PG_SERVICES (default "core knowledge agent"; any subset). Uses NO real keys: it writes a temporary
 #         env file of random dummy secrets, and the tests embed with fixture vectors (zero provider calls).
 # Output: pytest results per service; exit code is non-zero if any suite fails, errors, or skips a test (a skipped DB
 #         test is a green run that tested nothing). The stack and its volume are removed on exit (`down -v`).
@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-cs-pgtest}"
 export EDGE_SUBNET="${EDGE_SUBNET:-172.31.77.0/24}"
 export PG_TEST_PORT="${PG_TEST_PORT:-55432}"
-services="${PG_SERVICES:-core knowledge}"
+services="${PG_SERVICES:-core knowledge agent}"
 tmp="$(mktemp -d)"
 envfile="$tmp/env"
 python3 - "$envfile" "$EDGE_SUBNET" <<'PY'
@@ -41,7 +41,7 @@ dc() { docker compose --env-file "$envfile" -f compose.yaml -f infra/compose.pgt
 cleanup() { dc down -v --remove-orphans >/dev/null 2>&1 || true; rm -rf "$tmp"; }
 trap cleanup EXIT
 dc up -d --wait postgres
-dc run --rm migrate_knowledge   # depends on migrate_core, so core and knowledge schemas are both built
+dc run --rm migrate_agent   # depends on migrate_knowledge and migrate_core, so all three schemas are built
 envval() { sed -n "s/^$1=//p" "$envfile"; }
 status=0
 for svc in $services; do
@@ -51,6 +51,8 @@ for svc in $services; do
       export CORE_DB_OWNER_URL="$(envval CORE_DB_OWNER_URL)" CORE_DB_URL="$(envval CORE_DB_URL)" ;;
     knowledge)
       export KNOWLEDGE_PG_TEST_URL="postgresql://knowledge_app:$(envval KNOWLEDGE_APP_PASSWORD)@127.0.0.1:${PG_TEST_PORT}/quillstack" ;;
+    agent)
+      export AGENT_PG_TEST_URL="postgresql://agent_app:$(envval AGENT_APP_PASSWORD)@127.0.0.1:${PG_TEST_PORT}/quillstack" ;;
     *) echo "unknown service $svc" >&2; exit 2 ;;
   esac
   out="$tmp/$svc.out"

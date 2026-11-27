@@ -29,3 +29,7 @@ def test_labels() -> None:
     assert confirm_label(CARD) == "Confirm refund"
     assert confirm_label({**CARD, "kind": "submit_for_approval"}) == "Send for approval"
     assert confirm_label({**CARD, "action_type": "billing_email"}) == "Confirm email change"
+
+
+def test_a_malformed_core_card_gives_no_card_instead_of_raising() -> None:
+    assert card_from_prepare({**PREPARE, "card": {"pending_action_id": 7}}, "refund") is None

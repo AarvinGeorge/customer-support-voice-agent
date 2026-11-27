@@ -258,3 +258,25 @@ async def test_no_time_left_skips_the_commit_call() -> None:
     c, control, _ = make(core, remaining_s=3.5)  # clamp 0.5 s < 1 s minimum
     r = await c.confirm(control, COMMIT_CARD)
     assert core.log == [] and r.outcome == "failed" and r.changed is False
+
+
+async def test_commit_401_session_not_verified_keeps_the_pending_and_asks_for_verification() -> None:
+    for card, key in ((COMMIT_CARD, "commit"), (SUBMIT_CARD, "submit")):
+        core = Core(**{key: [err(401, "SESSION_NOT_VERIFIED", changed=False)]})
+        c, control, tickets = make(core)
+        r = await c.confirm(control, card)
+        assert (r.outcome, r.changed, r.end_reason) == ("failed", False, "verification_requested")
+        assert r.needs_verification and r.keep_pending and not r.repeat_readback and tickets.reasons == []
+        assert core.paths() == [f"POST {key}"]  # no status check, no retry
+
+
+async def test_commit_200_without_summary_still_reports_committed() -> None:
+    c, control, _ = make(Core(commit=[httpx.Response(200, json={"pending_action_id": PID, "replayed": False})]))
+    r = await c.confirm(control, COMMIT_CARD)
+    assert (r.outcome, r.changed, r.text) == ("committed", True, "That went through.")
+
+
+async def test_cancel_timeout_does_not_say_nothing_changed() -> None:
+    c, control, _ = make(Core(cancel=[TIMEOUT]))
+    r = await c.cancel(control, COMMIT_CARD)
+    assert r.changed is None and "nothing has been changed" not in r.text.lower()

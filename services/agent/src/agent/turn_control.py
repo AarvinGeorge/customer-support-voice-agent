@@ -62,13 +62,15 @@ class Route:
 class TurnControl:
     """What: one turn's mutable control state: route, model attempt role, tool counters, failure counts.
     Use when: created once per turn by ingress or stream_agent_turn; read and mutated by tools, ToolGuard,
-    RouterMiddleware and (later) DeadlineAndFaultMiddleware.
+    RouterMiddleware and DeadlineAndFaultMiddleware.
     Inputs: session_id, turn_id, mode, deadline (a value of `clock`; None means no deadline),
     demo_fault (already gated by DEMO_FAULTS_ENABLED at ingress), events (the turn stream or None), clock
     (default loop_clock). `ticket` is the one ticket opened this turn (model tool or escalation code), so a later
     escalation in the same turn reuses it instead of opening a second one (CS-E-03.S4.T1).
     Output: the object. Side effects: none.
-    Role: D-048 counters live here (executed tool calls only; incremented before the first await).
+    Role: D-048 counters live here (executed tool calls only; incremented before the first await); the model
+    attempt fields (attempt_role, model_attempts, fallback_used, primary_error, primary_model, fault_fired) are written by
+    DeadlineAndFaultMiddleware and read by the retry predicate and the usage builder.
     """
 
     session_id: str
@@ -80,6 +82,11 @@ class TurnControl:
     route: Route | None = None
     route_message_id: str | None = None
     attempt_role: str = "primary"
+    model_attempts: int = 0          # provider calls actually sent (DeadlineAndFaultMiddleware), for Usage.model_calls
+    fallback_used: bool = False      # set when the fallback model ran this turn
+    primary_error: BaseException | None = None  # last primary failure, for model.fallback reason
+    primary_model: str | None = None  # id of the primary client, for model.fallback from_model
+    fault_fired: bool = False        # an injected llm_429 was raised this turn
     tool_calls: int = 0
     per_tool: dict[str, int] = field(default_factory=dict)
     prepares: int = 0
@@ -87,6 +94,7 @@ class TurnControl:
     awaiting_verification: bool = False
     verify_attempts_left: int = 3
     ticket: dict[str, Any] | None = None
+    model_node_failed: bool = False  # the agent model node raised (primary and fallback failed or skipped), s6.7
     clock: Callable[[], float] = loop_clock
 
     def remaining_s(self) -> float:

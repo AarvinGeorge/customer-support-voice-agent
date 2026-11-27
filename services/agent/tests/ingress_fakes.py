@@ -21,6 +21,7 @@ class MemoryTurnStore:
         self.turns: dict[str, TurnRow] = {}
         self.finished: list[tuple[str, TurnOutcome]] = []
         self.swept_calls: list[str] = []
+        self.events_incomplete: set[str] = set()
 
     async def get_session(self, session_id: str) -> SessionRow | None:
         """What: lookup. Use when: step 1. Inputs: id. Output: row or None. Side effects: none. Role: fake."""
@@ -59,6 +60,12 @@ class MemoryTurnStore:
         s = self.sessions[session_id]
         self.sessions[session_id] = replace(s, user_turns=s.user_turns + 1)
 
+    async def last_turn(self, session_id: str, before_turn_id: str) -> tuple[str, str] | None:
+        """What: (turn_id, status) of the session's latest turn other than before_turn_id. Use when: adjacency (I1).
+        Inputs: ids. Output: pair or None. Side effects: none. Role: fake (insertion order is start order)."""
+        rows = [t for t in self.turns.values() if t.session_id == session_id and t.turn_id != before_turn_id]
+        return (rows[-1].turn_id, rows[-1].status) if rows else None
+
     async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None:
         """What: final row. Use when: step 16. Inputs: id, outcome, time. Output: none. Side effects: updates. Role: fake."""
         t = self.turns[turn_id]
@@ -67,6 +74,12 @@ class MemoryTurnStore:
                                       usage=outcome.usage.model_dump(mode="json"),
                                       error=outcome.error.model_dump(mode="json", by_alias=True) if outcome.error else None)
         self.finished.append((turn_id, outcome))
+
+
+    async def mark_events_incomplete(self, turn_ids: set[str]) -> None:
+        """What: record events_complete=false. Use when: TrajectoryWriter on_incomplete. Inputs: ids.
+        Output: none. Side effects: records. Role: fake."""
+        self.events_incomplete |= set(turn_ids)
 
 
 class MemoryTurnLock:

@@ -91,12 +91,12 @@ describe("console shell with the S1 fixture", () => {
     expect(screen.getByText("Owner · Pro")).toBeTruthy();
   });
 
-  it("has New conversation, an Inspector placeholder, the theme toggle and a disabled mic", () => {
+  it("has New conversation, the Inspector toggle, the theme toggle and a disabled mic", () => {
     const onNew = vi.fn();
     render(<ConsoleShell sessionId="s" store={replayed(s1)} onNewConversation={onNew} />);
     fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
     expect(onNew).toHaveBeenCalledTimes(1);
-    expect((screen.getByRole("button", { name: /Inspector/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /Inspector/ }) as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByRole("button", { name: /theme/ })).toBeTruthy();
     expect((screen.getByRole("button", { name: /Voice/ }) as HTMLButtonElement).disabled).toBe(true);
   });

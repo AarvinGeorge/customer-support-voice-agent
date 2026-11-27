@@ -284,7 +284,7 @@ class Escalator:
                                 config: dict[str, Any]) -> TurnOutcome:
         """What: both models unavailable (doc 07 s6.7): fixed apology with no model, `escalated` reason
         model_unavailable with no ticket and the Create ticket button, end_reason escalated; nothing is created.
-        Use when: TurnRunner caught ModelUnavailable with loop time left. Inputs: stream, control, agent, config.
+        Use when: the model node failed (control.model_node_failed) with loop time left. Inputs: stream, control, agent, config.
         Output: TurnOutcome. Side effects: one event, one thread write (id unavailable-{turn_id}). Role: s6.7."""
         self.emit(control, "model_unavailable", None, offer=True)
         await self._thread(agent, config, control, {"messages": [
