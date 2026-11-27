@@ -199,11 +199,14 @@ def test_langsmith_client_hides_pins_in_the_posted_payload(monkeypatch: pytest.M
         return f"echo {x['text']}"
 
     chain = RunnableLambda(echo)
-    chain.invoke({"text": RAW}, config={"callbacks": [LangChainTracer(client=client)]})
+    # D-071: customer text reaches a trace inside its prompt frame; system text (our ticket id) is not scanned.
+    framed = f"<customer_message>\n{RAW}\n</customer_message> ticket ending 8352"
+    chain.invoke({"text": framed}, config={"callbacks": [LangChainTracer(client=client)]})
     client.flush()
     blob = b"".join(sent)
     assert blob, "nothing was posted, so the search below would prove nothing"
     assert b"QS-10423" in blob  # the payload carries the message (the account id is kept)
+    assert b"ticket ending 8352" in blob  # a code-written id outside the customer frame keeps its number
     standalone = re.compile(rb"(?<![0-9A-Za-z-])4821(?![0-9A-Za-z])")  # not inside a uuid or a timestamp
     assert standalone.search(RAW.encode())  # the search can find the raw secret
     assert not standalone.search(blob)
@@ -221,8 +224,12 @@ def test_configure_tracing_sets_the_global_client(monkeypatch: pytest.MonkeyPatc
     try:
         client = configure_tracing()
         assert client is not None and get_client() is client
-        assert client._hide_run_inputs({"q": "my PIN is 4821"}) == {"q": "my PIN is [PIN]"}  # noqa: SLF001
-        assert client._hide_run_outputs({"a": RAW}) == {"a": "QS-10423 [PIN]"}  # noqa: SLF001
+        cm = "<customer_message>{}</customer_message>"  # D-071: customer text is framed; the frame is scanned
+        assert client._hide_run_inputs({"q": cm.format("my PIN is 4821")}) == {"q": cm.format("my PIN is [PIN]")}  # noqa: SLF001
+        assert client._hide_run_outputs({"a": cm.format(RAW)}) == {"a": cm.format("QS-10423 [PIN]")}  # noqa: SLF001
+        tool = {"messages": [{"type": "tool", "content": '{"short_id":"8352"}'}]}  # a core id in a tool message
+        assert client._hide_run_outputs(tool) == tool  # noqa: SLF001 - system data keeps our id (D-071)
+        assert client._hide_run_outputs({"short_id": "8352"}) == {"short_id": "[PIN]"}  # noqa: SLF001 - unknown provenance: full net (review-pr76 M2)
     finally:
         run_trees.configure(client=previous)
 
