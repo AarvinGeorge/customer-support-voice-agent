@@ -17,7 +17,7 @@ def test_expected_tables_exist(app_conn):
     want = {"accounts", "users", "charges", "session_claims", "verify_attempts", "pending_actions",
             "action_history", "tickets", "ticket_events", "idempotency", "audit_events", "meta"}
     assert want <= have, want - have
-    assert "operators" not in have
+    assert "operators" in have  # THROWAWAY red proof
 
 
 def test_second_open_pending_row_for_one_session_fails(app_conn, seed):
