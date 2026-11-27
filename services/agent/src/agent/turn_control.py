@@ -36,9 +36,20 @@ class EventSink(Protocol):
     """What: the part of TurnStream that ToolGuard and the router use. Use when: typing the sink.
     Inputs: see methods. Output: see methods. Side effects: events on the turn stream. Role: port."""
 
-    def emit(self, type_: str, **fields: Any) -> Any: ...
-    def next_step_id(self) -> str: ...
-    def ms(self) -> int: ...
+    def emit(self, type_: str, **fields: Any) -> Any:
+        """What: emit one event. Use when: a step, route or escalation event. Inputs: type, fields.
+        Output: the event. Side effects: queues the event. Role: port method."""
+        ...
+
+    def next_step_id(self) -> str:
+        """What: the next step id. Use when: a step starts. Inputs: none. Output: id. Side effects: counter.
+        Role: port method."""
+        ...
+
+    def ms(self) -> int:
+        """What: milliseconds since the turn started. Use when: step timings. Inputs: none. Output: int.
+        Side effects: none. Role: port method."""
+        ...
 
 
 @dataclass
