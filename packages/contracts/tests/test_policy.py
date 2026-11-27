@@ -394,3 +394,23 @@ def test_dollars_and_days_reject_non_integers():
         render_placeholder(c, "actions.refund.enabled|dollars")
     with pytest.raises(PolicyError, match="integer"):
         render_placeholder(c, "timezone|days")
+
+
+def test_frozen_config_dumps_and_deep_copies():
+    """What: the deep-frozen config still serializes and deep-copies, and the copy stays frozen.
+    Use when: CI. Inputs: loaded config. Output: assertion. Side effects: none.
+    Role: re-review N1 (MappingProxyType broke model_dump_json and copy.deepcopy)."""
+    import json
+    c = load_policy(POLICY)
+    dumped = json.loads(c.model_dump_json())
+    assert dumped["reason_codes"]["PAST_DUE"]["decision"] == "declined"
+    assert dumped["tickets"]["priority_by_tier"]["pro"] == "P3"
+    assert PolicyConfig.model_validate_json(c.model_dump_json()).reason_codes.keys() == c.reason_codes.keys()
+    d = copy.deepcopy(c)
+    assert d == c and d is not c
+    with pytest.raises(TypeError):
+        d.reason_codes["PAST_DUE"] = None  # type: ignore[index]
+    with pytest.raises(TypeError):
+        c.tickets.priority_by_tier.update(pro="P1")  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        del c.tickets.target_label["P1"]  # type: ignore[attr-defined]

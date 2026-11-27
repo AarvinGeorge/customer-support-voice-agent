@@ -14,7 +14,6 @@ import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from types import MappingProxyType
 from typing import Annotated, Literal, TypeVar, get_args
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -34,11 +33,30 @@ _K = TypeVar("_K")
 _V = TypeVar("_V")
 
 
+class _FrozenDict(dict):
+    """What: a dict that refuses every change after construction. Use when: a policy map must be
+    read-only yet still serialize and deep-copy. Inputs: mapping. Output: dict subclass.
+    Side effects: none. Role: deep freeze; unlike MappingProxyType it dumps to JSON and deep-copies."""
+
+    def _blocked(self, *_args: object, **_kwargs: object) -> None:
+        """What: reject a mutation. Use when: any mutating dict method is called. Inputs: any.
+        Output: never returns. Side effects: raises TypeError. Role: immutability guard."""
+        raise TypeError("policy config is read-only")
+
+    __setitem__ = __delitem__ = update = pop = popitem = clear = setdefault = _blocked
+    __ior__ = _blocked
+
+    def __reduce__(self):  # type: ignore[no-untyped-def]
+        """What: rebuild through the constructor. Use when: copy or deepcopy runs. Inputs: none.
+        Output: reduce tuple. Side effects: none. Role: stops copy replaying blocked __setitem__."""
+        return (_FrozenDict, (dict(self),))
+
+
 def _freeze(value: Mapping[_K, _V]) -> Mapping[_K, _V]:
-    """What: wrap a parsed dict as a read-only mapping. Use when: a policy field must not change
-    after load. Inputs: mapping. Output: MappingProxyType copy. Side effects: none.
+    """What: wrap a parsed dict as a read-only dict. Use when: a policy field must not change
+    after load. Inputs: mapping. Output: _FrozenDict copy. Side effects: none.
     Role: deep freeze for dict fields (pydantic frozen blocks attribute assignment only)."""
-    return MappingProxyType(dict(value))
+    return _FrozenDict(value)
 
 
 FrozenMap = Annotated[dict[_K, _V], AfterValidator(_freeze)]
