@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActionResultEvent, ConfirmationRequiredEvent, SseEvent, TurnRequest, VerificationResultEvent } from "@contracts/contracts";
 import { loadFixture, toWire } from "@/test-support/fixtures";
 import { createTurnStore } from "@/lib/turns/store";
+import { replayEvents } from "@/lib/turns/reducer";
 
 import { ConsoleShell } from "./console-shell";
 
@@ -111,7 +112,7 @@ describe("verification card", () => {
     expect(account.type).toBe("text");
     expect(pin.type).toBe("password");
     expect(pin.inputMode).toBe("numeric");
-    expect(pin.autocomplete).toBe("off");
+    expect(pin.autocomplete).toBe("one-time-code");
     expect(within(card).getByText("3 attempts left")).toBeTruthy();
     expect((within(card).getByRole("button", { name: "Verify" }) as HTMLButtonElement).disabled).toBe(true);
   });
@@ -353,5 +354,184 @@ describe("confirmation card", () => {
     act(() => vi.advanceTimersByTime(681_000));
     expect(screen.queryByRole("button", { name: "Confirm refund" })).toBeNull();
     expect(screen.getByText("This request expired. Ask again if you still need it.")).toBeTruthy();
+  });
+});
+
+describe("review PR #24 fix round 1", () => {
+  const upToC2 = [...c1, ...c2];
+  const c3 = s1.filter((e) => e.turn_id.endsWith("c3"));
+  const DONE = c1.find((e) => e.type === "turn.completed") as SseEvent;
+
+  /**
+   * What: a minimal verification turn that fails: result failed, a retry request, completion.
+   * Use when: the retry-card focus test.
+   * Inputs: none.
+   * Output: events in wire order.
+   * Side effects: none.
+   * Role: test builder.
+   */
+  const failedTurn = (): SseEvent[] => [
+    { ...env("tf", 1), type: "turn.started", served_by: "a", input_kind: "verification", contract_version: "2026-11-26.r4" },
+    { ...env("tf", 2), type: "verification.result", status: "failed", attempts_left: 2 },
+    { ...env("tf", 3), type: "verification.required", reason: "retry", prompt_text: "p", attempts_left: 2, fields: ["account_id", "pin"] },
+    { ...DONE, ...env("tf", 4) },
+  ];
+
+  it("I1: the countdown is anchored when the event is applied, so a remount does not restart it", () => {
+    vi.useFakeTimers({ now: new Date("2026-11-27T13:00:35Z") });
+    const store = storeWith(upToC2);
+    const first = render(<ConsoleShell sessionId="s" store={store} />);
+    expect(screen.getByText("Expires in 11:26")).toBeTruthy();
+    first.unmount();
+    act(() => vi.advanceTimersByTime(5 * 60_000));
+    const second = render(<ConsoleShell sessionId="s" store={store} />);
+    expect(screen.getByText("Expires in 6:26")).toBeTruthy();
+    second.unmount();
+    act(() => vi.advanceTimersByTime(10 * 60_000));
+    render(<ConsoleShell sessionId="s" store={store} />);
+    expect(screen.queryByRole("button", { name: "Confirm refund" })).toBeNull();
+    expect(screen.getByText("This request expired. Ask again if you still need it.")).toBeTruthy();
+  });
+
+  it("I1: events with no client receipt time fall back to expires_at itself (2 h old events show expired)", () => {
+    vi.useFakeTimers({ now: new Date("2026-11-27T15:00:35Z") });
+    const store = createTurnStore();
+    const conversation = replayEvents(upToC2);
+    store.setState({ conversation, thread: conversation.turnOrder.map((turnId) => ({ kind: "turn" as const, id: turnId, turnId })) });
+    render(<ConsoleShell sessionId="s" store={store} />);
+    expect(screen.queryByRole("button", { name: "Confirm refund" })).toBeNull();
+    expect(screen.getByText("This request expired. Ask again if you still need it.")).toBeTruthy();
+  });
+
+  it("I2: after a successful Verify, focus moves to the message field", async () => {
+    vi.stubGlobal("fetch", sseFetch(c2));
+    const store = storeWith(c1);
+    render(<ConsoleShell sessionId={SID} store={store} />);
+    fireEvent.change(screen.getByLabelText("Account ID"), { target: { value: "QS-10423" } });
+    fireEvent.change(screen.getByLabelText("Support PIN"), { target: { value: PIN } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Message" })));
+  });
+
+  it("I2: after a failed Verify, the retry card keeps the account ID (never the PIN) and focuses the PIN", async () => {
+    vi.stubGlobal("fetch", sseFetch(failedTurn()));
+    const store = storeWith(c1);
+    render(<ConsoleShell sessionId={SID} store={store} />);
+    fireEvent.change(screen.getByLabelText("Account ID"), { target: { value: "QS-10423" } });
+    fireEvent.change(screen.getByLabelText("Support PIN"), { target: { value: PIN } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+    await vi.waitFor(() => expect(screen.getByText("2 attempts left")).toBeTruthy());
+    const pin = screen.getByLabelText("Support PIN") as HTMLInputElement;
+    await vi.waitFor(() => expect(document.activeElement).toBe(pin));
+    expect((screen.getByLabelText("Account ID") as HTMLInputElement).value).toBe("QS-10423");
+    expect(pin.value).toBe("");
+    expect(domText()).not.toContain(PIN);
+    expect(JSON.stringify(store.getState())).not.toContain(PIN);
+  });
+
+  it("I2: after Confirm, focus moves to the message field", async () => {
+    vi.stubGlobal("fetch", sseFetch(c3));
+    const store = storeWith(upToC2);
+    render(<ConsoleShell sessionId={SID} store={store} />);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm refund" }));
+    await vi.waitFor(() => expect(screen.queryByRole("button", { name: "Confirm refund" })).toBeNull());
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Message" })));
+  });
+
+  it("M5: after an unavailable result in a later turn, the card moves below that result", () => {
+    const unavailable: SseEvent = { ...env("tu", 1), type: "verification.result", status: "unavailable" };
+    render(<ConsoleShell sessionId="s" store={storeWith([...c1, unavailable])} />);
+    const cards = screen.getAllByRole("region", { name: "Verify your account" });
+    expect(cards).toHaveLength(1);
+    const articles = screen.getAllByRole("article");
+    const last = articles[articles.length - 1] as HTMLElement;
+    expect(last.contains(cards[0] as HTMLElement)).toBe(true);
+    expect(within(last).getByText(/couldn't reach our account system/)).toBeTruthy();
+    expect(within(cards[0] as HTMLElement).getByText("3 attempts left")).toBeTruthy();
+  });
+
+  it("M1: the PIN is never written to the value attribute while typing", () => {
+    render(<ConsoleShell sessionId="s" store={storeWith(c1)} />);
+    const pin = screen.getByLabelText("Support PIN") as HTMLInputElement;
+    fireEvent.change(pin, { target: { value: PIN } });
+    expect(pin.value).toBe(PIN);
+    expect(pin.getAttribute("value")).toBeNull();
+    expect(document.body.innerHTML).not.toContain(PIN);
+  });
+
+  it("M3: a result without pending_action_id in a confirm turn closes the open card", () => {
+    const res: SseEvent[] = [
+      { ...env("tx", 1), type: "turn.started", served_by: "a", input_kind: "confirm", contract_version: "2026-11-26.r4" },
+      {
+        ...env("tx", 2),
+        type: "action.result",
+        pending_action_id: null,
+        action_type: "refund",
+        outcome: "expired",
+        changed: false,
+        reason_codes: [],
+        policy_refs: [],
+        result_text: "",
+        ticket: null,
+      },
+    ];
+    render(<ConsoleShell sessionId="s" store={storeWith([...upToC2, ...res])} />);
+    expect(screen.queryByRole("button", { name: "Confirm refund" })).toBeNull();
+  });
+
+  it("M4: two clicks inside one act still send one request (the ref guard)", () => {
+    const store = storeWith(upToC2);
+    const sendTurn = vi.fn(() => new Promise<never>(() => undefined));
+    store.setState({ sendTurn });
+    render(<ConsoleShell sessionId={SID} store={store} />);
+    const btn = screen.getByRole("button", { name: "Confirm refund" });
+    act(() => {
+      btn.click();
+      btn.click();
+    });
+    expect(sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("M6: a card shown again in a later turn keeps the rule title from the earlier prepare step", () => {
+    const again: SseEvent = { ...CONF, ...env("ta", 1) };
+    render(<ConsoleShell sessionId="s" store={storeWith([...upToC2, again])} />);
+    const live = screen.getAllByRole("region", { name: "Refund $96.00 for the charge on 21 November" }).find((r) =>
+      within(r).queryByRole("button", { name: "Confirm refund" }),
+    ) as HTMLElement;
+    expect(within(live).getByText("Refunds on the Pro plan")).toBeTruthy();
+  });
+
+  it("M7: the fields are required and described by the helper text and attempts left", () => {
+    render(<ConsoleShell sessionId="s" store={storeWith(c1)} />);
+    for (const label of ["Account ID", "Support PIN"]) {
+      const el = screen.getByLabelText(label) as HTMLInputElement;
+      expect(el.required).toBe(true);
+      const ids = (el.getAttribute("aria-describedby") ?? "").split(" ").filter(Boolean);
+      const text = ids.map((id) => document.getElementById(id)?.textContent ?? "").join(" ");
+      expect(text).toContain("It never appears in the chat");
+      expect(text).toContain("3 attempts left");
+    }
+  });
+
+  it("M9: a failed submit-for-approval says nothing was sent", () => {
+    const pending = { ...CONF.pending, kind: "submit_for_approval" as const, state: "awaiting_customer" as const };
+    const conf: SseEvent = { ...CONF, pending, confirm_label: "Send for approval" };
+    const c2b = c2.map((e) => (e.type === "confirmation.required" ? conf : e));
+    const res: SseEvent = {
+      ...env("ts", 2),
+      type: "action.result",
+      pending_action_id: "PA-3F2A9C1B",
+      action_type: "refund",
+      outcome: "failed",
+      changed: false,
+      reason_codes: [],
+      policy_refs: [],
+      result_text: "",
+      ticket: TICKET,
+    };
+    render(<ConsoleShell sessionId="s" store={storeWith([...c1, ...c2b, res])} />);
+    const receipt = document.querySelector('[data-slot="receipt"]') as HTMLElement;
+    expect(within(receipt).getByText("Request was not sent")).toBeTruthy();
+    expect(within(receipt).getByText("nothing was sent · ticket ending 8213")).toBeTruthy();
   });
 });

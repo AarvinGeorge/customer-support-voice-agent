@@ -1,6 +1,6 @@
 # What: shared image for the three Python services and their migrate jobs (build arg SERVICE = agent | core | knowledge).
 # Use when: Compose builds agent_a, agent_b, core, knowledge and the migrate_* jobs (context = repo root).
-# Inputs: services/<SERVICE>/pyproject.toml, uv.lock, src/, migrations/; infra/migrate.py.
+# Inputs: packages/contracts, services/<SERVICE>/pyproject.toml, uv.lock, src/, migrations/; infra/migrate.py.
 # Output: image with deps in /app/.venv, source in /app/src, runner at /app/migrate.py.
 # Side effects: none at build beyond layers. Role: one Dockerfile so the three services build the same way (D-029).
 FROM python:3.12-slim
@@ -9,12 +9,18 @@ ARG SERVICE
 ENV SERVICE=${SERVICE} \
     UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy \
     PATH="/app/.venv/bin:$PATH" PYTHONPATH=/app/src PYTHONUNBUFFERED=1
-WORKDIR /app
+# Dependencies resolve in /build/services/<svc> so the relative path ../../packages/contracts exists; the venv is /app/.venv.
+COPY packages/contracts /build/packages/contracts
+WORKDIR /build/services/${SERVICE}
 COPY services/${SERVICE}/pyproject.toml services/${SERVICE}/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN UV_PROJECT_ENVIRONMENT=/app/.venv uv sync --frozen --no-dev --no-install-project
+WORKDIR /app
 COPY services/${SERVICE}/src ./src
 COPY services/${SERVICE}/migrations ./migrations
 COPY infra/migrate.py ./migrate.py
+# knowledge only: bake the cl100k_base vocabulary so the chunker never needs the network at run time
+ENV TIKTOKEN_CACHE_DIR=/app/tiktoken_cache
+RUN if [ "$SERVICE" = knowledge ]; then python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"; fi
 RUN useradd --system --uid 10001 app && chown -R app /app
 USER app
 EXPOSE 8000

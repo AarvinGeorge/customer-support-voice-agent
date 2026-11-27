@@ -64,7 +64,12 @@ describe("turn store", () => {
       const out = await store.getState().sendTurn(SID, req(i), { deps: { fetch: fetchMock as unknown as typeof fetch } });
       expect(out.turnId).toBe(turnIds[i]);
     }
-    expect(store.getState().conversation).toEqual(replayEvents(s1));
+    const live = store.getState().conversation;
+    const stamped = Object.values(live.turns).filter((t) => t.confirmationReceivedAt !== null);
+    expect(stamped.map((t) => t.confirmation?.pending.pending_action_id)).toEqual(["PA-3F2A9C1B"]);
+    expect(typeof stamped[0]?.confirmationReceivedAt).toBe("number");
+    const unstamped = Object.fromEntries(Object.entries(live.turns).map(([id, t]) => [id, { ...t, confirmationReceivedAt: null }]));
+    expect({ ...live, turns: unstamped }).toEqual(replayEvents(s1));
     expect(store.getState().connection).toEqual({ phase: "idle", error: null });
   });
 

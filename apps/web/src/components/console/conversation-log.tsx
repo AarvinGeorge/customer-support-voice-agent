@@ -14,11 +14,12 @@
  */
 import { CircleAlert, Mic, RotateCcw } from "lucide-react";
 import type { StatusEvent } from "@contracts/contracts";
+import type { RefObject } from "react";
 import type { ConfirmInput, VerificationInput } from "@contracts/contracts";
 
 import { Button } from "@/components/ui/button";
 
-import { cardIndex, receiptFor, ruleTitle, verificationCardState, type CardIndex } from "@/lib/turns/cards";
+import { cardIndex, receiptFor, ruleTitleIn, verificationCardState, type CardIndex } from "@/lib/turns/cards";
 import {
   answerState,
   citationViews,
@@ -54,10 +55,15 @@ import { StepTrajectory } from "./step-trajectory";
  * Output: none (type).
  * Side effects: none.
  * Role: `disabled` while a turn streams; the callbacks send one TurnRequest each and resolve
- *   when the turn settles. Without it the cards render but presses do nothing.
+ *   when the turn settles; `account` and `setAccount` keep the typed Account ID across a retry
+ *   card; `pinRef` points at the live card's PIN field (for focus). Without it the cards render
+ *   but presses do nothing.
  */
 export interface CardActions {
   disabled: boolean;
+  account: string;
+  setAccount: (value: string) => void;
+  pinRef: RefObject<HTMLInputElement | null>;
   verify: (body: VerificationInput) => Promise<unknown>;
   decide: (body: ConfirmInput) => Promise<unknown>;
 }
@@ -72,6 +78,9 @@ export interface CardActions {
  */
 const NO_ACTIONS: CardActions = Object.freeze({
   disabled: false,
+  account: "",
+  setAccount: () => undefined,
+  pinRef: { current: null },
   verify: async () => undefined,
   decide: async () => undefined,
 });
@@ -149,7 +158,7 @@ function AssistantMessage({
   onResend?: () => void;
 }) {
   const latency = turn.completed ? `${(turn.completed.usage.latency_ms / 1000).toFixed(2)} s` : null;
-  const verifyState = turn.verificationRequired ? verificationCardState(conversation, turn.turnId, index) : "hidden";
+  const verifyState = verificationCardState(conversation, turn.turnId, index);
   const state = answerState(turn);
   const status: StatusEvent | null = turn.status;
   const declines = declineNotes(turn);
@@ -173,15 +182,24 @@ function AssistantMessage({
       {turn.text.trim() !== "" && <AnswerMarkdown text={turn.text} streaming={turn.phase === "streaming"} />}
       {state === "checking_policy" && <HeldAnswer />}
       {(state === "slow" || state === "retrying") && status && <StatusLine state={state} message={status.message} />}
-      {verifyState !== "hidden" && turn.verificationRequired && (
-        <VerificationCard request={turn.verificationRequired} state={verifyState} disabled={cards.disabled} onSubmit={cards.verify} />
+      {verifyState !== "hidden" && (
+        <VerificationCard
+          request={conversation.awaitingVerification ?? turn.verificationRequired}
+          state={verifyState}
+          disabled={cards.disabled}
+          account={cards.account}
+          onAccountChange={cards.setAccount}
+          pinRef={cards.pinRef}
+          onSubmit={cards.verify}
+        />
       )}
       {turn.confirmation && (
         <ConfirmationCard
           confirmation={turn.confirmation}
           turnId={turn.turnId}
           index={index}
-          ruleTitle={ruleTitle(turn, turn.confirmation.pending.reason_code)}
+          ruleTitle={ruleTitleIn(conversation, turn.turnId, turn.confirmation.pending.reason_code)}
+          receivedAt={turn.confirmationReceivedAt}
           disabled={cards.disabled}
           onDecide={cards.decide}
         />

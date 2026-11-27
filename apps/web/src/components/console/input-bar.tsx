@@ -3,7 +3,7 @@
  * What: the console input bar: a message field that sends on Enter, a send button, and a
  *   disabled mic placeholder (voice arrives with CS-E-05).
  * Use when: the bottom of the console.
- * Inputs: { onSend, busy, disabled, placeholder? }.
+ * Inputs: { onSend, busy, disabled, placeholder?, inputRef? }.
  * Output: JSX.
  * Side effects: calls onSend with the trimmed text and clears the field.
  * Role: CS-E-04.S5.T1 input bar (F1 s5.1, s5.4); CS-E-04.S5.T3 adds the 2,000 character counter
@@ -11,7 +11,7 @@
  *   console (the pending-confirmation prompt).
  */
 import { ArrowUp, Mic } from "lucide-react";
-import { useId, useState, type KeyboardEvent } from "react";
+import { useId, useState, type KeyboardEvent, type Ref } from "react";
 
 import { messageLimit } from "@/lib/turns/furniture";
 import { cn } from "@/lib/utils";
@@ -30,6 +30,8 @@ export interface InputBarProps {
   busy: boolean;
   disabled: boolean;
   placeholder?: string;
+  /** Ref to the message field, so the shell can return focus to it after a card press. */
+  inputRef?: Ref<HTMLTextAreaElement>;
 }
 
 /**
@@ -40,7 +42,7 @@ export interface InputBarProps {
  * Side effects: see module.
  * Role: see module. Enter sends (ignored while an IME is composing); Shift+Enter is a newline.
  */
-export function InputBar({ onSend, busy, disabled, placeholder }: InputBarProps) {
+export function InputBar({ onSend, busy, disabled, placeholder, inputRef }: InputBarProps) {
   const [text, setText] = useState("");
   const limit = messageLimit(text.trim());
   const canSend = !busy && !disabled && text.trim() !== "" && !limit.over;
@@ -83,6 +85,7 @@ export function InputBar({ onSend, busy, disabled, placeholder }: InputBarProps)
         )}
       >
         <textarea
+          ref={inputRef}
           aria-label="Message"
           rows={1}
           value={text}

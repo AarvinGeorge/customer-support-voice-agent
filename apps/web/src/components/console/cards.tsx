@@ -25,7 +25,7 @@ import {
   Wallet,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type ChangeEvent, type FormEvent, type RefObject } from "react";
 import type {
   ConfirmInput,
   ConfirmationRequiredEvent,
@@ -177,13 +177,19 @@ function useSinglePress() {
  * Inputs: none (type).
  * Output: none (type).
  * Side effects: none.
- * Role: `state` from verificationCardState; `disabled` while any turn streams; `onSubmit`
- *   sends TurnRequest.verification and resolves when the turn settles.
+ * Role: `request` is the open verification.required (null in the locked state); `state` from
+ *   verificationCardState; `disabled` while any turn streams; `account` and `onAccountChange`
+ *   keep the Account ID outside the card so a retry card shows it again (never the PIN);
+ *   `pinRef` lets the shell focus the PIN of a retry card; `onSubmit` sends
+ *   TurnRequest.verification and resolves when the turn settles.
  */
 export interface VerificationCardProps {
-  request: VerificationRequiredEvent;
+  request: VerificationRequiredEvent | null;
   state: "form" | "locked";
   disabled: boolean;
+  account: string;
+  onAccountChange: (value: string) => void;
+  pinRef: RefObject<HTMLInputElement | null>;
   onSubmit: (body: VerificationInput) => Promise<unknown>;
 }
 
@@ -192,37 +198,57 @@ export interface VerificationCardProps {
  * Use when: a turn hosts the open verification request (doc 07 s6.3).
  * Inputs: VerificationCardProps.
  * Output: a labelled region with the form, or the locked state.
- * Side effects: on Verify, clears the PIN field, then calls onSubmit once.
- * Role: see module. Account ID is a plain text field (as in Figma); the PIN is a password field,
- *   digits only, 4 at most, no autocomplete.
+ * Side effects: on Verify, empties the PIN field, then calls onSubmit once.
+ * Role: see module. Account ID is a plain text field (as in Figma). The PIN is an uncontrolled
+ *   password field (so React never writes it to the value attribute, review PR #24 M1), digits
+ *   only, 4 at most, autocomplete "one-time-code" so password managers do not offer to save it
+ *   (M2); only its length is kept in state.
  */
-export function VerificationCard({ request, state, disabled, onSubmit }: VerificationCardProps) {
+export function VerificationCard({ request, state, disabled, account, onAccountChange, pinRef, onSubmit }: VerificationCardProps) {
   const headingId = useId();
   const accountId = useId();
   const pinId = useId();
-  const [account, setAccount] = useState("");
-  const [pin, setPin] = useState("");
+  const helpId = useId();
+  const attemptsId = useId();
+  const [pinLength, setPinLength] = useState(0);
   const press = useSinglePress();
-  const body = verificationBody(account, pin);
-  const canVerify = body !== null && !disabled && !press.busy;
+  const canVerify = verificationBody(account, "0".repeat(pinLength)) !== null && !disabled && !press.busy;
+
+  /**
+   * What: keeps the PIN field to at most 4 digits, in place.
+   * Use when: the PIN field changes.
+   * Inputs: the change event.
+   * Output: none.
+   * Side effects: rewrites the field's live value when it held other characters; stores the length.
+   * Role: handler.
+   */
+  const onPinChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const el = e.currentTarget;
+    const clean = el.value.replace(/\D/g, "").slice(0, 4);
+    if (clean !== el.value) el.value = clean;
+    setPinLength(clean.length);
+  };
 
   /**
    * What: sends the verification body.
    * Use when: the form submits (Verify or Enter).
    * Inputs: the form event.
    * Output: none.
-   * Side effects: clears the PIN state before the request; one onSubmit call per press.
+   * Side effects: empties the PIN field before the request; one onSubmit call per press.
    * Role: handler.
    */
   const submit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const b = verificationBody(account, pin);
-    if (b === null || disabled) return;
-    setPin("");
+    const field = pinRef.current;
+    const b = verificationBody(account, field?.value ?? "");
+    if (b === null || disabled || field === null) return;
+    field.value = "";
+    setPinLength(0);
     press.run(() => onSubmit(b));
   };
 
-  const left = request.attempts_left;
+  const left = request?.attempts_left ?? null;
+  const described = `${helpId} ${attemptsId}`;
   return (
     <section aria-labelledby={headingId} className={cn(CARD, "max-w-[28.75rem] gap-3.5")}>
       <h3 id={headingId} className="inline-flex items-center gap-2 text-heading text-ink">
@@ -233,7 +259,7 @@ export function VerificationCard({ request, state, disabled, onSubmit }: Verific
         <p className="text-body-sm text-muted">Verification is locked for this conversation.</p>
       ) : (
         <>
-          <p className="max-w-[26.25rem] text-body-sm text-muted">
+          <p id={helpId} className="max-w-[26.25rem] text-body-sm text-muted">
             Your PIN is checked by our account system. It never appears in the chat or the trace.
           </p>
           <form onSubmit={submit} className="flex flex-col gap-3.5" autoComplete="off">
@@ -246,7 +272,9 @@ export function VerificationCard({ request, state, disabled, onSubmit }: Verific
                   id={accountId}
                   type="text"
                   value={account}
-                  onChange={(e) => setAccount(e.target.value)}
+                  onChange={(e) => onAccountChange(e.target.value)}
+                  required
+                  aria-describedby={described}
                   autoComplete="off"
                   autoCapitalize="characters"
                   spellCheck={false}
@@ -261,11 +289,13 @@ export function VerificationCard({ request, state, disabled, onSubmit }: Verific
                 </label>
                 <input
                   id={pinId}
+                  ref={pinRef}
                   type="password"
                   inputMode="numeric"
-                  value={pin}
-                  onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-                  autoComplete="off"
+                  onChange={onPinChange}
+                  required
+                  aria-describedby={described}
+                  autoComplete="one-time-code"
                   maxLength={4}
                   placeholder="••••"
                   className="h-10 w-full rounded-[8px] border border-rule bg-paper px-3 font-mono text-mono tracking-[0.3em] text-ink outline-none transition-colors duration-150 ease-out-expo placeholder:text-muted/70 focus-visible:border-ember max-sm:text-[16px]"
@@ -276,8 +306,8 @@ export function VerificationCard({ request, state, disabled, onSubmit }: Verific
               <Button type="submit" variant="ink" size="sm" disabled={!canVerify}>
                 {press.busy ? "Verifying..." : "Verify"}
               </Button>
-              <span className="text-caption text-muted">
-                {left} {left === 1 ? "attempt" : "attempts"} left
+              <span id={attemptsId} className="text-caption text-muted">
+                {left !== null ? `${left} ${left === 1 ? "attempt" : "attempts"} left` : ""}
               </span>
             </div>
           </form>
@@ -293,7 +323,8 @@ export function VerificationCard({ request, state, disabled, onSubmit }: Verific
  * Inputs: none (type).
  * Output: none (type).
  * Side effects: none.
- * Role: `index` and `ruleTitle` come from lib/turns/cards.ts; `disabled` while any turn streams;
+ * Role: `index` and `ruleTitle` come from lib/turns/cards.ts; `receivedAt` is the client time
+ *   the store applied the event (TurnView.confirmationReceivedAt); `disabled` while any turn streams;
  *   `onDecide` sends TurnRequest.confirm and resolves when the turn settles.
  */
 export interface ConfirmationCardProps {
@@ -301,23 +332,28 @@ export interface ConfirmationCardProps {
   turnId: string;
   index: CardIndex;
   ruleTitle: string | null;
+  receivedAt: number | null;
   disabled: boolean;
   onDecide: (body: ConfirmInput) => Promise<unknown>;
 }
 
 /**
  * What: the client-clock deadline of a pending action.
- * Use when: the card mounts.
- * Inputs: the confirmation event, the client time at mount.
+ * Use when: rendering the card.
+ * Inputs: the confirmation event, the client time the event was applied (or null).
  * Output: epoch ms, or null when there is no expires_at or a time does not parse.
  * Side effects: none.
- * Role: helper. Uses the server's own gap (expires_at minus the event ts) from the moment the
- *   card appears, so a skewed client clock does not shorten or stretch the countdown.
+ * Role: helper. The server's own gap (expires_at minus the event ts) added to the client receipt
+ *   time, so a skewed client clock does not shorten or stretch the countdown and a remount does
+ *   not restart it (review PR #24 I1). With no receipt time (a replay), the event ts is the
+ *   anchor, which makes the deadline expires_at itself.
  */
-function deadlineOf(ev: ConfirmationRequiredEvent, mountedAt: number): number | null {
+export function deadlineOf(ev: ConfirmationRequiredEvent, receivedAt: number | null): number | null {
   if (!ev.pending.expires_at) return null;
-  const gap = Date.parse(ev.pending.expires_at) - Date.parse(ev.ts);
-  return Number.isFinite(gap) ? mountedAt + gap : null;
+  const sent = Date.parse(ev.ts);
+  const gap = Date.parse(ev.pending.expires_at) - sent;
+  const anchor = receivedAt ?? sent;
+  return Number.isFinite(gap) && Number.isFinite(anchor) ? anchor + gap : null;
 }
 
 /**
@@ -347,10 +383,10 @@ function Fact({ label, value, note }: { label: string; value: string; note?: str
  * Side effects: a 1 s timer while open; a press calls onDecide once.
  * Role: see module. Confirm is the ember primary and carries `confirm_label`.
  */
-export function ConfirmationCard({ confirmation, turnId, index, ruleTitle, disabled, onDecide }: ConfirmationCardProps) {
+export function ConfirmationCard({ confirmation, turnId, index, ruleTitle, receivedAt, disabled, onDecide }: ConfirmationCardProps) {
   const headingId = useId();
   const pending = confirmation.pending;
-  const [deadline] = useState(() => deadlineOf(confirmation, Date.now()));
+  const deadline = deadlineOf(confirmation, receivedAt);
   const [now, setNow] = useState(() => Date.now());
   const state = confirmationCardState(pending, turnId, index, now, deadline);
   const open = state.kind === "open";
