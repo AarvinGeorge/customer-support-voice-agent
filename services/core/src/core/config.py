@@ -1,6 +1,7 @@
 """What: runtime settings for core (tokens, database URL, demo fault flag, policy path).
 Use when: the process starts (Settings.from_env) or a test builds an app (Settings(...)).
-Inputs: env CORE_TOKEN_AGENT, CORE_TOKEN_COMMIT, CORE_TOKEN_OPS, CORE_DB_URL, DEMO_FAULTS_ENABLED, POLICY_PATH.
+Inputs: env CORE_TOKEN_AGENT, CORE_TOKEN_COMMIT, CORE_TOKEN_OPS, CORE_DB_URL, PIN_PEPPER, DEMO_FAULTS_ENABLED,
+POLICY_PATH.
 Output: Settings, ConfigError.
 Side effects: from_env reads the environment.
 Role: one validated source of configuration (doc 07 s15.2); a missing or shared token stops the process."""
@@ -19,7 +20,8 @@ class ConfigError(Exception):
 class Settings:
     """What: the three bearer tokens, the app-role database URL and flags.
     Use when: building the app. Inputs: token_agent, token_commit, token_ops, db_url (None only in unit tests),
-    demo_faults, policy_path (None means the contracts default).
+    demo_faults, policy_path (None means the contracts default), pin_pepper (the PIN HMAC key; empty only in unit tests
+    that never verify).
     Output: frozen settings. Side effects: none.
     Role: doc 07 s1.4 (three distinct tokens) and s15.2."""
 
@@ -29,6 +31,7 @@ class Settings:
     db_url: str | None
     demo_faults: bool = False
     policy_path: str | None = None
+    pin_pepper: str = ""
 
     def __post_init__(self) -> None:
         """What: reject empty or duplicate tokens. Use when: construction. Inputs: self.
@@ -43,11 +46,13 @@ class Settings:
     def from_env(cls) -> Settings:
         """What: build settings from the environment. Use when: process start. Inputs: env vars listed above.
         Output: Settings. Side effects: reads env; raises ConfigError when a required value is missing.
-        Role: production entry; CORE_DB_URL is required here (only unit tests run without a database)."""
+        Role: production entry; CORE_DB_URL and PIN_PEPPER are required here (only unit tests run without them)."""
         env = os.environ
         db_url = env.get("CORE_DB_URL", "")
         if not db_url:
             raise ConfigError("CORE_DB_URL is not set")
+        if not env.get("PIN_PEPPER", ""):
+            raise ConfigError("PIN_PEPPER is not set")
         return cls(
             token_agent=env.get("CORE_TOKEN_AGENT", ""),
             token_commit=env.get("CORE_TOKEN_COMMIT", ""),
@@ -55,4 +60,5 @@ class Settings:
             db_url=db_url,
             demo_faults=env.get("DEMO_FAULTS_ENABLED", "false").strip().lower() == "true",
             policy_path=env.get("POLICY_PATH") or None,
+            pin_pepper=env.get("PIN_PEPPER", ""),
         )

@@ -178,7 +178,7 @@ def test_committed_calibration_file_is_provisional_with_probe_notes():
     assert cal is not None
     assert cal.status == "provisional" and 0.0 < cal.tau_low < cal.tau_high < 1.0
     assert cal.embedding_model == config.DEFAULT_EMBEDDING_MODEL and len(cal.corpus_version) == 64
-    for word in ("answerable", "off_topic", "not_in_docs", "tau_low", "tau_high", "0.4534"):
+    for word in ("answerable", "off_topic", "not_in_docs", "tau_low", "tau_high", "S1"):
         assert word in cal.notes
 
 

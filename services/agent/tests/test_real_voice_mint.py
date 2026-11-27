@@ -19,50 +19,24 @@ import pytest
 import websockets
 from dotenv import load_dotenv
 
-from agent.access import sign_cookie
 from agent.models.config import load_models_config
-from agent.realtime import OpenAIRealtimeMinter, SessionSummary
-from agent.settings import Settings
-from agent.voice import VoiceDeps
+from agent.realtime import OpenAIRealtimeMinter
 
 ROOT = Path(__file__).resolve().parents[3]
-KEY = "k" * 32
-SID = "019a7c2e-5b10-7000-8000-00000000a001"
 
 
 @pytest.mark.real
 async def test_minted_secret_connects_to_realtime() -> None:
-    from agent.ingress import SessionRow
-    from agent.main import create_app
-    from test_voice_api import Sessions
-    from voice_fakes import MemoryVoiceStore
+    from test_voice_api import SID, World
 
     load_dotenv(ROOT / ".env", override=False)
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         pytest.fail("OPENAI_API_KEY missing: this test must not pass without making the calls")
     spec = load_models_config(ROOT / "data" / "models.yaml").roles["voice"]
-
-    async def summary(_: str) -> SessionSummary:
-        """What: a new session's summary. Use when: this test. Inputs: sid. Output: empty summary.
-        Side effects: none. Role: fake thread read."""
-        return SessionSummary()
-
     async with httpx.AsyncClient() as http:
-        deps = VoiceDeps(store=MemoryVoiceStore(), minter=OpenAIRealtimeMinter(http, api_key), voice_spec=spec,
-                         summary=summary)
-        cfg = Settings(served_by="agent_a", agent_db_url="postgresql://x", redis_url="redis://x",
-                       core_url="http://core:8000", knowledge_url="http://knowledge:8000", demo_faults_enabled=False,
-                       site_origin="https://test", session_signing_key=KEY, demo_access_code="c")
-
-        async def ok() -> str:
-            """What: healthy probe. Use when: app build. Inputs: none. Output: ok. Side effects: none. Role: fake."""
-            return "ok"
-
-        app = create_app(cfg, probes={k: ok for k in ("redis", "postgres", "core", "knowledge")},
-                         session_store=Sessions(SessionRow(session_id=SID, visitor_id="v")), voice=deps)
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test") as c:
-            c.cookies.set("qs_access", sign_cookie(KEY, visitor_id="v"))
+        w = World(minter=OpenAIRealtimeMinter(http, api_key))  # fake stores and agent, real minter
+        async with w.client() as c:
             r = await c.post(f"/api/sessions/{SID}/voice/token", json={})  # real call 1: client_secrets
     assert r.status_code == 200, r.status_code
     tok = r.json()
