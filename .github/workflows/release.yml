@@ -72,7 +72,7 @@ jobs:
           set -euo pipefail
           python3 scripts/deploy/release_manifest.py release --images "$RUNNER_TEMP/images/images-$SHA.json" --tag "$TAG" --revision "$SHA" --out "release-$TAG.json"
           python3 scripts/deploy/release_manifest.py env --manifest "release-$TAG.json" --tag "$TAG" | tee "$RUNNER_TEMP/release.env"
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
