@@ -86,5 +86,16 @@ def test_without_context_amounts_dates_and_endings_are_kept(text: str, ctx: Reda
 
 
 def test_context_makes_every_4_digit_group_a_candidate() -> None:
-    scan = scan_pins("QS-10423 invoice 0412 for 4821", UNVERIFIED)
-    assert scan.text == "QS-10423 invoice [PIN] for [PIN]" and scan.credential_like
+    """What: a PIN word makes every group a candidate; an account id (unverified) only a number next to it, separated
+    by punctuation or a short joining word (narrowed in the PR #57 follow-up, so "QS-20318 ... from 1200 to 1500 seats"
+    is kept). Use when: CI. Inputs: none. Output: assertion. Side effects: none. Role: context rule."""
+    scan = scan_pins("my pin: invoice 0412 for 4821", UNVERIFIED)
+    assert scan.text == "my pin: invoice [PIN] for [PIN]" and scan.credential_like
+    for text, want in (("QS-10423 4821", "QS-10423 [PIN]"), ("I'm QS-10423, 4821, I was charged twice",
+                                                            "I'm QS-10423, [PIN], I was charged twice"),
+                       ("QS-10423 and 4821", "QS-10423 and [PIN]"),
+                       ("I am QS-10423 and the number is 4821", "I am QS-10423 and the number is [PIN]"),
+                       ("4821 QS-10423", "[PIN] QS-10423")):
+        scan = scan_pins(text, UNVERIFIED)
+        assert scan.text == want and scan.credential_like, scan
+    assert scan_pins("QS-10423 invoice 0412 for 4821", UNVERIFIED).redacted == 0
