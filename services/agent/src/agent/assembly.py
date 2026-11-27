@@ -32,9 +32,10 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from agent.middleware.router import RouterMiddleware
+from agent.gates import GroundingVerifier, ScopeClassifier
+from agent.middleware.grounding import GroundingMiddleware
+from agent.middleware.router import OpenTicket, RouterMiddleware
 from agent.middleware.deadline_fault import DeadlineAndFaultMiddleware, fault_run_metadata, model_retry_on
-from agent.middleware.stubs import GroundingMiddleware
 from agent.middleware.tool_guard import ToolGuardMiddleware
 from agent.middleware.visibility import ToolVisibilityMiddleware
 from agent.prompt import SYSTEM_PROMPT
@@ -57,17 +58,22 @@ MIDDLEWARE_ORDER: tuple[str, ...] = (
 CheckpointerFactory = Callable[[], Any]  # returns an async context manager yielding a saver
 
 
-def build_middleware(fallback_model: Any, deadline_kwargs: dict[str, Any] | None = None
-                     ) -> list[AgentMiddleware[Any, Any]]:
+def build_middleware(fallback_model: Any, deadline_kwargs: dict[str, Any] | None = None, *,
+                     scope_classifier: ScopeClassifier | None = None,
+                     grounding_verifier: GroundingVerifier | None = None,
+                     open_ticket: OpenTicket | None = None) -> list[AgentMiddleware[Any, Any]]:
     """What: the middleware list in MIDDLEWARE_ORDER.
     Use when: build_agent; the order test.
-    Inputs: the fallback chat model (role agent_fallback); optional DeadlineAndFaultMiddleware overrides (tests).
+    Inputs: the fallback chat model (role agent_fallback); optional DeadlineAndFaultMiddleware overrides (tests);
+    the Gate 1 ScopeClassifier (role scope_classifier; None: a `none` verdict counts as on-topic); the Gate 2
+    GroundingVerifier (role grounding_verifier; None: Gate 2 off, tests only); the escalation ticket hook used by
+    the router and Gate 2 (CS-E-03.S4.T1 supplies it; None: the line gives the turn reference).
     Output: new middleware instances (fresh per agent, no shared state).
     Side effects: none.
     Role: single source of the stack order and the built-in settings (doc 07 s2.5, s8.1).
     """
     return [
-        RouterMiddleware(),
+        RouterMiddleware(open_ticket=open_ticket, scope_classifier=scope_classifier),
         ModelCallLimitMiddleware(run_limit=limits.MODEL_CALLS_PER_TURN, exit_behavior="end"),
         ToolVisibilityMiddleware(),
         ModelFallbackMiddleware(fallback_model),
@@ -76,37 +82,44 @@ def build_middleware(fallback_model: Any, deadline_kwargs: dict[str, Any] | None
                              initial_delay=limits.MODEL_RETRY_BACKOFF_S, on_failure="error", jitter=False),
         DeadlineAndFaultMiddleware([fallback_model], **(deadline_kwargs or {})),
         AnthropicPromptCachingMiddleware(ttl="5m", unsupported_model_behavior="ignore"),
-        GroundingMiddleware(),
+        GroundingMiddleware(grounding_verifier, open_ticket=open_ticket),
         ToolGuardMiddleware(),
     ]
 
 
 def build_agent(model: Any, *, fallback_model: Any, checkpointer: BaseCheckpointSaver,
-                tools: Sequence[Any] = (), deadline_kwargs: dict[str, Any] | None = None) -> Any:
+                tools: Sequence[Any] = (), deadline_kwargs: dict[str, Any] | None = None,
+                scope_classifier: ScopeClassifier | None = None, grounding_verifier: GroundingVerifier | None = None,
+                open_ticket: OpenTicket | None = None) -> Any:
     """What: compile the support agent graph.
     Use when: at startup inside an entered checkpointer factory; tests pass InMemorySaver.
     Inputs: primary model, fallback model, checkpointer, tools (agent.tools.build_tools in the service),
-    DeadlineAndFaultMiddleware overrides (tests only).
+    DeadlineAndFaultMiddleware overrides (tests only), the gate models and the ticket hook (see build_middleware).
     Output: CompiledStateGraph over SupportState.
     Side effects: none.
     Role: create_agent call site.
     """
     return create_agent(model, tools=list(tools), system_prompt=SYSTEM_PROMPT,
-                        middleware=build_middleware(fallback_model, deadline_kwargs), state_schema=SupportState,
+                        middleware=build_middleware(fallback_model, deadline_kwargs, scope_classifier=scope_classifier,
+                                                    grounding_verifier=grounding_verifier, open_ticket=open_ticket),
+                        state_schema=SupportState,
                         checkpointer=checkpointer, name="quillstack_support")
 
 
 def build_agent_from_registry(registry: Any, *, checkpointer: BaseCheckpointSaver,
                               tools: Sequence[Any] = ()) -> Any:
-    """What: build_agent with the agent and agent_fallback roles from models.yaml.
+    """What: build_agent with the agent, agent_fallback, scope_classifier and grounding_verifier roles from
+    models.yaml.
     Use when: the service and the real two-turn cache check.
     Inputs: ModelRegistry, checkpointer, tools.
     Output: compiled agent.
     Side effects: none (clients make no request until called).
-    Role: wiring helper.
+    Role: wiring helper; the one place the gate models are attached in the service.
     """
     return build_agent(registry.build("agent"), fallback_model=registry.build("agent_fallback"),
-                       checkpointer=checkpointer, tools=tools)
+                       checkpointer=checkpointer, tools=tools,
+                       scope_classifier=ScopeClassifier(registry.build("scope_classifier")),
+                       grounding_verifier=GroundingVerifier(registry.build("grounding_verifier")))
 
 
 def run_config(session_id: str, **extra: Any) -> dict[str, Any]:

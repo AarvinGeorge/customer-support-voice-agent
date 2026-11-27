@@ -3,10 +3,12 @@ call it reads TurnControl.route and, when a route is set, ends the turn in code 
 jump_to end, for verify(reason), readback, escalate(reason) and decline_off_topic.
 Use when: first in the create_agent stack; the SSE adapter calls route_reply to build the turn's final and
 end_reason from the same route.
-Inputs: the bound TurnControl (route, mode, turn id); optional open_ticket hook (kept for callers that want the
-ticket inside the loop; by default the escalation module, agent.escalation, opens the failure-path ticket AFTER the
-loop, in the 3 s reserve, and replaces the line in the thread, CS-E-03.S4.T1).
+Inputs: the bound TurnControl (route, mode, turn id, Gate 1 scope_check); optional open_ticket hook (kept for
+callers that want the ticket inside the loop; by default the escalation module, agent.escalation, opens the
+failure-path ticket AFTER the loop, in the 3 s reserve, and replaces the line in the thread, CS-E-03.S4.T1);
+optional ScopeClassifier (Gate 1 verdict none, doc 07 s6.5 row 3).
 Output: RouteReply, route_reply, route_message, escalate_from_hook, RouterMiddleware, the fixed line constants.
+RouterMiddleware also writes weak_streak once per run (after_agent).
 Side effects: writes one AI message (and, for readback, state.pending) to the thread; may call open_ticket.
 Role: deterministic replies skip the model and Gate 2 (after_model hooks do not run after a jump, spike 1).
 """
@@ -18,6 +20,7 @@ from typing import Any, Awaitable, Callable
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import AIMessage, RemoveMessage
 
+from agent.gates import ScopeClassifier, next_weak_streak, run_scope_check
 from agent.say import speak
 from agent.turn_control import Route, TurnControl, current_control
 
@@ -129,19 +132,26 @@ class RouterMiddleware(AgentMiddleware):
     stack. Inputs: optional open_ticket hook. Output: None (no route) or {messages, [pending], jump_to: end}.
     Side effects: may call open_ticket; records the line's message id on TurnControl. Role: route slot."""
 
-    def __init__(self, open_ticket: OpenTicket | None = None) -> None:
-        """What: keep the ticket hook. Use when: build_middleware. Inputs: hook or None (CS-E-03.S4.T1 adds it).
-        Output: none. Side effects: none. Role: constructor."""
+    def __init__(self, open_ticket: OpenTicket | None = None, scope_classifier: ScopeClassifier | None = None) -> None:
+        """What: keep the ticket hook and the Gate 1 scope classifier. Use when: build_middleware.
+        Inputs: ticket hook or None (CS-E-03.S4.T1 adds it); ScopeClassifier or None (a `none` verdict then
+        counts as on-topic, doc 07 s8.1). Output: none. Side effects: none. Role: constructor."""
         super().__init__()
         self.open_ticket = open_ticket
+        self.scope_classifier = scope_classifier
 
     @hook_config(can_jump_to=["end"])
     async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
-        """What: route check. Use when: before each model call. Inputs: state, runtime.
+        """What: route check, after the pending Gate 1 scope check (verdict none) has set its route.
+        Use when: before each model call. Inputs: state, runtime.
         Output: None, or the fixed AI message plus jump_to end (readback also sets state.pending).
-        Side effects: see class. Role: doc 07 s2.5 item 1."""
+        Side effects: see class; may call the scope classifier. Role: doc 07 s2.5 item 1, s6.5 row 3."""
         control = current_control()
-        if control is None or control.route is None:
+        if control is None:
+            return None
+        if control.scope_check and control.route is None:
+            await run_scope_check(control, self.scope_classifier, list(state.get("messages") or []))
+        if control.route is None:
             return None
         route = control.route
         if route.kind == "escalate" and route.ticket is None and self.open_ticket is not None:
@@ -152,3 +162,15 @@ class RouterMiddleware(AgentMiddleware):
             update["pending"] = {"id": route.pending["id"], "kind": route.pending.get("action_type") or "refund",
                                  "readback_turn_id": control.turn_id, "readback_interrupted": False}
         return update
+
+    async def aafter_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """What: write the next weak_streak once per run (doc 07 s6.5 row 2: it counts turns, not searches).
+        Use when: once at the end of every agent run (also after a jump to end). Inputs: state, runtime.
+        Output: {"weak_streak": n} when it changes, else None. Side effects: none beyond the state update.
+        Role: Gate 1 streak keeper (agent.gates.next_weak_streak)."""
+        control = current_control()
+        if control is None:
+            return None
+        new = next_weak_streak(control)
+        return None if int(state.get("weak_streak") or 0) == new else {"weak_streak": new}
+
