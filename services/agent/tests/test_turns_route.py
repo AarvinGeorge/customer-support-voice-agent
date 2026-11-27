@@ -30,7 +30,8 @@ from agent.realtime import SessionSummary
 from agent.settings import Settings
 from agent.sse import TurnOutcome, TurnStream
 from agent.structured.confirm import CoreCommitClient
-from agent.structured.handler import TICKET_OFFER_LINE, StructuredInput
+from agent.escalation import NOTHING_TO_OFFER_LINE
+from agent.structured.handler import StructuredInput
 from agent.tools.catalog import TOOL_NAMES
 from agent.turn_body import TurnRunner, voice_user_text
 from agent.voice import RedisCallKeys, TranscriptMerger, VoiceDeps, VoiceSessionRow
@@ -353,7 +354,7 @@ async def test_ticket_offer_reaches_the_structured_handler_with_no_model_call() 
         r = await c.post(f"/api/sessions/{SID}/turns", json={"client_turn_id": str(uuid.uuid4()),
                                                              "ticket_offer": {"accept": True}})
     done = events_of(r)[-1]
-    assert done.final.text == TICKET_OFFER_LINE
+    assert done.final.text == NOTHING_TO_OFFER_LINE  # no apology in the thread: nothing to offer (s6.7)
     assert w.registry.primary.seen == []
 
 

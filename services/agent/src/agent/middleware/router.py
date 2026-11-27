@@ -3,9 +3,10 @@ call it reads TurnControl.route and, when a route is set, ends the turn in code 
 jump_to end, for verify(reason), readback, escalate(reason) and decline_off_topic.
 Use when: first in the create_agent stack; the SSE adapter calls route_reply to build the turn's final and
 end_reason from the same route.
-Inputs: the bound TurnControl (route, mode, turn id); optional open_ticket hook (the escalation module,
-CS-E-03.S4.T1, plugs in here to create the failure-path ticket before the line is written).
-Output: RouteReply, route_reply, RouterMiddleware, the fixed line constants.
+Inputs: the bound TurnControl (route, mode, turn id); optional open_ticket hook (kept for callers that want the
+ticket inside the loop; by default the escalation module, agent.escalation, opens the failure-path ticket AFTER the
+loop, in the 3 s reserve, and replaces the line in the thread, CS-E-03.S4.T1).
+Output: RouteReply, route_reply, route_message, escalate_from_hook, RouterMiddleware, the fixed line constants.
 Side effects: writes one AI message (and, for readback, state.pending) to the thread; may call open_ticket.
 Role: deterministic replies skip the model and Gate 2 (after_model hooks do not run after a jump, spike 1).
 """
@@ -15,9 +16,9 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, RemoveMessage
 
-from agent.turn_control import TurnControl, current_control
+from agent.turn_control import Route, TurnControl, current_control
 
 VERIFY_LINE = ("To look at your account I need to verify you. Please enter your account ID and support PIN in "
                "the secure card.")
@@ -94,7 +95,31 @@ def route_reply(control: TurnControl) -> RouteReply:
     if route.kind == "decline_off_topic":
         return RouteReply(DECLINE_OFF_TOPIC_LINE, DECLINE_OFF_TOPIC_LINE, "declined_off_topic")
     text = _escalation_text(control)
-    return RouteReply(text, text, "escalated", escalated=True, ticket=route.ticket)
+    end_reason = route.reason if route.reason in ("deadline", "limit_reached") else "escalated"
+    return RouteReply(text, text, end_reason, escalated=True, ticket=route.ticket)
+
+
+def route_message(control: TurnControl) -> AIMessage:
+    """What: the thread AI message for the control's route (voice gets the say, chat the text), id route-{turn_id},
+    recorded on control.route_message_id so the SSE adapter knows the turn ended on a route line.
+    Use when: RouterMiddleware, and any hook that ends the turn in code (escalate_from_hook). Inputs: control with a
+    route. Output: AIMessage. Side effects: sets control.route_message_id. Role: one builder for route lines."""
+    reply = route_reply(control)
+    msg = AIMessage(content=reply.say if control.mode == "voice" else reply.text, id=f"route-{control.turn_id}")
+    control.route_message_id = msg.id
+    return msg
+
+
+def escalate_from_hook(control: TurnControl, reason: str, *, remove_id: str | None = None) -> dict[str, Any]:
+    """What: end the turn from an after_model hook with escalate(reason): optionally remove the draft, write the
+    route line, jump to end. The ticket is opened after the loop by agent.escalation (one per turn).
+    Use when: Gate 2 (doc 07 s6.4): second consecutive grounding failure gives escalate(grounding_failed),
+    commitment true gives escalate(needs_commitment); GroundingMiddleware (CS-E-02.S4.T2) returns this update.
+    Inputs: control, escalation reason, the draft message id to remove. Output: state update with jump_to end.
+    Side effects: sets the route (first decision wins) and route_message_id. Role: the Gate 2 escalation hook."""
+    control.set_route(Route("escalate", reason=reason))
+    messages: list[Any] = [RemoveMessage(id=remove_id)] if remove_id else []
+    return {"messages": [*messages, route_message(control)], "jump_to": "end"}
 
 
 class RouterMiddleware(AgentMiddleware):
@@ -119,9 +144,7 @@ class RouterMiddleware(AgentMiddleware):
         route = control.route
         if route.kind == "escalate" and route.ticket is None and self.open_ticket is not None:
             route.ticket = await self.open_ticket(control)
-        reply = route_reply(control)
-        msg = AIMessage(content=reply.say if control.mode == "voice" else reply.text, id=f"route-{control.turn_id}")
-        control.route_message_id = msg.id
+        msg = route_message(control)
         update: dict[str, Any] = {"messages": [msg], "jump_to": "end"}
         if route.kind == "readback" and route.pending and route.pending.get("id"):
             update["pending"] = {"id": route.pending["id"], "kind": route.pending.get("action_type") or "refund",
