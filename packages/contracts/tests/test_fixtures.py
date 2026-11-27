@@ -10,7 +10,7 @@ from conftest import FIXTURES
 from contracts.events import EVENT_TYPES, TurnCompletedEvent, parse_event
 from contracts.fixtures_build import render_all
 
-FILES = ("s1_chat.jsonl", "voice_turn.jsonl", "edge_turns.jsonl")
+FILES = ("s1_chat.jsonl", "voice_turn.jsonl", "edge_turns.jsonl", "s4_unsure.jsonl")
 
 
 def _lines(name):
@@ -119,3 +119,22 @@ def test_deadline_turn_follows_deadline_path():
     assert len(esc) == 1 and esc[0].ticket is not None
     last = [e for e in evs if e.type == "turn.completed" and e.turn_id == esc[0].turn_id][0]
     assert last.end_reason == "deadline" and last.final.escalated and last.final.ticket is not None
+
+
+def test_s4_unsure_covers_the_scenario():
+    """What: the S4 file has the three unsure cases: an off-topic decline with no ticket, a weak
+    first try that clarifies, and a second weak turn (0.41 against tau_high 0.45) that escalates
+    not_in_docs with a ticket (doc 07 s6.5). Use when: CI. Inputs: none. Output: assertion.
+    Side effects: reads a file. Role: S4 coverage for the step trail gate rows (CS-E-04.S5.T1)."""
+    evs = [parse_event(ln) for ln in _lines("s4_unsure.jsonl")]
+    gates = [e for e in evs if e.type == "gate" and e.gate == "retrieval"]
+    assert [(g.verdict, g.decision) for g in gates] == [("none", "decline"), ("weak", "clarify"),
+                                                        ("weak", "escalate")]
+    last = gates[-1]
+    assert (last.top_cosine, last.tau_low, last.tau_high) == (0.41, 0.30, 0.45)
+    ends = {e.turn_id: e.end_reason for e in evs if e.type == "turn.completed"}
+    assert list(ends.values()) == ["declined_off_topic", "clarify", "escalated"]
+    esc = [e for e in evs if e.type == "escalated"]
+    assert len(esc) == 1 and esc[0].reason == "not_in_docs" and esc[0].ticket is not None
+    assert esc[0].turn_id == last.turn_id
+    assert not any(e.type == "token" for e in evs)
