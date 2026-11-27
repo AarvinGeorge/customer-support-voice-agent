@@ -26,6 +26,7 @@ SLICE_ROUTES = [
     ("GET", "/v1/me/charges", "billing.read"),
     ("GET", "/v1/me/tickets", "tickets.read_own"),
     ("POST", "/v1/actions/refund/prepare", "actions.prepare"),
+    ("POST", "/v1/actions/grace_extension/prepare", "actions.prepare"),
     ("GET", "/v1/actions/pending/PA-0000000A", "actions.status"),
     ("POST", "/v1/actions/pending/PA-0000000A/commit", "actions.commit"),
     ("POST", "/v1/actions/pending/PA-0000000A/submit", "actions.submit"),
@@ -36,7 +37,11 @@ TOKEN_OF = {"agent_tools": "tok-agent", "agent_commit": "tok-commit", "ops": "to
 # routes whose handler exists, with the status the allowed caller gets here (no session header, no database, empty body):
 # POST routes reject the empty body (422); GET claims reaches the missing database (503); the /me reads need X-Session-Id (422).
 BUILT = {("POST", "/v1/tickets"): 422, ("POST", "/v1/identity/verify"): 422, ("GET", f"/v1/sessions/{SID}/claims"): 503,
-         ("GET", "/v1/me/context"): 422, ("GET", "/v1/me/charges"): 422, ("GET", "/v1/me/tickets"): 422}  # S3.T1, S1.T1
+         ("GET", "/v1/me/context"): 422, ("GET", "/v1/me/charges"): 422, ("GET", "/v1/me/tickets"): 422,  # S3.T1, S1.T1
+         # S2.T1, T5: prepare rejects the empty body, grace is disabled, the pending routes need X-Session-Id
+         ("POST", "/v1/actions/refund/prepare"): 422, ("POST", "/v1/actions/grace_extension/prepare"): 404,
+         ("GET", "/v1/actions/pending/PA-0000000A"): 422, ("POST", "/v1/actions/pending/PA-0000000A/commit"): 422,
+         ("POST", "/v1/actions/pending/PA-0000000A/submit"): 422, ("POST", "/v1/actions/pending/PA-0000000A/cancel"): 422}
 CASES = [(m, p, s, who) for (m, p, s) in SLICE_ROUTES for who in SCOPES]
 
 
@@ -65,7 +70,7 @@ def test_registered_routes_are_exactly_the_slice_table(client):
 def test_scope_gate(client, method, path, scope, who):
     """What: 403 SCOPE_DENIED when the caller lacks the scope, else the stub's 501 (handler not built yet).
     Use when: always. Inputs: one route and one caller. Output: assertions. Side effects: none.
-    Role: the Done-when matrix (11 routes x 3 callers = 33 cases)."""
+    Role: the Done-when matrix (12 routes x 3 callers = 36 cases)."""
     headers = {"Authorization": f"Bearer {TOKEN_OF[who]}"}
     r = client.request(method, path, headers=headers, json={} if method == "POST" else None)
     if scope in SCOPES[who]:
@@ -83,4 +88,4 @@ def test_matrix_has_both_outcomes():
     Output: assertion. Side effects: none. Role: a gate that can only pass or only fail tests nothing."""
     denied = sum(1 for (_, _, s, who) in CASES if s not in SCOPES[who])
     allowed = len(CASES) - denied
-    assert denied >= 20 and allowed == 12  # 11 routes, actions.status is held by two callers
+    assert denied >= 20 and allowed == 13  # 12 routes, actions.status is held by two callers

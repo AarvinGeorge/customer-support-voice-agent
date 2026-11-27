@@ -6,30 +6,38 @@ result into a response with to_response. /voice/ask (lane C) builds an IngressIn
 Inputs: a TurnStore (agent.sessions, agent.turns), a TurnLock (Redis), the replica name, the agent body.
 Output: IngressError (HTTP error) or IngressStream (SSE stream plus the background task).
 Side effects: rows in agent.turns, user_turns, lock:turn:{sid} in Redis, the turn task.
-Role: plain code before and after the model (doc 07 s2.4). Not here yet, by plan: rate limits (CS-E-07.S2.T1),
-voice expiry and call-key dedupe (CS-E-05.S3.T2), admission semaphore (designed only), PIN scan (CS-E-03.S7.T9),
-repair, memory and transcript merge (CS-E-03.S7.T5), structured input (CS-E-03.S7.T8), tickets on the
-deadline and limit paths (CS-E-03.S4.T1).
+Role: plain code before and after the model (doc 07 s2.4). Voice (CS-E-05.S3.T2): the step 7 call-key dedupe
+(optional CallKeys) and the step 12 transcript merge (optional merge_transcript) are hooks here; step 3 (voice
+session match and expiry) runs in the voice/ask route (agent.voice). Not here yet, by plan: rate limits
+(CS-E-07.S2.T1), admission semaphore (designed only), PIN scan (CS-E-03.S7.T9), repair and memory
+(CS-E-03.S7.T5), structured input (CS-E-03.S7.T8), tickets on the deadline and limit paths (CS-E-03.S4.T1).
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Awaitable, Callable, Protocol
 
 from contracts import limits
 from contracts.agent_api import TurnRequest
 from contracts.errors import ErrorBody, ErrorEnvelope
+from contracts.redact import RedactContext
 from contracts.events import FinalAnswer, Usage
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.utils.uuid import uuid7
 from pydantic import ValidationError
 
+from agent.deadline import TurnBudgetExhausted
 from agent.sse import TurnMeta, TurnOutcome, TurnStream, start_turn
+from agent.turn_control import TurnControl, bind_turn_control
+
+log = logging.getLogger("agent.ingress")
 
 CAP_LINE = ("This conversation is getting long. Please start a new conversation; your tickets and account "
             "history are kept.")
@@ -104,6 +112,7 @@ class TurnStore(Protocol):
     async def insert_turn(self, row: TurnRow) -> None: ...
     async def count_turn(self, session_id: str) -> None: ...
     async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None: ...
+    async def mark_events_incomplete(self, turn_ids: set[str]) -> None: ...
 
 
 class TurnLock(Protocol):
@@ -114,10 +123,22 @@ class TurnLock(Protocol):
     async def release(self, session_id: str, token: str) -> bool: ...
 
 
+class CallKeys(Protocol):
+    """What: voice_call:{sid}:{realtime_call_id} SET NX EX 120 (doc 07 s2.4 step 7, s12). Use when: typing.
+    Inputs: session id, call id. Output: True when this request claimed the key. Side effects: Redis.
+    Role: voice call dedupe port."""
+
+    async def claim(self, session_id: str, call_id: str) -> bool: ...
+
+
 @dataclass(frozen=True)
 class IngressInput:
     """What: one turn request after auth and body parsing. Use when: Ingress.handle.
-    Inputs: session, visitor, client turn id, mode, input kind, redacted text, realtime call id, raw body.
+    Inputs: session, visitor, client turn id, mode, input kind, redacted text, realtime call id, raw body, the
+    gated demo fault
+    (TurnRequest or VoiceAskRequest); merged_transcript is set by ingress at step 12 (the wrapped
+    <voice_transcript> user message for the agent body to place before this turn's message, or None);
+    redact_context is the session's scanner context (doc 07 s11.1 conditions) for text that ingress hooks store.
     Output: value. Side effects: none. Role: the shared entry shape for chat and voice."""
 
     session_id: str
@@ -128,6 +149,9 @@ class IngressInput:
     text: str | None = None
     realtime_call_id: str | None = None
     body: Any = None
+    demo_fault: str | None = None  # already gated by demo_fault_from_header (doc 07 s10), request-scoped
+    merged_transcript: str | None = None
+    redact_context: RedactContext | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +179,7 @@ class IngressStream:
 
 
 AgentBody = Callable[[TurnStream, IngressInput, TurnRow], Awaitable[TurnOutcome]]
+MergeTranscript = Callable[[IngressInput, TurnRow], Awaitable[str | None]]
 
 
 def parse_turn_request(raw: Any) -> TurnRequest | IngressError:
@@ -184,19 +209,32 @@ def _conflict() -> IngressError:
                         "I'm still working on your last message. Please wait a moment.")
 
 
+def _redis_down() -> IngressError:
+    """What: 503 REDIS_UNAVAILABLE (fail closed: the lock and the call key protect the thread, doc 07 s9).
+    Use when: step 7. Inputs: none. Output: error. Side effects: none. Role: helper."""
+    return IngressError(503, "redis_unavailable", "REDIS_UNAVAILABLE",
+                        "We're having a brief problem. Please try again in a moment.", retryable=True,
+                        retry_after_s=3)
+
+
 class Ingress:
     """What: the callable ingress entry. Use when: one instance per app; handle() per request.
-    Inputs: store, lock, replica name, agent body, deadlines and reserve (overridable for tests), clock.
+    Inputs: store, lock, replica name, agent body, deadlines and reserve (overridable for tests), clock,
+    call keys (voice step 7 dedupe; production RedisCallKeys), merge_transcript (step 12; production
+    agent.voice.TranscriptMerger), trajectory writer (app.state.trajectory, or None: events are not persisted).
     Output: handle(). Side effects: see module. Role: doc 07 s2.4 orchestration."""
 
     def __init__(self, store: TurnStore, lock: TurnLock, *, served_by: str, run_agent: AgentBody,
                  turn_deadline_s: dict[str, float] | None = None, reserve_s: float = limits.ESCALATION_RESERVE_S,
-                 now: Callable[[], datetime] = lambda: datetime.now(UTC)) -> None:
+                 now: Callable[[], datetime] = lambda: datetime.now(UTC), call_keys: CallKeys | None = None,
+                 merge_transcript: MergeTranscript | None = None, trajectory: Any = None) -> None:
         """What: wire dependencies. Use when: app start or tests. Inputs: see class. Output: none.
         Side effects: none. Role: constructor."""
         self.store, self.lock, self.served_by, self.run_agent = store, lock, served_by, run_agent
+        self.trajectory = trajectory
         self.deadline_s = turn_deadline_s or TURN_DEADLINE_S
         self.reserve_s, self.now = reserve_s, now
+        self.call_keys, self.merge_transcript = call_keys, merge_transcript
 
     async def handle(self, inp: IngressInput) -> IngressError | IngressStream:
         """What: run steps 1, 4, 6, 7, 8, 9 and start the turn task (14 to 16). A resend that finds its own
@@ -216,11 +254,12 @@ class Ingress:
         try:  # step 7: fail closed when Redis is down (doc 07 s9)
             locked = await self.lock.acquire(inp.session_id, token, limits.TURN_LOCK_TTL_S * 1000)
         except Exception:  # noqa: BLE001
-            return IngressError(503, "redis_unavailable", "REDIS_UNAVAILABLE",
-                                "We're having a brief problem. Please try again in a moment.", retryable=True,
-                                retry_after_s=3)
+            return _redis_down()
         if not locked:
             return _conflict()
+        refused = await self._claim_call(inp, token)  # step 7, voice only: after the lock, so a refusal never burns it
+        if refused is not None:
+            return refused
 
         async def release(_: TurnOutcome) -> None:
             """What: compare-and-delete the lock. Use when: after the turn. Inputs: outcome.
@@ -241,6 +280,43 @@ class Ingress:
         except BaseException:
             await self.lock.release(inp.session_id, token)
             raise
+
+    async def _claim_call(self, inp: IngressInput, token: str) -> IngressError | IngressStream | None:
+        """What: SET voice_call:{sid}:{call} NX after the lock; if taken, re-run step 4 (replay a finished turn,
+        else 409 DUPLICATE_CALL). Releases the lock on every refusal.
+        Use when: handle, voice turns with call keys configured. Inputs: input, lock owner token.
+        Output: None to continue, or the refusal or replay. Side effects: Redis SET, lock release.
+        Role: doc 07 s2.4 step 7 second half."""
+        if inp.mode != "voice" or not inp.realtime_call_id or self.call_keys is None:
+            return None
+        try:
+            claimed = await self.call_keys.claim(inp.session_id, inp.realtime_call_id)
+        except Exception:  # noqa: BLE001 - fail closed (doc 07 s9)
+            await self.lock.release(inp.session_id, token)
+            return _redis_down()
+        if claimed:
+            return None
+        await self.lock.release(inp.session_id, token)
+        prior = await self._find(inp)
+        if prior is not None and prior.status != "running":
+            return self._replay(prior)
+        return IngressError(409, "core_conflict", "DUPLICATE_CALL",
+                            "I'm already working on that. Please wait a moment.")
+
+    async def _merge(self, inp: IngressInput, row: TurnRow) -> IngressInput:
+        """What: step 12: claim unmerged client transcript items for this turn; a failure is logged and the turn
+        goes on without them (they stay unmerged for the next turn only if the claim did not commit).
+        Use when: the turn task, before the agent loop. Inputs: input, turn row.
+        Output: the input with merged_transcript set. Side effects: transcript_items UPDATE. Role: helper."""
+        if self.merge_transcript is None:
+            return inp
+        try:
+            merged = await self.merge_transcript(inp, row)
+        except Exception:  # noqa: BLE001 - never block a turn on display chatter
+            log.warning("transcript merge failed session_id=%s turn_id=%s", inp.session_id, row.turn_id,
+                        exc_info=True)
+            merged = None
+        return replace(inp, merged_transcript=merged)
 
     async def _find(self, inp: IngressInput) -> TurnRow | None:
         """What: the step 4 lookup (client turn id, and realtime call id for voice). Use when: handle.
@@ -263,18 +339,26 @@ class Ingress:
             await release(TurnOutcome.fixed("", end_reason="error"))
             return _conflict()
         await self.store.count_turn(inp.session_id)
-        stream = TurnStream(TurnMeta(inp.session_id, row.turn_id, inp.mode, self.served_by, inp.input_kind))
+        stream = TurnStream(TurnMeta(inp.session_id, row.turn_id, inp.mode, self.served_by, inp.input_kind),
+                            sink=self.trajectory.add if self.trajectory is not None else None)  # doc 07 s12 turn_events
         loop_budget = max(budget - self.reserve_s, 0.0)  # the reserve is kept for the escalation ticket
+        deadline_mono = time.monotonic() + budget  # TurnControl.deadline: clamps take the reserve off this
 
         async def body(s: TurnStream) -> TurnOutcome:
-            """What: the agent loop under asyncio.timeout. Use when: the turn task. Inputs: stream.
-            Output: outcome (deadline outcome on timeout). Side effects: model and tools. Role: step 14."""
+            """What: the agent loop under asyncio.timeout, with the turn's one TurnControl bound (deadline = the 45 s
+            or 20 s turn deadline, so every clamp subtracts the 3 s reserve from it; the request's demo fault).
+            Use when: the turn task. Inputs: stream.
+            Output: outcome (deadline outcome on timeout or on a call skipped by the clamp). Side effects: model
+            and tools; binds TURN_CONTROL in this task. Role: step 14; doc 07 s8.2 deadline path."""
+            control = TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
+                                  deadline=deadline_mono, demo_fault=inp.demo_fault, events=s)
+            bind_turn_control(control)  # the turn task's own context; the only .set() (spike 15)
             cm = asyncio.timeout(loop_budget)
             try:
                 async with cm:
-                    return await self.run_agent(s, inp, row)
-            except TimeoutError:
-                if not cm.expired():  # an inner timeout (httpx, wait_for) is an error, not the deadline
+                    return await self.run_agent(s, await self._merge(inp, row), row)
+            except (TimeoutError, TurnBudgetExhausted) as exc:
+                if isinstance(exc, TimeoutError) and not cm.expired():  # an inner timeout is an error, not the deadline
                     raise
                 err = ErrorBody.model_validate({"class": "turn_deadline_exceeded", "code": "TURN_DEADLINE",
                                                 "message": DEADLINE_MESSAGE, "retryable": True, "changed": None,
@@ -354,7 +438,7 @@ class RedisTurnLock:
 class PgTurnStore:
     """What: TurnStore over the agent_app psycopg pool (schema agent).
     Use when: production. Inputs: psycopg AsyncConnectionPool. Output: TurnStore methods.
-    Side effects: SQL on agent.sessions and agent.turns. Role: storage adapter."""
+    Side effects: SQL on agent.sessions and agent.turns (including events_complete). Role: storage adapter."""
 
     def __init__(self, pool: Any) -> None:
         """What: keep the pool. Use when: app start. Inputs: pool. Output: none. Side effects: none. Role: constructor."""
@@ -432,3 +516,13 @@ class PgTurnStore:
                 (outcome.status, outcome.end_reason, ended_at, json.dumps(outcome.final.model_dump(mode="json")),
                  json.dumps(outcome.usage.model_dump(mode="json")), json.dumps(error) if error else None,
                  outcome.model_used, outcome.fallback_used, turn_id))
+
+    async def mark_events_incomplete(self, turn_ids: set[str]) -> None:
+        """What: events_complete = false for turns whose turn_events rows were dropped.
+        Use when: TrajectoryWriter(on_incomplete=...). Inputs: turn ids. Output: none.
+        Side effects: one UPDATE on this store's pool (not the writer's). Role: doc 07 s12 events_complete."""
+        ids = [i for i in turn_ids if i]
+        if not ids:
+            return
+        async with self.pool.connection() as conn:
+            await conn.execute("UPDATE agent.turns SET events_complete = false WHERE turn_id = ANY(%s::uuid[])", (ids,))
