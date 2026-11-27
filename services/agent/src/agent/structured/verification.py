@@ -16,7 +16,7 @@ from typing import Any
 from contracts import limits
 from contracts.agent_api import VerifiedPerson
 from contracts.events import FinalAnswer
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 
 from agent.clients.core_agent import CoreAgentClient
 from agent.clients.http import ToolCallError

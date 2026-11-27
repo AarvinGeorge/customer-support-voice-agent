@@ -30,6 +30,7 @@ from langchain_core.messages import HumanMessage
 from agent.assembly import run_config, turn_run_config
 from agent.clients.core_agent import CoreAgentClient
 from agent.escalation import Escalator
+from agent.gates import identity_key
 from agent.memory import MemoryRefresh, refresh_memory, repair_dangling
 from agent.prompt import TurnContext, build_turn_message
 from agent.deadline import TurnBudgetExhausted
@@ -160,6 +161,7 @@ class TurnRunner:
         values = dict((await self.agent.aget_state(config)).values or {})
         memory = await refresh_memory(self.core, control, values)  # step 11
         values.update(memory.update)
+        control.identity = identity_key(values)  # the verification this turn runs under (review PR #71 N3)
         result = StructuredResult()
         if self.structured is not None:  # step 13
             result = await self.structured(stream, inp, TurnPrep(control, config, values, memory, self.agent))
@@ -167,6 +169,7 @@ class TurnRunner:
             await self.agent.aupdate_state(config, {**memory.update, **result.state, "messages": result.messages})
             return result.outcome
         merged = {**values, **result.state}
+        control.identity = identity_key(merged)  # a verification in step 13 changes it before the model runs
         verified = bool(merged.get("verified"))
         stale = result.context_stale if result.context_stale is not None else memory.stale
         ctx = TurnContext(mode="voice" if inp.mode == "voice" else "chat", verified=verified,

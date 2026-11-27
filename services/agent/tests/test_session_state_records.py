@@ -84,7 +84,7 @@ def test_c_session_state_lists_tickets_from_code_records_and_from_the_create_tic
                        tool_call_id="ct-1", name="create_ticket",
                        artifact={"bound_to": None, "ticket": {"ticket_id": "TCK-26714410", "display": "ticket ending 4410"}})
     thread = [HumanMessage("a"), AIMessage("line", id="route-t0"), record, HumanMessage("b"), tool, HumanMessage("c")]
-    assert session_tickets(thread) == ["ticket ending 8352", "ticket ending 4410"]
+    assert session_tickets(thread, None) == ["ticket ending 8352", "ticket ending 4410"]  # both made unverified
     ev = session_evidence({"verified": False}, thread, control)
     assert "Tickets opened in this conversation: ticket ending 8352, ticket ending 4410." in ev.text
 

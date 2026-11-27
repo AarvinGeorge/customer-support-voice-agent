@@ -68,8 +68,9 @@ def test_n1_the_enum_is_in_the_anthropic_payload_actually_sent():
     payload = model._get_request_payload([HumanMessage("x")], **structured_output_kwargs(model, verdict_schema()))
     branches = payload["output_config"]["format"]["schema"]["properties"]["claims"]["items"]["properties"][
         "source_id"]["anyOf"]
-    string = next(b for b in branches if b.get("type") == "string")
+    string = next(b for b in branches if b.get("type") != "null")  # the transform keeps enum, drops "type"
     assert string["enum"] == sid_vocabulary()
+    assert {"type": "null"} in branches
     assert "pattern" not in string and "pattern" not in str(string.get("description", ""))
 
 
@@ -211,3 +212,15 @@ async def test_n2_startup_schedules_the_warm_up_in_the_background_only_with_a_ke
     assert task is not None
     await task
     assert calls == [ver]
+
+
+async def test_n3_the_turn_runs_under_its_verification_and_its_route_line_is_stamped_with_it():
+    from test_structured_input import readback_world
+
+    from agent.gates import identity_key
+
+    w, _, _ = await readback_world()  # verified session; the read-back turn ends on a route line
+    values = await w.values()
+    route = [m for m in values["messages"] if str(m.id or "").startswith(line_ids.ROUTE)]
+    assert route and identity_key(values) is not None
+    assert route[-1].response_metadata["bound_to"] == identity_key(values)

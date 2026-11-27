@@ -428,7 +428,9 @@ def test_role_decline_states_the_next_step_it_allows():
 _STOP = frozenset("that this with have been from your their there which while because cannot nothing already these "
                   "those after than then only into they them what when where would could should about over also "
                   "just".split())
-MESSAGE_SECTION_OVERLAP_MIN = 0.5  # measured 2026-11-27: lowest 0.50 (GRACE_ALREADY_USED), most 0.8 to 1.0
+# A drift floor, with margin: measured 2026-11-27, lowest 0.50 (GRACE_ALREADY_USED), most 0.8 to 1.0. It catches a
+# message rewritten away from its section or a policy_ref moved to another section; numbers are not compared.
+MESSAGE_SECTION_OVERLAP_MIN = 0.4
 
 
 def _section_text(article: str, slug: str) -> str:

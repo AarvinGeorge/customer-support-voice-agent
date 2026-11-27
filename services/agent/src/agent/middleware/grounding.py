@@ -80,9 +80,12 @@ class GroundingMiddleware(AgentMiddleware):
         result = enforce_code_rules(result, text, evidence.chunks, tool_names=evidence.ids)
         failures = int(state.get("grounding_failures") or 0)
         claims = result.claims
+        # The gate event names a help-article claim by its chunk id (the drawer's id), not by its doc@n sid (N1).
+        shown = [{**c, "source_id": evidence.chunks[c["source_id"]]["chunk_id"]} if c.get("source_id") in evidence.chunks
+                 else c for c in claims]
         counts: dict[str, Any] = {"claims_total": len(claims), "claims_supported": sum(c["supported"] for c in claims),
-                                  "claims": claims, "commitment": result.commitment,
-                                  "chunk_ids": sorted(evidence.chunks)}  # the session chunks in the evidence (M6)
+                                  "claims": shown, "commitment": result.commitment,
+                                  "chunk_ids": sorted(str(c["chunk_id"]) for c in evidence.chunks.values())}  # M6
         sources = {c["source_id"]: evidence.provenance[c["source_id"]] for c in claims
                    if c["supported"] and c.get("source_id") in evidence.provenance}  # review PR #71 I4
         if result.passed:

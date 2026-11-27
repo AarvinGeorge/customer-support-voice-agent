@@ -18,7 +18,6 @@ from typing import Any, Protocol
 
 from contracts.agent_api import TurnRequest, VoiceAskRequest
 from contracts.redact import RedactContext, scan_pins
-from langchain_core.messages import AIMessage
 
 from agent.gates import identity_key
 from agent.line_ids import INGRESS, code_line

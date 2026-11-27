@@ -14,8 +14,10 @@ the step 9a PIN scan before any body, and the typed-PIN refusal (TypedPinRefusal
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +27,7 @@ from fastapi import FastAPI
 from agent.assembly import build_agent_from_registry
 from agent.clients.core_agent import CoreAgentClient
 from agent.clients.knowledge import KnowledgeClient
+from agent.gates import GroundingVerifier, warm_up_verifier
 from agent.ingress import CallKeys, Ingress, IngressInput, MergeTranscript, PgTurnStore, RedisTurnLock, TurnLock
 from agent.settings import Settings, secret_problem
 from agent.pin_guard import TypedPinRefusal
@@ -48,7 +51,8 @@ _PIN_PROBE = "my PIN is 4821"
 @dataclass(frozen=True)
 class AgentRuntime:
     """What: the built agent and what it was built from. Use when: build_ingress, tests.
-    Inputs: compiled agent, tools, core client, knowledge client, model registry (prices for cost_of).
+    Inputs: compiled agent, tools, core client, knowledge client, model registry (prices for cost_of), the Gate 2
+    verifier.
     Output: value. Side effects: none. Role: one bundle per process."""
 
     agent: Any
@@ -56,6 +60,7 @@ class AgentRuntime:
     core: CoreAgentClient
     knowledge: KnowledgeClient
     registry: Any
+    verifier: Any = None  # the Gate 2 GroundingVerifier the agent was built with (warm-up at start, PR #71 N2)
 
 
 def build_agent_runtime(cfg: Settings, *, http: httpx.AsyncClient, checkpointer: Any,
@@ -70,8 +75,31 @@ def build_agent_runtime(cfg: Settings, *, http: httpx.AsyncClient, checkpointer:
     core = CoreAgentClient(cfg.core_url, cfg.core_token_agent, http=http, demo_faults_enabled=cfg.demo_faults_enabled)
     knowledge = KnowledgeClient(cfg.knowledge_url, cfg.knowledge_token_agent, http=http)
     tools = build_tools(core, knowledge)
-    agent = build_agent_from_registry(registry, checkpointer=checkpointer, tools=tools)
-    return AgentRuntime(agent=agent, tools=tools, core=core, knowledge=knowledge, registry=registry)
+    verifier = GroundingVerifier(registry.build("grounding_verifier"))
+    agent = build_agent_from_registry(registry, checkpointer=checkpointer, tools=tools, verifier=verifier)
+    return AgentRuntime(agent=agent, tools=tools, core=core, knowledge=knowledge, registry=registry, verifier=verifier)
+
+
+PROVIDER_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+
+
+def start_verifier_warm_up(verifier: Any, provider: str) -> "asyncio.Task[bool] | None":
+    """What: schedule warm_up_verifier as a background task, so the provider compiles the verifier grammar before
+    the first customer turn (review PR #71 N2); readiness never waits for it.
+    Use when: wire_app, once per process, inside the running event loop.
+    Inputs: the verifier (None: skipped), the grounding_verifier provider (models.yaml). Output: the task, or None
+    when there is no verifier, the provider key is not set (tests, CI) or no loop is running. Side effects: one background model call; a log line.
+    Role: start-up warm-up; never fails startup."""
+    if verifier is None:
+        return None
+    if not os.environ.get(PROVIDER_KEYS.get(provider, ""), ""):
+        log.info("verifier warm-up skipped: no %s key", provider)
+        return None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    return loop.create_task(warm_up_verifier(verifier), name="verifier-warm-up")
 
 
 def build_ingress(runtime: Any, *, store: PgTurnStore | Any, lock: TurnLock, served_by: str, commit: CoreCommitClient,
@@ -123,6 +151,9 @@ def wire_app(app: FastAPI, cfg: Settings) -> Ingress | None:
     state.ingress = ingress
     if getattr(state, "voice", None) is not None:
         state.voice.ingress = ingress
+    spec = getattr(runtime.registry, "spec", None)
+    provider = str(getattr(spec("grounding_verifier"), "provider", "")) if callable(spec) else ""
+    state.verifier_warm_up = start_verifier_warm_up(getattr(runtime, "verifier", None), provider)
     return ingress
 
 

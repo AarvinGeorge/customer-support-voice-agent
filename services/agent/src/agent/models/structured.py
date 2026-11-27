@@ -1,8 +1,8 @@
 """What: the provider adapter for structured output: a JSON schema to the call kwargs that make the provider
 constrain its reply to that schema (Anthropic `output_config.format` json_schema; OpenAI `response_format`
 json_schema, strict).
-Use when: GroundingVerifier.verify, for every call (the schema is built per call: its source_id enum is the
-citable sids of that draft's evidence).
+Use when: GroundingVerifier.verify, for every call (the schema is the same on every call: agent.gates.verdict_schema,
+its source_id enum is the static sid vocabulary).
 Inputs: a chat model, a JSON schema. Output: structured_output_kwargs.
 Side effects: none (no request is sent).
 Role: provider details live in agent/models (models.yaml note, D-024), never in callers; a model this adapter does

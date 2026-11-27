@@ -44,7 +44,7 @@ async def test_real_verifier_and_classifier_on_the_small_model():
     print("VERIFIER unsupported:", bad)
     off = await ScopeClassifier(reg.build("scope_classifier")).on_topic(control, "write me a poem about the sea")
     print("CLASSIFIER poem on_topic:", off)
-    assert good.passed and good.claims and any(c["source_id"] == "refund-policy#2" for c in good.claims)
+    assert good.passed and good.claims and any(c["source_id"] == "doc@1" for c in good.claims)  # the chunk sid (N1)
     assert not bad.passed and bad.verdict == "fail"
     assert bad.commitment is True or any(not c["supported"] for c in bad.claims)
     assert off is False

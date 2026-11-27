@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from contracts.events import FinalAnswer
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 
 from agent.gates import identity_key
 from agent.line_ids import INGRESS, code_line
@@ -32,7 +32,7 @@ from agent.say import speak
 from agent.sse import TurnOutcome, TurnStream
 from agent.structured.confirm import ActionReply, Confirmer
 from agent.structured.grammar import is_strict_no, is_strict_yes
-from agent.structured.pending import confirm_label, ingress_message_id, is_adjacent, pending_ref
+from agent.structured.pending import confirm_label, is_adjacent, pending_ref
 from agent.structured.verification import verify_card
 from agent.structured.voice_yes import REPROMPT_LINE, VoiceGate, voice_gate, voice_thread_text
 from agent.turn_body import SessionFlags, StructuredResult, TurnPrep

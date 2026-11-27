@@ -225,7 +225,7 @@ class ScopeClassifier:
             record_gate_call(control, self.model)
             _log.warning("scope classifier failed (%s); treated as on-topic", type(exc).__name__)
             return True
-        record_gate_call(control, model, reply)
+        record_gate_call(control, self.model, reply)
         if reply_truncated(reply):
             _log.warning("scope classifier reply truncated (stop_reason max_tokens, output_tokens=%s); treated as "
                          "on-topic", _output_tokens(reply))
@@ -369,8 +369,9 @@ def _source_block(sid: str, kind: str, body: str, **attrs: Any) -> str:
 
 
 GATE2_EVIDENCE_USER_TURNS = 6  # D-065: the session window, in user turns (the current one included)
-# D-065 token budget for the evidence. Tokens are estimated as UTF-8 bytes / 3, an upper bound for the verifier's
-# tokenizer on this corpus (English prose runs about 4 bytes per token), so the real count is never above it.
+# D-065 token budget for the evidence. Tokens are estimated as UTF-8 bytes / 3: English prose runs about 4 bytes per
+# token, so prose is over-counted; id-heavy JSON (uuids, timestamps) can run under 3, so it is an estimate, not a bound.
+# The budget is far below the verifier's context, so an under-count costs latency, not an overflow.
 EVIDENCE_MAX_TOKENS = 12_000
 V0_TOOLS = frozenset({"create_ticket", "request_verification", "search_kb"})  # doc 07 s5.2 V0 (unverified)
 
@@ -397,7 +398,7 @@ class SessionEvidence:
 
     @property
     def citable(self) -> list[str]:
-        """What: every sid a claim may cite. Use when: the verifier's id list and its output enum.
+        """What: every sid a claim may cite in this call. Use when: the verifier's <citable_ids> list and the code rule.
         Inputs: none. Output: sorted list. Side effects: none. Role: helper."""
         return sorted(self.ids | {cid for cid, c in self.chunks.items() if not _suspect(c)})
 
@@ -822,7 +823,8 @@ async def warm_up_verifier(verifier: "GroundingVerifier | None", *, timeout_s: f
     draft), so the provider compiles the grammar before the first customer turn (review PR #71 N2).
     Use when: agent startup, as a background task (agent.composition); never awaited by readiness.
     Inputs: the verifier (None: skipped), its own timeout. Output: True when a verdict came back, else False.
-    Side effects: one model call on a throwaway TurnControl (no turn, no usage); one log line. Never raises."""
+    Side effects: one model call on a throwaway TurnControl (no turn, no usage); one log line. Never raises.
+    Role: review PR #71 N2, the first voice turn after a deploy does not pay the grammar compile."""
     if verifier is None:
         return False
     control = TurnControl(session_id="warm-up", turn_id="warm-up", mode="chat")

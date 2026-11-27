@@ -1,6 +1,6 @@
 """What: tests for D-065 (Gate 2 evidence is session-scoped: every tool result and retrieved chunk in the thread's
 checkpoint, bounded to the last GATE2_EVIDENCE_USER_TURNS user turns and a token budget, each block with one
-code-written sid and a provenance record), the review PR #71 fixes (I1 citable sids and the per-call output enum,
+code-written sid and a provenance record), the review PR #71 fixes (I1 citable sids and the structured output enum,
 I3 evidence bound to its verification, I4 per-result sids with current marks and claim provenance on the step,
 M4 escaping through the real wrapper, M5 the token budget, M6 the session chunk ids on the gate event) and D-066
 (a weak Gate 1 turn that the model answered and Gate 2 passed with a supported claim ends "answered").
@@ -10,7 +10,6 @@ Role: browser pass 2b bugs 2 to 4 and the review of PR #71.
 """
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from gate2_fakes import CitingVerifierModel
@@ -18,6 +17,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from test_gate1 import search_body
 from test_gate2 import DRAFT, Harness, grounding_gate
 
+from agent import line_ids
 from agent.gates import (
     EVIDENCE_MAX_TOKENS,
     GATE2_EVIDENCE_USER_TURNS,
@@ -26,15 +26,13 @@ from agent.gates import (
     enforce_code_rules,
     evidence_tokens,
     session_evidence,
-    verdict_schema,
     verifier_input,
 )
-from agent.models.structured import structured_output_kwargs
 from agent.turn_control import TurnControl
 from agent.untrusted import wrap_result, wrap_search
 
 CHUNK = search_body("pass")["chunks"][0]
-CLAIM = ("Pro refunds are allowed within 30 days", "refund-policy#2")
+CLAIM = ("Pro refunds are allowed within 30 days", "doc@1")  # chunks are cited by sid (N1); the chunk id is in the provenance
 PRIYA = {"verified": True, "claims_snapshot": {"user_id": "U-1", "account_id": "QS-10423", "role": "owner",
                                                 "tier": "pro"}}
 DANA = {"verified": True, "claims_snapshot": {"user_id": "U-9", "account_id": "QS-20318", "role": "owner",
@@ -119,49 +117,7 @@ async def test_a_claim_with_no_source_anywhere_in_the_session_is_still_blocked()
     assert grounding_gate(events2).verdict == "fail" and second.final.text != DRAFT
 
 
-# --- I1: one code-written sid per block, the citable list and the per-call enum -------------------------------------
-
-
-async def test_the_verifier_gets_the_citable_ids_and_one_stable_schema_whose_sid_pattern_fits_them():
-    # Voice blocker (fix round 1 measurement): a per-call enum is a new grammar on every call (p50 2.58 s, 1 of 5
-    # over the 3 s voice limit against 1.04 s without). One schema for every call is compiled once; the sid
-    # pattern forbids prefixed or free-text ids, and the code rule keeps each call to its own citable list.
-    ver = citing(CLAIM)
-    h = Harness(ver)
-    await h.run()
-    h.script(AIMessage(DRAFT))
-    await h.run(turn_id="t-2")
-    model: Any = ver.model
-    listed = model.seen[0].split("<citable_ids>\n")[1].split("\n</citable_ids>")[0].splitlines()
-    assert listed == ["account_context", "agent_capabilities", "refund-policy#2", "session_state"]
-    first, second = model.kwargs[0]["schema"], model.kwargs[1]["schema"]
-    assert first == second == verdict_schema() and first["additionalProperties"] is False
-    pattern = first["properties"]["claims"]["items"]["properties"]["source_id"]["anyOf"][0]["pattern"]
-    assert all(re.fullmatch(pattern, sid) for sid in listed)
-
-
-def test_the_sid_pattern_accepts_every_sid_kind_and_rejects_prefixed_or_free_text_ids():
-    pattern = verdict_schema()["properties"]["claims"]["items"]["properties"]["source_id"]["anyOf"][0]["pattern"]
-    good = ["agent_capabilities", "account_context", "session_state", "fixed_line@1", "list_tickets@12",
-            "prepare_refund@1", "refund-policy#2", "refund-policy#pro-plan-refunds/refunds-we-can-issue-right-away",
-            "roles-and-permissions#billing-permissions"]
-    bad = ["tool_result:prepare_refund@1", "doc:refund-policy#2", "prepare_refund", "list_tickets",
-           "the refund policy", "<source sid=\"x\">", "refund-policy#2 and more", ""]
-    assert all(re.fullmatch(pattern, s) for s in good)
-    assert not any(re.fullmatch(pattern, s) for s in bad)
-
-
-def test_structured_output_kwargs_reach_the_anthropic_request_payload():
-    from langchain_anthropic import ChatAnthropic
-
-    model = ChatAnthropic(model="claude-haiku-5-5", api_key="test-key", max_tokens=64)  # type: ignore[call-arg]
-    kwargs = structured_output_kwargs(model, verdict_schema())
-    payload = model._get_request_payload([HumanMessage("x")], **kwargs)
-    fmt = payload["output_config"]["format"]
-    assert fmt["type"] == "json_schema"
-    source = fmt["schema"]["properties"]["claims"]["items"]["properties"]["source_id"]
-    assert "pattern" in str(source)
-    assert structured_output_kwargs(object(), {}) == {}  # an unknown model (a fake) gets no kwargs
+# --- I1: one code-written sid per block and the citable list (the enum itself: test_gate2_round2) -------------------
 
 
 def test_every_tool_block_has_one_unique_sid_and_the_newest_of_each_tool_is_current():
@@ -207,10 +163,10 @@ def _thread(fillers: int) -> list[Any]:
 def test_a_source_older_than_the_user_turn_bound_is_evicted_and_cannot_be_cited():
     claim = GroundingResult("pass", [{"text": CLAIM[0], "supported": True, "source_id": CLAIM[1]}])
     kept = session_evidence({}, _thread(GATE2_EVIDENCE_USER_TURNS - 2))
-    assert "refund-policy#2" in kept.chunks and 'sid="refund-policy#2"' in kept.text
+    assert [c["chunk_id"] for c in kept.chunks.values()] == ["refund-policy#2"] and 'sid="doc@1"' in kept.text
     assert enforce_code_rules(claim, DRAFT, kept.chunks, tool_names=kept.ids).passed
     gone = session_evidence({}, _thread(GATE2_EVIDENCE_USER_TURNS - 1))
-    assert "refund-policy#2" not in gone.chunks and "refund-policy#2" not in gone.text
+    assert not gone.chunks and 'sid="doc@1"' not in gone.text
     assert not enforce_code_rules(claim, DRAFT, gone.chunks, tool_names=gone.ids).passed
 
 
@@ -223,16 +179,18 @@ def test_the_token_budget_evicts_the_oldest_and_an_oversized_newest_block_evicts
               + _turn(_call("search_kb", "s-2"), _search_msg("s-2", mid))
               + _turn(_call("search_kb", "s-3"), _search_msg("s-3", new)) + [HumanMessage("now")])
     ev = session_evidence({}, thread)
-    assert "refund-policy#new" in ev.chunks and "refund-policy#old" not in ev.chunks
+    ids = {c["chunk_id"]: sid for sid, c in ev.chunks.items()}
+    assert "refund-policy#new" in ids and "refund-policy#old" not in ids
     assert evidence_tokens(ev.text) <= EVIDENCE_MAX_TOKENS
-    assert ev.provenance["refund-policy#new"]["tool_call_id"] == "s-3"
+    assert ev.provenance[ids["refund-policy#new"]]["tool_call_id"] == "s-3"
     assert ev.provenance["agent_capabilities"] == {"kind": "agent_capabilities"}
     huge = {**CHUNK, "chunk_id": "refund-policy#huge", "text": "word " * (EVIDENCE_MAX_TOKENS * 2)}
     small = {**CHUNK, "chunk_id": "refund-policy#small", "text": "Pro refunds: 30 days."}
     thread = (_turn(_call("search_kb", "s-1"), _search_msg("s-1", small))
               + [HumanMessage("now"), _call("search_kb", "s-2"), _search_msg("s-2", huge)])
     ev = session_evidence({}, thread)
-    assert "refund-policy#huge" not in ev.chunks and "refund-policy#small" in ev.chunks
+    kept = {c["chunk_id"] for c in ev.chunks.values()}
+    assert "refund-policy#huge" not in kept and "refund-policy#small" in kept
 
 
 def test_retrieved_text_stays_escaped_through_the_real_wrapper():
@@ -272,7 +230,7 @@ def test_after_a_lapse_only_unverified_public_results_carry_over():
     tier = _turn(_call("search_kb", "s-2"), _search_msg("s-2", {**CHUNK, "chunk_id": "refund-policy#pro"},
                                                          bound_to="U-1|QS-10423"))
     ev = session_evidence({"verified": False}, public + tier + [HumanMessage("now")])
-    assert "refund-policy#2" in ev.chunks and "refund-policy#pro" not in ev.chunks
+    assert [c["chunk_id"] for c in ev.chunks.values()] == ["refund-policy#2"]  # N4: public carries, tier-scoped not
 
 
 async def test_a_reverification_as_another_account_drops_the_first_accounts_results_through_the_agent():
@@ -337,7 +295,7 @@ def test_the_verifier_prompt_describes_session_evidence_and_the_sid_rule():
 
 def test_fixed_line_sids_are_stable_and_the_message_id_is_in_the_provenance():
     # Structured output compiles a grammar per schema; sids that carry turn ids would make every schema new.
-    lines = [AIMessage(f"line {i}", id=f"route-turn-{i}") for i in range(4)]
+    lines = [line_ids.code_line(line_ids.ROUTE, f"turn-{i}", f"line {i}", None) for i in range(4)]
     thread: list[Any] = []
     for m in lines:
         thread += [HumanMessage("q"), m]

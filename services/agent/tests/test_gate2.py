@@ -43,7 +43,7 @@ def verdict_json(supported: bool = True, commitment: bool = False) -> str:
     """What: a verifier reply. Use when: fakes. Inputs: claim supported, commitment. Output: JSON text.
     Side effects: none. Role: fixture."""
     return json.dumps({"claims": [{"text": "Pro refunds are allowed within 30 days", "supported": supported,
-                                   "source_id": "refund-policy#2" if supported else None}],
+                                   "source_id": "doc@1" if supported else None}],  # sid (N1)
                        "commitment": commitment})
 
 
