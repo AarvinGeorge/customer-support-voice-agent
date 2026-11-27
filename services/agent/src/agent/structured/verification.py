@@ -25,7 +25,7 @@ from agent.middleware.router import VERIFY_LINE
 from agent.middleware.tool_guard import clamp_timeout
 from agent.sse import TurnOutcome, TurnStream
 from agent.steps import Step
-from agent.structured.pending import ingress_message_id
+from agent.line_ids import INGRESS, code_line
 from agent.turn_body import SessionFlags, StructuredResult
 from agent.turn_control import TurnControl
 
@@ -48,7 +48,7 @@ def _fixed(stream: TurnStream, control: TurnControl, text: str, end_reason: str,
     outcome.final = FinalAnswer.model_validate({**outcome.final.model_dump(mode="json"), "escalated": escalated,
                                                 "ticket": ticket})
     return StructuredResult(outcome=outcome, messages=[HumanMessage(CARD_SUBMITTED_LINE),
-                                                       AIMessage(text, id=ingress_message_id(control.turn_id))])
+                                                       code_line(INGRESS, control.turn_id, text, control.identity)])
 
 
 def _retry_prompt(stream: TurnStream, text: str, attempts_left: int) -> None:

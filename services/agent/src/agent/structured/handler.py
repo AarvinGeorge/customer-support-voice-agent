@@ -22,6 +22,8 @@ from typing import Any, Awaitable, Callable
 from contracts.events import FinalAnswer
 from langchain_core.messages import AIMessage, HumanMessage
 
+from agent.gates import identity_key
+from agent.line_ids import INGRESS, code_line
 from agent.records import change_record, ticket_record
 from agent.clients.core_agent import CoreAgentClient
 from agent.escalation import Escalator, apology_is_last
@@ -127,7 +129,8 @@ class StructuredInput:
         outcome = TurnOutcome.fixed(text, end_reason=end_reason, say=say)
         if final_extra:
             outcome.final = FinalAnswer.model_validate({**outcome.final.model_dump(mode="json"), **final_extra})
-        msg = AIMessage(say if voice else text, id=ingress_message_id(prep.control.turn_id))
+        bound = identity_key({**prep.values, **(state or {})})  # the verification this line is written under (N3)
+        msg = code_line(INGRESS, prep.control.turn_id, say if voice else text, bound)
         return StructuredResult(outcome=outcome, messages=[self._human(human), msg, *(records or [])], state=state or {})
 
     async def _ticket_offer(self, stream: TurnStream, prep: TurnPrep, human: Any) -> StructuredResult:

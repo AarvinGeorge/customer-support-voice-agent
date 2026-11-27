@@ -12,7 +12,8 @@ the scope_classifier role (data/models.yaml).
 Output: retrieval_decision, apply_retrieval_gate, retrieval_unavailable, run_scope_check, next_weak_streak,
 ScopeClassifier, GateStep, start_gate_step, last_user_text, GATE_TAGS; is_code_line, NO_CLAIMS_DETAIL,
 NO_CLAIMS_REASONS, turn_messages, evidence_window, identity_key, evidence_tokens, EVIDENCE_MAX_TOKENS,
-session_evidence, session_state_text, SessionEvidence, grounded_evidence, answered_with_support, verdict_schema, SID_PATTERN,
+session_evidence, session_state_text, SessionEvidence, grounded_evidence, answered_with_support, verdict_schema, sid_vocabulary, warm_up_verifier, DOC_SIDS_MAX,
+TOOL_RESULTS_MAX,
 GATE2_EVIDENCE_USER_TURNS, record_gate_call, verifier_input, enforce_code_rules, GroundingVerifier, GroundingResult,
 parse_verifier_reply, reply_truncated, citations_for, CLARIFY_LINE, CHECKING_POLICY_LINE, ERROR_DETAILS.
 Side effects: emits step.started, gate and step.completed on the turn stream; sets TurnControl.route; the scope
@@ -224,7 +225,7 @@ class ScopeClassifier:
             record_gate_call(control, self.model)
             _log.warning("scope classifier failed (%s); treated as on-topic", type(exc).__name__)
             return True
-        record_gate_call(control, self.model, reply)
+        record_gate_call(control, model, reply)
         if reply_truncated(reply):
             _log.warning("scope classifier reply truncated (stop_reason max_tokens, output_tokens=%s); treated as "
                          "on-topic", _output_tokens(reply))
@@ -440,20 +441,37 @@ def _grounded_chunks(msg: ToolMessage) -> list[dict[str, Any]]:
     return [c for c in chunks if isinstance(c, dict) and c.get("chunk_id")] if isinstance(chunks, list) else []
 
 
+def _stamp_carried(bound: Any, key: str | None, public: bool) -> bool:
+    """What: the one binding rule for anything carried from an earlier turn (review PR #71 I3, N3, N4): a stamp
+    equal to the current identity is carried; a public result (stamped None: fetched or written while unverified,
+    holding no account data) is carried under any identity; a missing stamp is never carried.
+    Use when: tool results (_carried), code lines (_line_carried), the session ticket list. Inputs: the stamp
+    (_UNBOUND when missing), the current identity key, whether the source kind may be public. Output: bool.
+    Side effects: none. Role: rule. It does not restart the window at a verification change: after A, a lapse and
+    A again, A's earlier results are A's and come back (correct for privacy)."""
+    if bound is _UNBOUND:
+        return False
+    if bound is None:
+        return public
+    return bound == key
+
+
 def _carried(msg: ToolMessage, current: set[int], key: str | None) -> bool:
-    """What: whether a tool result may be evidence now (review PR #71 I3): this turn's results always; an earlier
-    result only when it was fetched under the same verification as now (bound_to equals the current identity:
-    both unverified, or the same user and account), so a lapse or a re-verification as another account drops it,
-    and the window restarts at the last verification change.
-    Use when: session_evidence. Inputs: message, ids of this turn's messages, current identity key.
-    Output: bool. Side effects: none. Role: rule."""
+    """What: whether a tool result may be evidence now: this turn's results always; an earlier one by
+    _stamp_carried, public only for V0 tools (search_kb, create_ticket, request_verification) stamped None, so a
+    public article read before verifying stays citable after it (N4) while account and tier-scoped results stay
+    bound to their identity. Use when: session_evidence. Inputs: message, ids of this turn's messages, current
+    identity key. Output: bool. Side effects: none. Role: rule."""
     if id(msg) in current:
         return True
-    art = _artifact(msg)
-    bound = art.get("bound_to", _UNBOUND)
-    if bound is _UNBOUND or bound != key:
-        return False
-    return key is not None or msg.name in V0_TOOLS
+    return _stamp_carried(_artifact(msg).get("bound_to", _UNBOUND), key, str(msg.name) in V0_TOOLS)
+
+
+def _line_carried(msg: AIMessage, key: str | None) -> bool:
+    """What: whether a code-written line may be a fixed_line source (N3): its bound_to stamp (written by
+    line_ids.code_line) under _stamp_carried, public when stamped None. Use when: session_evidence.
+    Inputs: the line, current identity key. Output: bool. Side effects: none. Role: rule."""
+    return _stamp_carried((msg.response_metadata or {}).get("bound_to", _UNBOUND), key, True)
 
 
 def _turns_ago(messages: list[BaseMessage], index: int) -> int:
@@ -471,7 +489,7 @@ def session_state_text(values: dict[str, Any], messages: list[BaseMessage], cont
     Role: D-071 part 1 (RCA fix C): true statements about the session have a source."""
     verified = bool(values.get("verified"))
     awaiting = control is not None and (control.session_awaiting_verification or control.awaiting_verification)
-    tickets = session_tickets(messages)
+    tickets = session_tickets(messages, identity_key(values))  # bound to the verification (N3)
     yes = {True: "yes", False: "no"}
     return (f"Verified in this conversation: {yes[verified]}. "
             f"Waiting for the customer to verify: {yes[bool(awaiting) and not verified]}. "
@@ -509,7 +527,9 @@ def session_evidence(values: dict[str, Any], messages: list[BaseMessage],
         provenance[ACCOUNT_SOURCE_ID] = {"kind": "account_context"}
     code.append(_source_block(SESSION_SOURCE_ID, "session_state", session_state_text(values, messages, control)))
     provenance[SESSION_SOURCE_ID] = {"kind": "session_state"}
-    fixed = [m for m in messages if isinstance(m, AIMessage) and str(m.id or "").startswith(FIXED_LINE_PREFIXES)]
+    key = identity_key(values)
+    fixed = [m for m in messages if isinstance(m, AIMessage) and str(m.id or "").startswith(FIXED_LINE_PREFIXES)
+             and _line_carried(m, key)]
     last = fixed[-FIXED_LINES_MAX:]
     for k, m in enumerate(last):
         sid = f"fixed_line@{len(last) - k}"  # 1 is the newest
@@ -517,50 +537,83 @@ def session_evidence(values: dict[str, Any], messages: list[BaseMessage],
         provenance[sid] = {"kind": "fixed_line", "message_id": str(m.id)}
     window = evidence_window(messages)
     current = {id(m) for m in turn_messages(messages)}
-    key = identity_key(values)
-    tools = [(i, m) for i, m in enumerate(window) if isinstance(m, ToolMessage) and m.name and m.status != "error"
-             and _carried(m, current, key)]
-    seen: dict[str, int] = {}
-    blocks: list[tuple[str, str, dict[str, Any], dict[str, Any] | None]] = []  # (sid, text, provenance, chunk)
-    for i, m in tools:
+    items: list[dict[str, Any]] = []  # chronological: {"kind", "tool", "body" | "chunk", "prov"}
+    for i, m in enumerate(window):
+        if not (isinstance(m, ToolMessage) and m.name and m.status != "error" and _carried(m, current, key)):
+            continue
         ago = _turns_ago(window, i)
         if m.name == "search_kb":
-            for c in _grounded_chunks(m):
-                cid = str(c["chunk_id"])
-                suspect = "true" if _suspect(c) else None
-                text = _source_block(cid, "doc", str(c.get("text") or ""), article=c.get("article_slug"),
-                                     section=" > ".join(c.get("section_path") or []), turns_ago=ago,
-                                     injection_suspect=suspect)
-                blocks.append((cid, text, {"kind": "doc", "tool": "search_kb", "tool_call_id": m.tool_call_id,
-                                           "turns_ago": ago}, c))
-            continue
-        seen[str(m.name)] = seen.get(str(m.name), 0) + 1
-        sid = f"{m.name}@{seen[str(m.name)]}"
-        blocks.append((sid, str(m.content), {"kind": "tool_result", "tool": str(m.name),
-                                             "tool_call_id": m.tool_call_id, "turns_ago": ago}, None))
-    newest = {f"{name}@{n}" for name, n in seen.items()}
+            items += [{"kind": "doc", "chunk": c, "prov": {"kind": "doc", "tool": "search_kb", "chunk_id":
+                                                           str(c["chunk_id"]), "tool_call_id": m.tool_call_id,
+                                                           "turns_ago": ago}} for c in _grounded_chunks(m)]
+        else:
+            items.append({"kind": "tool_result", "tool": str(m.name), "body": str(m.content),
+                          "prov": {"kind": "tool_result", "tool": str(m.name), "tool_call_id": m.tool_call_id,
+                                   "turns_ago": ago}})
     used = sum(evidence_tokens(b) + 1 for b in code)
-    kept: list[str] = []
-    chunks: dict[str, dict[str, Any]] = {}
-    for sid, body, prov, chunk in reversed(blocks):  # newest first: the budget evicts the oldest
-        if chunk is not None and sid in chunks:
-            continue  # the same chunk retrieved again: the newest copy decides
-        if chunk is None:
-            is_current = sid in newest
-            body = (f'<source sid="{html.escape(sid, quote=True)}" kind="tool_result" '
-                    f'tool="{html.escape(prov["tool"], quote=True)}" turns_ago="{prov["turns_ago"]}" '
-                    f'current="{"true" if is_current else "false"}">{escape_tags(body, ("source",))}</source>')
-            prov = {**prov, "current": is_current}
-        cost = evidence_tokens(body) + 1
+    kept: list[dict[str, Any]] = []
+    seen_chunks: set[str] = set()
+    per_tool: dict[str, int] = {}
+    docs = 0
+    for it in reversed(items):  # newest first: the bounds and the budget evict the oldest
+        if it["kind"] == "doc":
+            cid = it["prov"]["chunk_id"]
+            if cid in seen_chunks or docs >= DOC_SIDS_MAX:
+                continue  # the same chunk again (the newest copy decides), or past the doc bound
+            body = _doc_block(f"doc@{DOC_SIDS_MAX}", it["chunk"], it["prov"]["turns_ago"])
+        else:
+            if per_tool.get(it["tool"], 0) >= TOOL_RESULTS_MAX:
+                continue
+            body = _tool_block(f"{it['tool']}@{TOOL_RESULTS_MAX}", it["tool"], it["prov"]["turns_ago"], True,
+                               it["body"])
+        cost = evidence_tokens(body) + 1  # sized with the longest sid of its kind
         if used + cost > EVIDENCE_MAX_TOKENS:
             continue
         used += cost
-        kept.append(body)
-        provenance[sid] = prov
-        if chunk is not None:
-            chunks[sid] = chunk
+        kept.append(it)
+        if it["kind"] == "doc":
+            seen_chunks.add(it["prov"]["chunk_id"])
+            docs += 1
+        else:
+            per_tool[it["tool"]] = per_tool.get(it["tool"], 0) + 1
+    kept.reverse()  # chronological; sids count from the oldest kept (1)
+    rendered: list[str] = []
+    chunks: dict[str, dict[str, Any]] = {}
+    counts: dict[str, int] = {}
+    n_doc = 0
+    for it in kept:
+        if it["kind"] == "doc":
+            n_doc += 1
+            sid = f"doc@{n_doc}"
+            rendered.append(_doc_block(sid, it["chunk"], it["prov"]["turns_ago"]))
+            chunks[sid] = it["chunk"]
+            provenance[sid] = it["prov"]
+        else:
+            counts[it["tool"]] = counts.get(it["tool"], 0) + 1
+            n = counts[it["tool"]]
+            sid = f"{it['tool']}@{n}"
+            is_current = n == per_tool[it["tool"]]
+            rendered.append(_tool_block(sid, it["tool"], it["prov"]["turns_ago"], is_current, it["body"]))
+            provenance[sid] = {**it["prov"], "current": is_current}
     ids = set(provenance) - set(chunks)
-    return SessionEvidence("\n".join([*code, *reversed(kept)]), ids, chunks, provenance)
+    return SessionEvidence("\n".join([*code, *rendered]), ids, chunks, provenance)
+
+
+def _doc_block(sid: str, chunk: dict[str, Any], ago: int) -> str:
+    """What: one help-article chunk as an evidence block (sid doc@n; the chunk id is in the provenance), its text
+    escaped. Use when: session_evidence. Inputs: sid, chunk, turns ago. Output: text. Side effects: none.
+    Role: helper."""
+    return _source_block(sid, "doc", str(chunk.get("text") or ""), article=chunk.get("article_slug"),
+                         section=" > ".join(chunk.get("section_path") or []), turns_ago=ago,
+                         injection_suspect="true" if _suspect(chunk) else None)
+
+
+def _tool_block(sid: str, tool: str, ago: int, current: bool, body: str) -> str:
+    """What: one core tool result as an evidence block, ToolGuard's wrapped text inside with <source> tags escaped.
+    Use when: session_evidence. Inputs: sid, tool, turns ago, newest of its tool, body. Output: text.
+    Side effects: none. Role: helper."""
+    return (f'<source sid="{html.escape(sid, quote=True)}" kind="tool_result" tool="{html.escape(tool, quote=True)}" '
+            f'turns_ago="{ago}" current="{"true" if current else "false"}">{escape_tags(body, ("source",))}</source>')
 
 
 def grounded_evidence(values: dict[str, Any], messages: list[BaseMessage]) -> tuple[str, set[str]]:
@@ -667,18 +720,38 @@ class GroundingVerifier:
         timeout = clamp_timeout(self.timeout_for(control.mode), control.remaining_s(), minimum_s=self.min_s)
         if timeout is None:
             return GroundingResult("error", reason="no_time")
+        return await self._call(self.model, control, draft, evidence, timeout)
+
+    async def verify_once(self, control: TurnControl, draft: str, evidence: SessionEvidence,
+                          timeout_s: float) -> GroundingResult:
+        """What: one verifier call outside a turn with its own timeout, the model's client timeout raised to match
+        when the model has one (ChatAnthropic, ChatOpenAI: default_request_timeout / request_timeout).
+        Use when: warm_up_verifier. Inputs: throwaway control, draft, evidence, timeout. Output: GroundingResult.
+        Side effects: one model call. Role: the start-up warm-up path (review PR #71 N2)."""
+        model = self.model
+        for name in ("default_request_timeout", "request_timeout"):
+            if name in getattr(type(model), "model_fields", {}):
+                model = model.model_copy(update={name: timeout_s})
+                break
+        return await self._call(model, control, draft, evidence, timeout_s)
+
+    async def _call(self, model: Any, control: TurnControl, draft: str, evidence: SessionEvidence,
+                    timeout: float) -> GroundingResult:
+        """What: the verifier call shared by verify and verify_once. Use when: both. Inputs: model, control, draft,
+        evidence, timeout. Output: GroundingResult. Side effects: one model call; usage on the control.
+        Role: helper (fail closed)."""
         citable = evidence.citable
         msgs = [SystemMessage(VERIFIER_PROMPT), HumanMessage(verifier_input(evidence.text, draft, citable))]
-        kwargs = self.output_kwargs(self.model, verdict_schema())
+        kwargs = self.output_kwargs(model, verdict_schema())
         try:
-            reply = await asyncio.wait_for(self.model.ainvoke(msgs, config={"tags": list(GATE_TAGS)}, **kwargs),
+            reply = await asyncio.wait_for(model.ainvoke(msgs, config={"tags": list(GATE_TAGS)}, **kwargs),
                                            timeout)
         except Exception as exc:  # noqa: BLE001 - doc 07 s8.1: fail closed
-            record_gate_call(control, self.model)
+            record_gate_call(control, model)
             reason = "timeout" if isinstance(exc, TimeoutError) else "exception"
             _log.warning("grounding verifier failed (%s, reason=%s); counted as a fail", type(exc).__name__, reason)
             return GroundingResult("error", reason=reason)
-        record_gate_call(control, self.model, reply)
+        record_gate_call(control, model, reply)
         if reply_truncated(reply):
             _log.warning("grounding verifier reply truncated (stop_reason max_tokens, output_tokens=%s); failed "
                          "closed", _output_tokens(reply))
@@ -701,21 +774,36 @@ def verifier_input(evidence: str, draft: str, citable: list[str] | None = None) 
     return f"<evidence>\n{ev}\n</evidence>\n<citable_ids>\n{ids}\n</citable_ids>\n<draft>\n{dr}\n</draft>"
 
 
-# Every sid session_evidence writes: the code sources, "<tool>@<n>" (tool results and fixed_line@n), and chunk ids
-# "<article>#<section path>". Anything else (a wrapper prefix, a bare tool name, free text) cannot be produced.
-SID_PATTERN = r"^(agent_capabilities|account_context|session_state|[a-z_]+@[0-9]+|[a-z0-9-]+#[a-z0-9/_-]+)$"
+DOC_SIDS_MAX = 32  # newest help-article chunks kept as doc@1..32 (3 full searches of k=8 plus margin)
+TOOL_RESULTS_MAX = limits.TOOL_CALLS_PER_TURN  # newest results kept per tool, <tool>@1..8
+
+
+def sid_vocabulary() -> list[str]:
+    """What: every sid session_evidence can write, as one closed list: the three code ids, fixed_line@1..3,
+    <tool>@1..TOOL_RESULTS_MAX for each model tool but search_kb (contracts.tools.TOOL_ARGS), doc@1..DOC_SIDS_MAX.
+    It does not depend on the corpus (chunk ids live in the provenance, not in the sid), so it never changes
+    between calls or ingests. Use when: verdict_schema. Inputs: none. Output: list, fixed order. Side effects: none.
+    Role: review PR #71 N1: the vocabulary the structured output enum carries."""
+    from contracts.tools import TOOL_ARGS
+
+    tools = sorted(set(TOOL_ARGS) - {"search_kb"})
+    return ([ACCOUNT_SOURCE_ID, CAPABILITIES_SOURCE_ID, SESSION_SOURCE_ID]
+            + [f"fixed_line@{n}" for n in range(1, FIXED_LINES_MAX + 1)]
+            + [f"{t}@{n}" for t in tools for n in range(1, TOOL_RESULTS_MAX + 1)]
+            + [f"doc@{n}" for n in range(1, DOC_SIDS_MAX + 1)])
 
 
 def verdict_schema() -> dict[str, Any]:
-    """What: the JSON schema of every verifier reply: source_id matches SID_PATTERN or is null, no_claims_reason is
-    one of NO_CLAIMS_REASONS or null; no other keys. The schema is the same on every call.
+    """What: the JSON schema of every verifier reply: source_id is one of sid_vocabulary() (a real enum, which the
+    provider schema transform keeps) or null, no_claims_reason one of NO_CLAIMS_REASONS or null; no other keys.
+    The schema is identical on every call, so the provider compiles its grammar once (warm_up_verifier at start).
     Use when: GroundingVerifier.verify (structured output, agent.models.structured). Inputs: none.
     Output: JSON schema dict. Side effects: none.
-    Role: review PR #71 I1 (a prefixed or invented id form cannot be produced, so no tolerance parsing). One stable
-    schema, because the provider compiles a grammar per new schema: a per-call enum measured p50 2.58 s with 1 of 5
-    over the 3 s voice limit (no structured output: p50 1.04 s). Which sids a given call may cite is the code-written
-    <citable_ids> list plus the code rule (enforce_code_rules), not the schema."""
-    source: dict[str, Any] = {"anyOf": [{"type": "string", "pattern": SID_PATTERN}, {"type": "null"}]}
+    Role: review PR #71 I1 and N1: a sid outside the vocabulary (a wrapper prefix, a bare tool name, free text)
+    cannot be produced. Which vocabulary sids this call may cite is the code-written <citable_ids> list plus the
+    code rule (enforce_code_rules). A per-call enum breached the 3 s voice limit (new grammar per call), and a
+    pattern is dropped by anthropic.transform_schema into the description, so neither is used."""
+    source: dict[str, Any] = {"anyOf": [{"type": "string", "enum": sid_vocabulary()}, {"type": "null"}]}
     claim = {"type": "object", "additionalProperties": False, "required": ["text", "supported", "source_id"],
              "properties": {"text": {"type": "string"}, "supported": {"type": "boolean"}, "source_id": source}}
     return {"type": "object", "additionalProperties": False,
@@ -723,6 +811,33 @@ def verdict_schema() -> dict[str, Any]:
             "properties": {"claims": {"type": "array", "items": claim}, "commitment": {"type": "boolean"},
                            "no_claims_reason": {"anyOf": [{"type": "string", "enum": sorted(NO_CLAIMS_REASONS)},
                                                           {"type": "null"}]}}}
+
+
+WARM_UP_TIMEOUT_S = 15.0
+_WARM_UP_DRAFT = "Hello, how can I help?"
+
+
+async def warm_up_verifier(verifier: "GroundingVerifier | None", *, timeout_s: float = WARM_UP_TIMEOUT_S) -> bool:
+    """What: one verifier call with verdict_schema() and a fixed tiny input (the code sources only, a greeting
+    draft), so the provider compiles the grammar before the first customer turn (review PR #71 N2).
+    Use when: agent startup, as a background task (agent.composition); never awaited by readiness.
+    Inputs: the verifier (None: skipped), its own timeout. Output: True when a verdict came back, else False.
+    Side effects: one model call on a throwaway TurnControl (no turn, no usage); one log line. Never raises."""
+    if verifier is None:
+        return False
+    control = TurnControl(session_id="warm-up", turn_id="warm-up", mode="chat")
+    start = asyncio.get_running_loop().time()
+    try:
+        evidence = session_evidence({}, [HumanMessage("hi")], control)
+        result = await asyncio.wait_for(verifier.verify_once(control, _WARM_UP_DRAFT, evidence, timeout_s), timeout_s)
+    except Exception as exc:  # noqa: BLE001 - a warm-up never fails startup
+        _log.warning("verifier warm-up failed (%s) after %.2f s", type(exc).__name__,
+                     asyncio.get_running_loop().time() - start)
+        return False
+    took = asyncio.get_running_loop().time() - start
+    ok = result.verdict != "error"
+    _log.info("verifier warm-up %s in %.2f s (reason=%s)", "done" if ok else "failed", took, result.reason)
+    return ok
 
 
 def _suspect(chunk: dict[str, Any]) -> bool:

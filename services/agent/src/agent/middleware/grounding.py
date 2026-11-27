@@ -28,7 +28,7 @@ from contracts import limits
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import AIMessage, RemoveMessage
 
-from agent.line_ids import GATE2, line_id
+from agent.line_ids import GATE2, code_line
 from agent.gates import (
     CHECKING_POLICY_LINE,
     CLARIFY_LINE,
@@ -108,7 +108,7 @@ class GroundingMiddleware(AgentMiddleware):
                     status="error" if error else "ok", reason=result.reason, detail=detail, sources=sources, **counts)
         removal = RemoveMessage(id=str(draft.id))
         if reason is None:
-            line = AIMessage(CLARIFY_LINE, id=line_id(GATE2, control.turn_id))
+            line = code_line(GATE2, control.turn_id, CLARIFY_LINE, control.identity)
             control.gate_message_id = line.id
             return {"messages": [removal, line], "grounding_failures": failures + 1, "jump_to": "end"}
         control.route = None  # no route can be pending here: one would have ended the turn before this model call
