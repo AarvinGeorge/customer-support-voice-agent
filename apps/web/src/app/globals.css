@@ -26,6 +26,10 @@
 
 /* Light (default theme). Hex values are the approved tokens; never #000 or #fff. */
 :root {
+  /* Room kept clear above the sticky input bar and below the sticky header when focus scrolls a
+     control into view (WCAG 2.4.11). The bar is about 126 px tall, more with the counter. */
+  --input-bar-clearance: 10rem;
+  --header-clearance: 4.5rem;
   --paper: #fcfaf6;
   --margin: #f5f2ed;
   --raised: #fffdfb;
@@ -158,6 +162,8 @@
   }
 
   html {
+    scroll-padding-top: var(--header-clearance);
+    scroll-padding-bottom: var(--input-bar-clearance);
     background-color: var(--color-background);
     color: var(--color-foreground);
   }

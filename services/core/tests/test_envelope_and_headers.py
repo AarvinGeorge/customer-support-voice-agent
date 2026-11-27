@@ -133,11 +133,11 @@ def test_non_uuid_session_header_is_422_never_500_never_dropped(client, bad):
 
 
 def test_non_uuid_session_path_parameter_is_422(client):
-    """What: GET /v1/sessions/{session_id}/claims with a non-uuid id is 422 (not 501, not 500); a uuid passes the
+    """What: GET /v1/sessions/{session_id}/claims with a non-uuid id is 422 (not 503, not 500); a uuid passes the
     gate. Use when: always. Inputs: client. Output: assertions. Side effects: none. Role: review PR19 I2, path side."""
     r = client.get("/v1/sessions/S-1/claims", headers=AGENT)
     assert r.status_code == 422 and r.json()["error"]["details"]["errors"][0]["loc"] == ["path", "session_id"]
-    assert client.get(f"/v1/sessions/{SESSION}/claims", headers=AGENT).status_code == 501
+    assert client.get(f"/v1/sessions/{SESSION}/claims", headers=AGENT).status_code == 503
 
 
 def test_scope_is_still_checked_before_the_session_header(client):
