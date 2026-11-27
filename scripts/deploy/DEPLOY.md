@@ -14,7 +14,7 @@ Everything below is prepared and was proven on a laptop with `--local` (see the 
 | Host stack | `docker` with the compose plugin (2.24 or later, for `!reset`), `git`, `curl`, `python3` 3.10 or later (all standard; the script uses them); `gh` only if you deploy by hand without `--manifest` |
 | Registry read access | the images are private packages under `ghcr.io/aarvingeorge/customer-support-voice-agent/`. The workflow logs the VM in for the run with its own read-only token and logs out after. For a deploy or rollback by hand, log in once: `docker login ghcr.io -u <github user>` with a classic token that has only `read:packages`. Images already on the VM (a rollback) need no login |
 | Spend caps | provider spend caps and rate limits set BEFORE the URL is shared (CLAUDE.md s6) |
-| Web build variables | repository variables `LANGSMITH_PROJECT` (the LangSmith project name) and `LANGSMITH_PROJECT_URL` (the project page, `https://...`), set BEFORE the commit on `main` that will be released: CI bakes them into the web image (the drawer's trace link). On a push to `main` the `images` job FAILS when either is empty or the URL is not https, so no release can carry an empty link; on a pull request it only warns |
+| Web build variables | repository variables `LANGSMITH_PROJECT` (the LangSmith project name) and `LANGSMITH_PROJECT_URL` (the project page, `https://...`), set BEFORE the commit on `main` that will be released: the `images` workflow bakes them into the web image (the drawer's trace link) and FAILS, before building, when either is empty or the URL is not https, so no release can carry an empty link |
 
 ## 1. One-time VM setup
 
@@ -47,7 +47,7 @@ Then on the VM add the edge and behaviour settings from the table below (`SITE_A
 | Internal | `CORE_TOKEN_AGENT`, `CORE_TOKEN_COMMIT`, `CORE_TOKEN_OPS`, `KNOWLEDGE_TOKEN_AGENT`, `SESSION_SIGNING_KEY`, `PIN_PEPPER`, `OPERATOR_TOKEN_KEY`, `DEMO_ACCESS_CODE`, `OPERATOR_ACCESS_CODE` |
 | Postgres | `POSTGRES_PASSWORD`, `AGENT_OWNER_PASSWORD`, `AGENT_APP_PASSWORD`, `CORE_OWNER_PASSWORD`, `CORE_APP_PASSWORD`, `KNOWLEDGE_OWNER_PASSWORD`, `KNOWLEDGE_APP_PASSWORD`, and the six URLs `AGENT_DB_URL`, `CORE_DB_URL`, `KNOWLEDGE_DB_URL`, `AGENT_DB_OWNER_URL`, `CORE_DB_OWNER_URL`, `KNOWLEDGE_DB_OWNER_URL` (host is `postgres`; keys.py composes them) |
 | Edge | secrets `SITE_ADDRESS` (the bare domain, no scheme) and `SITE_ORIGIN` (`https://` plus the same domain) |
-| Variables (repository variables) | `DEMO_FAULTS_ENABLED` and `FEATURE_A4` (REQUIRED, `true` or `false`); `LANGSMITH_PROJECT` and `LANGSMITH_PROJECT_URL` (REQUIRED by the CI `images` job on `main`, build time only, see section 0); optional `EDGE_SUBNET` and `FORWARDED_ALLOW_IPS` (equal), `LANGSMITH_TRACING`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT`, `REDIS_URL`, `CORE_URL`, `KNOWLEDGE_URL` |
+| Variables (repository variables) | `DEMO_FAULTS_ENABLED` and `FEATURE_A4` (REQUIRED, `true` or `false`); `LANGSMITH_PROJECT` and `LANGSMITH_PROJECT_URL` (REQUIRED by the `images` workflow, build time only, see section 0); optional `EDGE_SUBNET` and `FORWARDED_ALLOW_IPS` (equal), `LANGSMITH_TRACING`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT`, `REDIS_URL`, `CORE_URL`, `KNOWLEDGE_URL` |
 
 ### Settings that change behaviour (set explicitly; preflight refuses the first two if unset)
 
@@ -69,8 +69,8 @@ The artifact production runs is the one CI built after the gates. Nothing rebuil
 
 | Stage | Where | What happens |
 |---|---|---|
-| build once | `.github/workflows/ci.yml`, job `images`, on every push to `main` | runs only after every gate job is green (`needs`); `docker buildx bake -f compose.yaml` builds `agent`, `core`, `knowledge` and `web` from the same build sections local Compose uses, labels them (`org.opencontainers.image.source`, `.revision`, `.title`), pushes `ghcr.io/aarvingeorge/customer-support-voice-agent/<image>:<sha>` with the run's `GITHUB_TOKEN` (`packages: write`, `contents: read`), reads each digest back from GHCR, and uploads the artifact `images-<sha>` (`images-<sha>.json`: revision, repo, per image digest and `<repo>/<image>@sha256:...`). The migrate, seed and ingest jobs use their service's image (same Dockerfile and `SERVICE` argument) |
-| dry run on a PR | the same job on a same-repo pull request | the same build and push under the tag `pr-<n>`, which no release can name |
+| build once | `.github/workflows/images.yml`, on `workflow_run` when `ci` completes on `main` | runs only for a `ci` run that passed on a push to `main` (ci.yml itself stays gate-only, D-068), and builds that run's commit (`head_sha`, checked to be on `main` with a green ci run); `docker buildx bake -f compose.yaml` builds `agent`, `core`, `knowledge` and `web` from the same build sections local Compose uses, labels them (`org.opencontainers.image.source`, `.revision`, `.title`), pushes `ghcr.io/aarvingeorge/customer-support-voice-agent/<image>:<sha>` with the run's `GITHUB_TOKEN` (`packages: write`, `contents: read`, `actions: read`), reads each digest back from GHCR, and uploads the artifact `images-<sha>` (`images-<sha>.json`: revision, repo, per image digest and `<repo>/<image>@sha256:...`). The migrate, seed and ingest jobs use their service's image (same Dockerfile and `SERVICE` argument). Run it by hand (`gh workflow run images.yml -f sha=<sha>`) only to rebuild a green commit that has no images |
+| dry run | none per pull request | a `workflow_run` workflow runs from `main` only, so pull requests build no images; the same bake, push and read-back steps ran on PR #77 (tag `pr-77`, run 46058863975) before they moved out of ci.yml |
 | release | `.github/workflows/release.yml` | push a tag `r-NN` (or `r-NN.N` for a fix release) on a commit of `main`, or run it from the Actions tab with `tag` and `sha`. It refuses a commit not on `main` or without a green `ci` run on `main`, takes that run's `images-<sha>` artifact (no build), writes `release-<tag>.json`, validates it as the deploy will, reads every digest back from GHCR and attaches the file to GitHub Release `<tag>` |
 | deploy | `scripts/deploy/deploy.sh up --tag r-NN` on the VM, or `.github/workflows/deploy.yml` (Actions tab, enter the tag) | below |
 
@@ -79,7 +79,7 @@ Commands:
 2. `git tag r-01 <sha> && git push origin r-01` (or run the `release` workflow with `tag` and `sha`).
 3. On the VM: `scripts/deploy/deploy.sh up --tag r-01` (it runs `gh release download r-01` for the manifest when it has none; or pass `--manifest release-r-01.json`), or run the `deploy` workflow with the tag.
 
-The web image bakes two public build arguments (`NEXT_PUBLIC_LANGSMITH_PROJECT`, `NEXT_PUBLIC_LANGSMITH_PROJECT_URL`) from the repository variables `LANGSMITH_PROJECT` and `LANGSMITH_PROJECT_URL` at CI build time; changing them needs a new build (a new commit on `main`), not a VM setting. The `images` job refuses to build on `main` while either is empty (step "Require the web image's public build arguments").
+The web image bakes two public build arguments (`NEXT_PUBLIC_LANGSMITH_PROJECT`, `NEXT_PUBLIC_LANGSMITH_PROJECT_URL`) from the repository variables `LANGSMITH_PROJECT` and `LANGSMITH_PROJECT_URL` at CI build time; changing them needs a new build (a new commit on `main`), not a VM setting. The `images` workflow refuses to build while either is empty (step "Require the web image's public build arguments").
 
 ### First run of the release path: rehearsal release r-00 (do this once, right after this change merges, before Sat 20:00)
 
@@ -89,7 +89,8 @@ gh variable set LANGSMITH_PROJECT --body '<project name>'                   # ow
 gh variable set LANGSMITH_PROJECT_URL --body 'https://smith.langchain.com/...'
 git fetch origin && sha="$(git rev-parse origin/main)"                       # the merge commit (or a later one)
 gh run list --workflow ci.yml --branch main --event push --commit "$sha" --json status,conclusion,databaseId
-#   wait until it shows conclusion "success" (its images job pushed the four <sha> images)
+#   wait until it shows conclusion "success", then for the images workflow of that commit:
+gh api "repos/AarvinGeorge/customer-support-voice-agent/actions/artifacts?name=images-$sha" --jq '.artifacts[].name'   # expect images-<sha>
 git tag r-00 "$sha" && git push origin r-00                                  # triggers release.yml
 gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
 gh release view r-00 --json assets --jq '.assets[].name'                     # expect: release-r-00.json
@@ -157,9 +158,9 @@ Limits, stated: migrations are forward-only and assumed additive, so old code no
 
 ## 8. Proven locally (not on a VM)
 
-D-072 path (build once, deploy by digest): images built with the CI bake command, pushed to a throwaway local registry, then `--local up` of two releases and a `rollback` to the first release's digests on real Docker, with the images removed from the host first so every one was pulled; plus an image inspection showing no `.env` file or planted secret in any image (control: the old ignore rules let two nested `.env` files in). The GHCR push itself is proven by the `images` job on the pull request (tag `pr-<n>`). See `build-log/reports/ghcr-promote.md`.
+D-072 path (build once, deploy by digest): images built with the CI bake command, pushed to a throwaway local registry, then `--local up` of two releases and a `rollback` to the first release's digests on real Docker, with the images removed from the host first so every one was pulled; plus an image inspection showing no `.env` file or planted secret in any image (control: the old ignore rules let two nested `.env` files in). The GHCR push was proven by the same steps on PR #77 (tag `pr-77`, run 46058863975), before they moved to `images.yml`. See `build-log/reports/ghcr-promote.md`.
 
-Not run yet: `release.yml` (first run is the r-00 rehearsal in section 3), the GHCR login over SSH and `gh release download` in `deploy.yml` (first run with `r-01`).
+Not run yet: `images.yml` (first run after the merge to `main`; its steps ran on PR #77 inside the old ci job), `release.yml` (first run is the r-00 rehearsal in section 3), the GHCR login over SSH and `gh release download` in `deploy.yml` (first run with `r-01`).
 
 Earlier (build on the VM, superseded by D-072):
 

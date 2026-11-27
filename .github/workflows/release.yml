@@ -2,10 +2,10 @@
 #   to a GitHub Release. Nothing is built here.
 # Use when: the owner pushes a tag r-NN (or r-NN.N for a post-release fix) on a commit of main, or runs this by hand from the
 #   Actions tab with `tag` and `sha` (the release then creates the tag at that sha).
-# Inputs: the tag and its commit. The commit must be on main and its `ci` run on main (push event) must be green, which includes
-#   the `images` job that pushed the four images after every gate and uploaded the images-<sha> artifact.
+# Inputs: the tag and its commit. The commit must be on main, its `ci` run on main (push event) must be green, and the `images`
+#   workflow (run after that ci run) must have pushed the four images and uploaded the images-<sha> artifact.
 # Output: GitHub Release <tag> with the asset release-<tag>.json (schema 1: revision, repo, per image digest and digest reference).
-# Side effects: creates the release (and on workflow_dispatch the tag). Reads the ci run's artifact and GHCR; writes no image.
+# Side effects: creates the release (and on workflow_dispatch the tag). Reads the images run's artifact and GHCR; writes no image.
 # Role: the only way a set of digests becomes deployable; scripts/deploy/deploy.sh deploys a release tag from this asset.
 name: release
 
@@ -25,7 +25,7 @@ on:
 
 permissions:
   contents: write   # create the release (and the tag on workflow_dispatch)
-  actions: read     # download the images-<sha> artifact of the ci run
+  actions: read     # read the ci run and download the images-<sha> artifact of the images run
   packages: read    # read the digests back from GHCR
 
 concurrency:
@@ -58,15 +58,20 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "SHA=$SHA" >> "$GITHUB_ENV"
           echo "release $TAG at $SHA"
-      - name: Take the images manifest from the green ci run of that commit on main (never a new build)
+      - name: Take the images manifest that the images workflow wrote for that commit after its green ci run (never a new build)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          run_id="$(gh run list --workflow ci.yml --branch main --event push --commit "$SHA" --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
-          [ -n "$run_id" ] || { echo "::error::no green ci run on main for $SHA (its images job pushes the digests): merge it and wait for ci"; exit 1; }
-          gh run download "$run_id" --name "images-$SHA" --dir "$RUNNER_TEMP/images"
-          echo "images manifest from ci run $run_id"
+          ci_run="$(gh run list --workflow ci.yml --branch main --event push --commit "$SHA" --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          [ -n "$ci_run" ] || { echo "::error::no green ci run on main for $SHA: merge it and wait for ci, then for the images workflow"; exit 1; }
+          # The artifact is found by its name; it must come from a successful run of the images workflow.
+          img_run="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=images-$SHA&per_page=20" --jq '[.artifacts[] | select(.expired == false)][0].workflow_run.id // empty')"
+          [ -n "$img_run" ] || { echo "::error::no images-$SHA artifact: the images workflow has not run (or failed) for $SHA"; exit 1; }
+          wf="$(gh run view "$img_run" --json workflowName,conclusion --jq '.workflowName + " " + .conclusion')"
+          [ "$wf" = "images success" ] || { echo "::error::artifact images-$SHA comes from run $img_run ($wf), not a successful images run"; exit 1; }
+          gh run download "$img_run" --name "images-$SHA" --dir "$RUNNER_TEMP/images"
+          echo "images manifest from images run $img_run, gated by ci run $ci_run"
       - name: Write release-<tag>.json and validate it as the deploy will
         run: |
           set -euo pipefail

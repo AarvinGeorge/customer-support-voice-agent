@@ -1,5 +1,5 @@
 """What: writes and checks the image manifests that carry the tested image digests from CI to the VM (D-072).
-Use when: CI's `images` job (subcommand `images`, after `docker buildx bake --push`), the release workflow (subcommand `release`)
+Use when: the images workflow (.github/workflows/images.yml, subcommand `images`, after `docker buildx bake --push`), the release workflow (subcommand `release`)
   and scripts/deploy/deploy.sh (subcommand `env`, before any image is pulled). See scripts/deploy/DEPLOY.md section 3.
 Inputs: `images --bake-metadata FILE --revision SHA --repo REPO --name NAME [--run-url URL] --out FILE`;
   `release --images FILE --tag TAG --revision SHA --out FILE`; `env --manifest FILE --tag TAG [--repo REPO]`.
@@ -53,7 +53,7 @@ def _load(path: str) -> dict[str, Any]:
 
 def build_images(meta: dict[str, Any], revision: str, repo: str, name: str, run_url: str) -> dict[str, Any]:
     """What: turn `docker buildx bake --metadata-file` output into an images manifest. Use when: CI after the push.
-    Inputs: bake metadata, the commit sha, the image repo prefix, the pushed tag name (sha or pr-N), the CI run URL.
+    Inputs: bake metadata, the commit sha, the image repo prefix, the pushed tag name (the sha), the run URL.
     Output: dict with schema, kind "images", revision, repo, run_url and per image digest, ref (repo/name@digest) and tag.
     Side effects: none. Role: the digests the gates' run pushed are the only ones a release may name."""
     _need(bool(REVISION.match(revision)), f"revision must be a 40-character commit sha, got {revision!r}")
@@ -129,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--bake-metadata", required=True)
     a.add_argument("--revision", required=True)
     a.add_argument("--repo", required=True)
-    a.add_argument("--name", required=True, help="the tag pushed: the commit sha on main, pr-N on a pull request")
+    a.add_argument("--name", required=True, help="the tag pushed (the commit sha)")
     a.add_argument("--run-url", default="")
     a.add_argument("--out", required=True)
     r = sub.add_parser("release")

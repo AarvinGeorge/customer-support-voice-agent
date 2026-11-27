@@ -190,7 +190,12 @@ run_job() {
         else cp .env.example .env; made=1; fi
         rc=0; python3 infra/tests/check_topology.py || rc=$?
         [ "$made" = 1 ] && rm -f .env
-        exit "$rc"' ;;
+        exit "$rc"'
+      # The deploy form (D-072): every built service takes a digest-pinned release image and has no build section left.
+      run_step "compose release form" . 'd="sha256:$(printf "0%.0s" $(seq 64))"
+        AGENT_IMAGE="ghcr.io/x/agent@$d" CORE_IMAGE="ghcr.io/x/core@$d" KNOWLEDGE_IMAGE="ghcr.io/x/knowledge@$d" WEB_IMAGE="ghcr.io/x/web@$d" \
+          docker compose --env-file .env.example -f compose.yaml -f scripts/deploy/compose.release.yaml --profile seed --profile jobs config --format json \
+          | python3 -c "import json,sys; s=json.load(sys.stdin)[\"services\"]; b=[n for n,v in s.items() if \"build\" in v]; u=[n for n,v in s.items() if \"@sha256:\" not in v.get(\"image\",\"\") and n not in (\"caddy\",\"postgres\",\"redis\")]; assert not b and not u, (b, u); print(\"release form: no build section;\", len(s) - 3, \"services pinned by digest\")"' ;;
     pg-tests)
       ensure_uv
       local proj="${CI_PG_PROJECT:-cs-localci}"

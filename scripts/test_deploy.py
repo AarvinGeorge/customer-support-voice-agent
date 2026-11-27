@@ -768,15 +768,15 @@ def test_rollback_checks_the_checkout_against_the_manifest(tmp_path: Path) -> No
 
 
 def _build_args_guard() -> str:
-    """What: the run script of the images job step that requires the web image's public build arguments. Use when: pytest.
-    Inputs: none. Output: the script text. Side effects: reads a file. Role: lets the test execute the real guard."""
-    steps = _wf("ci.yml")["jobs"]["images"]["steps"]
+    """What: the run script of the images workflow step that requires the web image's public build arguments.
+    Use when: pytest. Inputs: none. Output: the script text. Side effects: reads a file. Role: lets the test execute the real guard."""
+    steps = _wf("images.yml")["jobs"]["images"]["steps"]
     return next(st["run"] for st in steps if st.get("name", "").startswith("Require the web image's public build arguments"))
 
 
-def test_images_job_fails_on_main_without_the_langsmith_build_arguments(tmp_path: Path) -> None:
-    """What: the guard step fails on a push to main when LANGSMITH_PROJECT_URL or LANGSMITH_PROJECT is empty or not https,
-    passes when both are set, and only warns on a pull request. Use when: pytest. Inputs: tmp. Output: assert.
+def test_images_fail_without_the_langsmith_build_arguments() -> None:
+    """What: the guard step fails when LANGSMITH_PROJECT_URL or LANGSMITH_PROJECT is empty or the URL is not https, and passes
+    when both are set; it comes before the bake. Use when: pytest. Inputs: none. Output: assert.
     Side effects: runs the step's bash with a clean environment (no docker, no network). Role: review I2 (an empty drawer link
     would be baked into the release image and could only change with a new commit)."""
     script = _build_args_guard()
@@ -787,13 +787,13 @@ def test_images_job_fails_on_main_without_the_langsmith_build_arguments(tmp_path
         return subprocess.run(["bash", "-c", script], env={"PATH": os.environ["PATH"], **env}, capture_output=True, text=True, timeout=30)
 
     url = "https://smith.langchain.com/o/0000/projects/p/1111"
-    assert go(EVENT="push", LANGSMITH_PROJECT="cs-voice-agent", LANGSMITH_PROJECT_URL=url).returncode == 0
+    assert go(LANGSMITH_PROJECT="cs-voice-agent", LANGSMITH_PROJECT_URL=url).returncode == 0
     for bad in ({"LANGSMITH_PROJECT_URL": ""}, {"LANGSMITH_PROJECT_URL": "smith.langchain.com/x"}, {"LANGSMITH_PROJECT": ""}):
-        env = {"EVENT": "push", "LANGSMITH_PROJECT": "cs-voice-agent", "LANGSMITH_PROJECT_URL": url, **bad}
-        p = go(**env)
+        p = go(**{"LANGSMITH_PROJECT": "cs-voice-agent", "LANGSMITH_PROJECT_URL": url, **bad})
         assert p.returncode != 0 and "::error" in p.stdout, (bad, p.stdout)
-    p = go(EVENT="pull_request", LANGSMITH_PROJECT="", LANGSMITH_PROJECT_URL="")
-    assert p.returncode == 0 and "::warning" in p.stdout
+    names = [st.get("name", st.get("uses", "")) for st in _wf("images.yml")["jobs"]["images"]["steps"]]
+    guard = next(i for i, n in enumerate(names) if n.startswith("Require the web image"))
+    assert guard < next(i for i, n in enumerate(names) if n.startswith("Build agent, core"))
 
 
 # ---- release_manifest.py (the helper CI, the release workflow and deploy.sh share) ----
@@ -869,26 +869,37 @@ def _on(wf: dict[Any, Any]) -> Any:
     return wf.get("on", wf.get(True))
 
 
-def test_images_job_runs_after_every_gate_with_least_privilege() -> None:
-    """What: ci.yml's images job needs every other job, may write packages and read contents only, pushes only for a push to
-    main or a same-repo pull request, and tags main builds by commit sha. Use when: pytest. Inputs: none. Output: assert.
-    Side effects: reads a file. Role: build once, after the gates (D-072)."""
-    wf = _wf("ci.yml")
-    jobs = wf["jobs"]
-    img = jobs["images"]
-    assert set(img["needs"]) == set(jobs) - {"images"}
-    assert img["permissions"] == {"contents": "read", "packages": "write"}
+def test_images_workflow_runs_only_after_a_green_ci_on_main_with_least_privilege() -> None:
+    """What: images.yml runs on ci completing on main (or by hand with a sha it re-checks), builds only for a successful ci run
+    of a push, builds the tested commit (head_sha, not main's tip), may write packages and read contents and actions only, and
+    ci.yml itself writes no package. Use when: pytest. Inputs: none. Output: assert. Side effects: reads files.
+    Role: build once, after the gates (D-072), with ci.yml kept gate-only (D-068)."""
+    wf = _wf("images.yml")
+    on = _on(wf)
+    assert on["workflow_run"] == {"workflows": ["ci"], "types": ["completed"], "branches": ["main"]}
+    assert set(on) == {"workflow_run", "workflow_dispatch"} and set(on["workflow_dispatch"]["inputs"]) == {"sha"}
     assert wf["permissions"] == {"contents": "read"}
-    assert "refs/heads/main" in img["if"] and "head.repo.full_name == github.repository" in img["if"]
-    text = json.dumps(img)
+    job = wf["jobs"]["images"]
+    assert job["permissions"] == {"contents": "read", "packages": "write", "actions": "read"}
+    assert "workflow_run.conclusion == 'success'" in job["if"] and "workflow_run.event == 'push'" in job["if"]
+    assert job["env"]["SHA"].startswith("${{ github.event.workflow_run.head_sha")
+    assert job["steps"][0]["with"]["ref"] == "${{ env.SHA }}"
+    text = json.dumps(job)
+    assert "GITHUB_SHA" not in text  # on workflow_run it is main's tip, not the tested commit
+    assert "--branch main --event push" in text and "--status success" in text and "merge-base --is-ancestor" in text
     assert "release_manifest.py images" in text and "upload-artifact" in text and "--push" in text
     assert "org.opencontainers.image.source" in text and "org.opencontainers.image.revision" in text
-    assert "images-${{ github.sha }}" in text
+    assert "images-${{ env.SHA }}" in text
+    uses = [st["uses"] for st in job["steps"] if "uses" in st and st["uses"].startswith("docker/")]
+    assert uses and all(re.search(r"@[0-9a-f]{40}$", u) for u in uses)  # pinned by commit in the job that can write packages
+    ci = _wf("ci.yml")
+    assert "images" not in ci["jobs"] and ci["permissions"] == {"contents": "read"}
+    assert all("packages" not in job.get("permissions", {}) for job in ci["jobs"].values())
 
 
 def test_release_workflow_promotes_only_main_digests() -> None:
     """What: release.yml runs on an r-* tag or by hand with tag and sha, can write contents (the release) and read actions
-    and packages only, and takes the images manifest from the ci run of that sha on main. Use when: pytest. Inputs: none.
+    and packages only, requires the green ci run of that sha on main, and takes the manifest from a successful images run. Use when: pytest. Inputs: none.
     Output: assert. Side effects: reads a file. Role: the release names digests the gates' run pushed, never a new build."""
     wf = _wf("release.yml")
     on = _on(wf)
@@ -897,6 +908,8 @@ def test_release_workflow_promotes_only_main_digests() -> None:
     assert wf["permissions"] == {"contents": "write", "actions": "read", "packages": "read"}
     text = json.dumps(wf)
     assert "--branch main" in text and "--event push" in text and "images-$SHA" in text
+    runs = "\n".join(st.get("run", "") for st in wf["jobs"]["release"]["steps"])
+    assert "actions/artifacts?name=images-$SHA" in runs and '"images success"' in runs
     assert "release_manifest.py release" in text and "gh release create" in text and "imagetools inspect" in text
     runs = "\n".join(st.get("run", "") for st in wf["jobs"]["release"]["steps"]).replace("buildx imagetools", "imagetools")
     assert runs and not BUILD.search(runs)  # inspects digests, never builds
