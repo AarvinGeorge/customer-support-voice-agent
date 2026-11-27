@@ -175,7 +175,7 @@ def test_declined_codes_have_safe_messages():
         if rc.decision == "declined":
             assert rc.message and "{" not in rc.message.replace("{window}", "").replace(
                 "{late}", "").replace("{age}", ""), code
-        assert "—" not in (rc.message or "")
+        assert chr(0x2014) not in (rc.message or "")
     assert c.reason_codes["PAST_DUE"].followup_queue == "billing"
     assert c.reason_codes["EMAIL_STEP_UP"].requires_step_up is True
 
