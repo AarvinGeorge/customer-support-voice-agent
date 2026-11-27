@@ -187,6 +187,7 @@ class IngressInput:
     merged_transcript: str | None = None
     later_user_item: bool | None = None  # step 12: a client user item was merged; None = unknown (fail closed)
     redact_context: RedactContext | None = None
+    count_turn: Callable[[], Awaitable[IngressError | None]] | None = None  # rate-limit hook, called at step 9
 
 
 @dataclass(frozen=True)
@@ -322,6 +323,11 @@ class Ingress:
                     return TurnOutcome.fixed(CAP_LINE, end_reason="cap_reached")
 
                 return IngressStream(stream, start_turn(stream, cap_body, write_final=_noop, after=release))
+            if inp.count_turn is not None:  # doc 07 s2.4 Counting: only a turn that starts counts (not replays or the cap)
+                refused = await inp.count_turn()
+                if refused is not None:
+                    await self.lock.release(inp.session_id, token)
+                    return refused
             return await self._start(inp, release)
         except BaseException:
             await self.lock.release(inp.session_id, token)
