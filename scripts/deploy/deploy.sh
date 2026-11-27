@@ -19,6 +19,7 @@ ENV_FILE=".env"
 STATE_DIR="$ROOT/.deploy"
 TAG=""
 MANIFEST=""
+COMPOSE_ARGS=()
 LOCAL=0
 PRINT=0
 RESTORE_DB=0
@@ -39,6 +40,8 @@ commands:
   check           validate the env file only
   backup          take and verify the pre-migrate backup now (normally part of `up`)
   restore         restore the recorded backup onto the rollback tag's state (normally `rollback --restore-db`)
+  compose ARGS    run Compose with ARGS on the running release's stack (base file, release override, its digests): the
+                  only way to run Compose on the VM by hand (ps, logs, up -d --no-deps ...); images come only from the release
   render-env      write an env file from the process environment (GitHub secrets); needs --out
 options: --manifest FILE (release-TAG.json; default: <state-dir>/releases, else `gh release download TAG`)
          --env-file FILE (default .env)  --local (laptop dry-run: no git, local overlay; RELEASE_IMAGE_REPO may name a
@@ -58,11 +61,12 @@ while [ $# -gt 0 ]; do
     --restore-db) RESTORE_DB=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) usage >&2; die "unknown option: $1" 2 ;;
-    *) [ -z "$CMD" ] || die "unexpected argument: $1" 2; CMD="$1"; shift ;;
+    *) [ -z "$CMD" ] || die "unexpected argument: $1" 2; CMD="$1"; shift
+       if [ "$CMD" = compose ]; then COMPOSE_ARGS=("$@"); break; fi ;;   # everything after `compose` goes to Compose unchanged
   esac
 done
 [ -n "$CMD" ] || { usage >&2; die "usage: a command is required" 2; }
-case "$CMD" in up|rollback|reseed|smoke|check|render-env|backup|restore) ;; *) usage >&2; die "unknown command: $CMD" 2 ;; esac
+case "$CMD" in up|rollback|reseed|smoke|check|render-env|backup|restore|compose) ;; *) usage >&2; die "unknown command: $CMD" 2 ;; esac
 [ "$CMD" != up ] || [ "$LOCAL" = 1 ] || [ -n "$TAG" ] || die "up needs --tag TAG (the release tag to ship, r-NN)" 2
 [ "$LOCAL" = 0 ] || [ -n "$TAG" ] || [ "$CMD" != up ] || TAG=local
 case "$TAG" in *[!A-Za-z0-9._-]*) die "--tag has characters outside A-Za-z0-9._-" 2 ;; esac
@@ -120,7 +124,13 @@ preflight() {
 COMPOSE_FILES=(-f compose.yaml -f scripts/deploy/compose.release.yaml)
 [ "$LOCAL" = 0 ] || COMPOSE_FILES+=(-f scripts/deploy/compose.local.yaml)
 # DEPLOY_COMPOSE_FILES (space separated) replaces the list: only scripts/deploy/restore_pg_test.sh sets it, to a postgres-only stack.
-if [ -n "${DEPLOY_COMPOSE_FILES:-}" ]; then COMPOSE_FILES=(); for f in $DEPLOY_COMPOSE_FILES; do COMPOSE_FILES+=(-f "$f"); done; fi
+# Only backup and restore accept it: any other command must run the release form, or it could build (review M1).
+if [ -n "${DEPLOY_COMPOSE_FILES:-}" ]; then
+  case "$CMD" in backup|restore) ;; *) die "DEPLOY_COMPOSE_FILES is only for backup and restore (scripts/deploy/restore_pg_test.sh); unset it for $CMD" 2 ;; esac
+  COMPOSE_FILES=(); for f in $DEPLOY_COMPOSE_FILES; do COMPOSE_FILES+=(-f "$f"); done
+fi
+# compose and dc are the ONLY places this script names `docker compose` (a test enforces it): every call, and every command
+# printed for the operator (release_compose_hint), carries the release override, so nothing here can build (review I3).
 compose() { run docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" "$@"; }
 # dc: a read-only compose call whose output the script uses (not echoed).
 dc() { docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" "$@"; }
@@ -302,7 +312,7 @@ restore_backup() {
     if dc up -d --no-deps --wait --wait-timeout 180 core knowledge agent_a agent_b >&2; then
       echo "deploy: app services are running again (still the failed release's images; run rollback without --restore-db to switch code)." >&2
     else
-      die "database restore failed AND the app services could NOT be restarted: the site is down; run: docker compose -f compose.yaml up -d --no-deps core knowledge agent_a agent_b (backup kept at $f)"
+      die "database restore failed AND the app services could NOT be restarted: the site is down; run: $(release_compose_hint) up -d --no-deps --wait core knowledge agent_a agent_b (backup kept at $f)"
     fi
     die "database restore failed; the backup file is kept at $f"
   fi
@@ -338,8 +348,13 @@ inflight_gate() {
   done
 }
 
+# release_compose_hint: the operator's form of the one Compose invocation (the script's compose passthrough), for messages.
+release_compose_hint() { echo "scripts/deploy/deploy.sh --env-file $ENV_FILE --state-dir $STATE_DIR compose"; }
+
 rolling_restart() {
   step "rolling restart: core and knowledge, then agent_a, then agent_b, then web, then caddy (recreated so Caddyfile changes apply)"
+  # current is written before the first recreate: once core and knowledge are switched, the stack runs this release (review M2).
+  set_current "$RELEASE_TAG"
   wait_note
   compose up -d --no-deps --wait --wait-timeout 180 --force-recreate core knowledge
   compose up -d --no-deps --wait --wait-timeout 180 --force-recreate agent_a
@@ -423,7 +438,6 @@ bring_up() {
   migrate_and_seed
   inflight_gate
   rolling_restart
-  set_current "$RELEASE_TAG"
 }
 
 # State: good = last tag with a green smoke. rollback_to = what `rollback` restores. pending = an `up` that has not finished.
@@ -502,12 +516,16 @@ case "$CMD" in
       use_release "$prev" "$prev_file"
     fi
     rolling_restart
-    set_current "$prev"
     if ! ( smoke ); then die "smoke FAILED after rollback to $prev"; fi
     if [ "$PRINT" = 0 ]; then
       failed="$(st_get pending)"; [ -z "$failed" ] || printf '%s\n' "$failed" > "$STATE_DIR/rolled_back_from"
       printf '%s\n' "$prev" > "$STATE_DIR/good"; rm -f "$STATE_DIR/pending"
     fi ;;
+  compose)
+    [ "${#COMPOSE_ARGS[@]}" -gt 0 ] || die "compose needs arguments, for example: compose ps" 2
+    load_env "$ENV_FILE"
+    use_running
+    dc "${COMPOSE_ARGS[@]}" ;;
   reseed)
     preflight
     use_running

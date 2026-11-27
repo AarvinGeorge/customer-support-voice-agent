@@ -301,7 +301,8 @@ case "$a" in
     case "$a" in *Config.Image*) echo "$r" ;; *) if [ "${STUB_STALE:-}" = "$svc" ]; then echo id-old; else echo "id-$r"; fi ;; esac ;;
   "pull "*) [ -z "${STUB_FAIL_PULL:-}" ] || exit 1 ;;
   *--single-transaction*) cat > /dev/null; [ -z "${STUB_RESTORE_FAIL:-}" ] || exit 1 ;;
-  *"up -d --no-deps"*) [ -z "${STUB_FAIL_UP:-}" ] || exit 1 ;;
+  *"up -d --no-deps"*) [ -z "${STUB_FAIL_UP:-}" ] || exit 1
+    [ -z "${STUB_FAIL_RECREATE:-}" ] || case "$a" in *"--force-recreate $STUB_FAIL_RECREATE") exit 1 ;; esac ;;
   *"count(*) from information_schema.tables"*) echo "${STUB_SCHEMAS:-0}" ;;
   *"to_regclass"*) echo "${STUB_REGCLASS:-f}" ;;
   *"from agent.turns"*) echo "${STUB_TURNS:-0}" ;;
@@ -682,6 +683,117 @@ def test_rollback_without_the_previous_manifest_fails(tmp_path: Path) -> None:
     p = real(["rollback"], tmp_path)
     assert p.returncode != 0 and "release-v5.json" in p.stderr
     assert "force-recreate" not in (tmp_path / "stub.log").read_text()
+
+
+def test_every_compose_call_goes_through_the_one_release_invocation() -> None:
+    """What: deploy.sh names `docker compose` only in the two functions that add the release override (compose, dc); no other
+    line, executed or printed for the operator, may. Use when: pytest. Inputs: none. Output: assert. Side effects: reads a file.
+    Role: fix round 1 I3 (a printed recovery command without compose.release.yaml would build on the VM)."""
+    code = [ln for ln in SCRIPT.read_text().splitlines() if not ln.lstrip().startswith("#")]
+    hits = [ln.strip() for ln in code if "docker compose" in ln]
+    assert len(hits) == 2 and hits[0].startswith("compose() {") and hits[1].startswith("dc() {"), hits
+    assert all('"${COMPOSE_FILES[@]}"' in h for h in hits)
+    # control: the line fixed in round 1 is caught by the same filter
+    assert "docker compose" in "die \"... run: docker compose -f compose.yaml up -d --no-deps core\""
+
+
+def test_runbook_compose_commands_use_the_release_invocation() -> None:
+    """What: every `docker compose` command DEPLOY.md gives the operator for the VM is the script's passthrough instead.
+    Use when: pytest. Inputs: none. Output: assert. Side effects: reads a file. Role: I3 (the runbook must not teach a build)."""
+    text = (ROOT / "scripts" / "deploy" / "DEPLOY.md").read_text()
+    spans = re.findall(r"`([^`]*docker compose[^`]*)`", text)
+    assert spans == [], spans
+    assert "scripts/deploy/deploy.sh compose ps" in text
+
+
+def test_compose_passthrough_uses_the_running_release(tmp_path: Path) -> None:
+    """What: `deploy.sh compose ARGS` runs Compose with the release override and the running release's digests, and the
+    site-down message names that form. Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state.
+    Role: one way to run Compose on the VM, so no operator command can build."""
+    assert real(["up", "--tag", "v1"], tmp_path).returncode == 0
+    open(tmp_path / "stub.log.env", "w").close()
+    p = real(["compose", "up", "-d", "--no-deps", "core"], tmp_path)
+    assert p.returncode == 0, p.stderr
+    rows = [ln for ln in (tmp_path / "stub.log.env").read_text().splitlines() if ln.startswith("AGENT_IMAGE=")]
+    assert len(rows) == 1 and rows[0].startswith(f"AGENT_IMAGE={ref('v1', 'agent')}")
+    assert rows[0].endswith("-f compose.yaml -f scripts/deploy/compose.release.yaml up -d --no-deps core")
+    _restore_state(tmp_path)
+    (tmp_path / "state" / "current").write_text("v1\n")
+    p = real(["rollback", "--restore-db"], tmp_path, STUB_RESTORE_FAIL="1", STUB_FAIL_UP="1")
+    assert "scripts/deploy/deploy.sh" in p.stderr and " compose up -d --no-deps" in p.stderr and "docker compose" not in p.stderr
+
+
+def test_compose_passthrough_needs_a_recorded_release(tmp_path: Path) -> None:
+    """What: with no release recorded the passthrough refuses before calling Compose. Use when: pytest. Inputs: tmp.
+    Output: assert. Side effects: tmp state. Role: never a Compose call without digests."""
+    p = real(["compose", "ps"], tmp_path)
+    assert p.returncode != 0 and "no release recorded" in p.stderr
+    assert "compose" not in (tmp_path / "stub.log").read_text() if (tmp_path / "stub.log").exists() else True
+
+
+def test_deploy_compose_files_only_for_backup_and_restore(tmp_path: Path) -> None:
+    """What: DEPLOY_COMPOSE_FILES (the postgres-only test stack) is refused for up, rollback, reseed, smoke and compose, and
+    still accepted for backup. Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state.
+    Role: review M1 (the hook let `up` run 20 compose calls without the release override)."""
+    for args in (["up", "--tag", "v1"], ["rollback"], ["reseed"], ["smoke"], ["compose", "ps"]):
+        p = real(args, tmp_path, DEPLOY_COMPOSE_FILES="compose.yaml")
+        assert p.returncode != 0 and "DEPLOY_COMPOSE_FILES" in p.stderr, args
+    assert " up " not in ((tmp_path / "stub.log").read_text() if (tmp_path / "stub.log").exists() else "")
+    p = real(["backup", "--tag", "v2"], tmp_path, DEPLOY_COMPOSE_FILES="scripts/deploy/compose.restore-test.yaml")
+    assert p.returncode == 0, p.stderr
+
+
+def test_current_names_the_release_from_the_first_recreate(tmp_path: Path) -> None:
+    """What: when the rolling restart fails part way (agent_a), `current` already names the new release, because core and
+    knowledge were switched. Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: review M2."""
+    assert real(["up", "--tag", "v1"], tmp_path).returncode == 0
+    p = real(["up", "--tag", "v2"], tmp_path, STUB_FAIL_RECREATE="agent_a")
+    assert p.returncode != 0
+    assert state(tmp_path, "current") == "v2" and state(tmp_path, "pending") == "v2" and state(tmp_path, "good") == "v1"
+    # an aborted switch (in-flight turns) recreates nothing and leaves current alone
+    p = real(["up", "--tag", "v3"], tmp_path, STUB_REGCLASS="t", STUB_TURNS="1", INFLIGHT_WAIT_S="0")
+    assert p.returncode != 0 and state(tmp_path, "current") == "v2"
+
+
+def test_rollback_checks_the_checkout_against_the_manifest(tmp_path: Path) -> None:
+    """What: a rollback whose checkout is not the previous release's commit stops before any pull or restart.
+    Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: review M3 (mutation M12 survived)."""
+    st = tmp_path / "state"
+    st.mkdir()
+    (st / "rollback_to").write_text("v1\n")
+    p = real(["rollback"], tmp_path, STUB_HEAD="c" * 40)
+    assert p.returncode != 0 and "were built from" in p.stderr
+    log = (tmp_path / "stub.log").read_text()
+    assert " pull " not in log and "force-recreate" not in log
+
+
+def _build_args_guard() -> str:
+    """What: the run script of the images job step that requires the web image's public build arguments. Use when: pytest.
+    Inputs: none. Output: the script text. Side effects: reads a file. Role: lets the test execute the real guard."""
+    steps = _wf("ci.yml")["jobs"]["images"]["steps"]
+    return next(st["run"] for st in steps if st.get("name", "").startswith("Require the web image's public build arguments"))
+
+
+def test_images_job_fails_on_main_without_the_langsmith_build_arguments(tmp_path: Path) -> None:
+    """What: the guard step fails on a push to main when LANGSMITH_PROJECT_URL or LANGSMITH_PROJECT is empty or not https,
+    passes when both are set, and only warns on a pull request. Use when: pytest. Inputs: tmp. Output: assert.
+    Side effects: runs the step's bash with a clean environment (no docker, no network). Role: review I2 (an empty drawer link
+    would be baked into the release image and could only change with a new commit)."""
+    script = _build_args_guard()
+
+    def go(**env: str) -> subprocess.CompletedProcess:
+        """What: run the guard with env. Use when: this test. Inputs: env. Output: CompletedProcess. Side effects: none.
+        Role: helper."""
+        return subprocess.run(["bash", "-c", script], env={"PATH": os.environ["PATH"], **env}, capture_output=True, text=True, timeout=30)
+
+    url = "https://smith.langchain.com/o/0000/projects/p/1111"
+    assert go(EVENT="push", LANGSMITH_PROJECT="cs-voice-agent", LANGSMITH_PROJECT_URL=url).returncode == 0
+    for bad in ({"LANGSMITH_PROJECT_URL": ""}, {"LANGSMITH_PROJECT_URL": "smith.langchain.com/x"}, {"LANGSMITH_PROJECT": ""}):
+        env = {"EVENT": "push", "LANGSMITH_PROJECT": "cs-voice-agent", "LANGSMITH_PROJECT_URL": url, **bad}
+        p = go(**env)
+        assert p.returncode != 0 and "::error" in p.stdout, (bad, p.stdout)
+    p = go(EVENT="pull_request", LANGSMITH_PROJECT="", LANGSMITH_PROJECT_URL="")
+    assert p.returncode == 0 and "::warning" in p.stdout
 
 
 # ---- release_manifest.py (the helper CI, the release workflow and deploy.sh share) ----
