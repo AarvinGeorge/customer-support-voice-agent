@@ -78,3 +78,10 @@ def test_system_prompt_requires_a_search_in_the_same_turn_as_gate_2():
     # must not allow article text from earlier turns.
     assert "or earlier in this conversation" not in SYSTEM_PROMPT
     assert "call search_kb in this turn" in SYSTEM_PROMPT
+
+
+def test_system_prompt_searches_the_cited_policy_after_a_decline():
+    # Browser pass 2b (S3 Marcus, second run): after the ROLE_NOT_PERMITTED decline the model wrote "an owner or
+    # billing admin on your account can request the refund" with no article in the turn; the roles-and-permissions
+    # section says exactly that, so the decline turn must search the policy the tool cites.
+    assert "If a tool result declines a request, call search_kb for the policy it cites in this turn" in SYSTEM_PROMPT
