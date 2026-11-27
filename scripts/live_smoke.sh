@@ -12,7 +12,8 @@
 #   directory; on a clean, pushed tree the commit status `live-smoke` on HEAD (pending, then success only on PASS,
 #   failure otherwise; the shared scripts/lib/commit_status.sh, owned by PR #74). Exit 0 PASS, 1 FAIL, 2 refused or setup failed, 3 aborted at the
 #   call cap, 130/143/129 interrupted.
-# Side effects: docker compose build, up, run and down -v --rmi local for project cs-smoke-<time>-<hex> only; a run
+# Side effects: docker compose build, up, run and down -v --rmi local for project cs-smoke-<time>-<hex> only, and only
+#   when this run claimed it (scripts/lib/compose_owner.sh); a run
 #   marker under .tmp/live-smoke/ (removed at exit); one to two GitHub status POSTs; real Anthropic and OpenAI
 #   calls (agent, verifier, classifier, embeddings). Never touches another project (cs-demo on port 3000 included).
 # Role: root-cause audit class A, priority 1 (b): real model behaviour is checked before merge, not by a browser pass after.
@@ -110,6 +111,10 @@ mkdir -p "$MARKER_DIR"
 SMOKE_RUN_NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"; export SMOKE_RUN_NONCE
 MARKER="$MARKER_DIR/$COMPOSE_PROJECT_NAME.run"
 ( umask 077; printf '%s\n' "$SMOKE_RUN_NONCE" >"$MARKER" )
+# Teardown only of a project this run created (scripts/lib/compose_owner.sh, PR #74 N1): claim before the first `up`.
+# shellcheck source=lib/compose_owner.sh
+. "$ROOT/scripts/lib/compose_owner.sh"
+compose_claim "$COMPOSE_PROJECT_NAME" || { rm -f "$MARKER"; die "refusing project $COMPOSE_PROJECT_NAME: it exists and is not this run's"; }
 
 teardown() {
   local code=$?
@@ -122,7 +127,7 @@ teardown() {
   if [ "${KEEP_STACK:-}" = 1 ]; then
     echo "live_smoke: KEEP_STACK=1, $COMPOSE_PROJECT_NAME left up on 127.0.0.1:$EDGE_PORT" >&2
   else
-    docker compose --profile seed --profile jobs down -v --remove-orphans --rmi local >>"$OUT/build.log" 2>&1 || echo "live_smoke: teardown of $COMPOSE_PROJECT_NAME failed" >&2
+    COMPOSE_TEARDOWN_LOG="$OUT/build.log" compose_teardown "$COMPOSE_PROJECT_NAME" docker compose --profile seed --profile jobs down -v --remove-orphans --rmi local || echo "live_smoke: teardown of $COMPOSE_PROJECT_NAME failed or refused" >&2
     left="$(docker ps -a -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" | wc -l | tr -d ' ')"
     echo "live_smoke: teardown $COMPOSE_PROJECT_NAME, containers left: $left; output in $OUT" >&2
     if [ "$left" != 0 ] && [ "$code" = 0 ]; then code=2; fi   # a pass that leaves containers is not clean (review M2)
