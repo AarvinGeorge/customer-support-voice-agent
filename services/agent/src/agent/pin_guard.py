@@ -40,12 +40,16 @@ def session_redact_context(session: Any) -> RedactContext:
 
 @dataclass(frozen=True)
 class Scanned:
-    """What: the step 9a result. Use when: Ingress decides to refuse or continue. Inputs: the redacted input, the
-    refusal flag, the number of PINs redacted. Output: value. Side effects: none. Role: scan result."""
+    """What: the step 9a result. Use when: Ingress decides to refuse or continue, and whether to set or clear
+    agent.sessions.awaiting_verification. Inputs: the redacted input, the refusal flag, the number of PINs redacted,
+    expects_pin (the message announced a PIN without giving one: set the flag), moved_on (a substantive message with
+    no number or credential words: clear the flag). Output: value. Side effects: none. Role: scan result."""
 
     inp: Any
     refuse: bool
     redacted: int
+    expects_pin: bool = False
+    moved_on: bool = False
 
 
 def scan_input(inp: Any, ctx: RedactContext) -> Scanned:
@@ -54,12 +58,14 @@ def scan_input(inp: Any, ctx: RedactContext) -> Scanned:
     Use when: Ingress step 9a. Inputs: IngressInput, context. Output: Scanned (redact_context set on the input).
     Side effects: none. Role: doc 07 s2.4 9a, s7.3 "Chat text and the masked card"."""
     total = 0
-    refuse = False
+    refuse = expects = False
+    moved = True
     text = inp.text
     if text is not None:
         scan = scan_pins(text, ctx)
         text, total = scan.text, scan.redacted
         refuse = inp.mode == "chat" and inp.input_kind == "text" and scan.credential_like
+        expects, moved = scan.expects_pin, scan.moved_on
     body = inp.body
     if isinstance(body, TurnRequest) and body.text is not None:
         body = body.model_copy(update={"text": text})
@@ -67,9 +73,13 @@ def scan_input(inp: Any, ctx: RedactContext) -> Scanned:
         q = scan_pins(body.question, ctx)
         said = scan_pins(body.user_transcript, ctx) if body.user_transcript is not None else None
         total = q.redacted + (said.redacted if said else 0)
+        expects = q.expects_pin or bool(said and said.expects_pin)
+        moved = q.moved_on and (said is None or said.moved_on)
         body = body.model_copy(update={"question": q.text, "user_transcript": said.text if said else None})
         text = q.text if text is not None else None
-    return Scanned(replace(inp, text=text, body=body, redact_context=ctx), refuse, total)
+    if text is None and not isinstance(body, VoiceAskRequest):
+        moved = False  # a card press or a confirm is not the customer moving on
+    return Scanned(replace(inp, text=text, body=body, redact_context=ctx), refuse, total, expects, moved)
 
 
 class AwaitingFlag(Protocol):
@@ -112,14 +122,18 @@ class TypedPinRefusal:
 
     async def __call__(self, stream: TurnStream, inp: Any, row: Any) -> TurnOutcome:
         """What: refuse one turn. Use when: Scanned.refuse. Inputs: stream, redacted IngressInput, TurnRow.
-        Output: outcome (end_reason verification_requested). Side effects: see class. Role: entry."""
+        Output: outcome (end_reason verification_requested). Side effects: see class (the flag only for an unverified
+        session). Role: entry."""
         outcome = _emit_refusal(stream)
         config = run_config(inp.session_id)
         values = (await self.agent.aget_state(config)).values or {}
         human = build_turn_message(inp.text or "", TurnContext(mode="chat", verified=bool(values.get("verified"))))
         await self.agent.aupdate_state(config, {"messages": [human, AIMessage(TYPED_PIN_LINE,
                                                                               id=f"ingress-{row.turn_id}")]})
-        if self.flags is not None:
+        verified = bool(inp.redact_context and inp.redact_context.verified)
+        if verified:  # review round 2 N-I2: a verified session is never put back to awaiting
+            pass
+        elif self.flags is not None:
             await self.flags.set_awaiting_verification(inp.session_id, True)
         else:
             log.warning("typed PIN refused but awaiting_verification was not set session_id=%s", inp.session_id)

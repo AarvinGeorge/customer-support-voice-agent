@@ -24,7 +24,10 @@ class RedactingFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         """What: format, then redact. Use when: logging. Inputs: record. Output: line. Side effects: none.
         Role: override."""
-        return scan_text(super().format(record), _LOG_CONTEXT)
+        try:
+            return scan_text(super().format(record), _LOG_CONTEXT)
+        except Exception:  # noqa: BLE001 - review round 2 N-I1: never let logging print the raw record
+            return f"{record.levelname} {record.name} [log line not shown: redaction failed]"
 
 
 def install_log_redaction(level: int = logging.INFO) -> None:

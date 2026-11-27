@@ -57,7 +57,17 @@ ORIGIN = "https://test"
 # Hex-led or hex-trailed digits are uuid groups or timestamps; every spoken, grouped and Unicode form is listed.
 SECRET = re.compile(r"(?<![0-9a-f-])4821(?![0-9a-f])|104234821|10423-4821|four[ ,.-]+eight[ ,.-]+two[ ,.-]+(?:one|oh)"
                     r"|forty[ -]?eight|twenty[ -]?one|48 21|4[ -]8[ -]2[ -]1|\uff14\uff18\uff12\uff11"
-                    r"|\u0664\u0668\u0662\u0661", re.IGNORECASE)
+                    r"|\u0664\u0668\u0662\u0661|4,821|4 821|4\.8\.2\.1|48\s+21|4/8/2/1|(?<![0-9a-f-])4481(?![0-9a-f])"
+                    r"|double four|four thousand|(?<![0-9a-f-])0482(?![0-9a-f])|nought four", re.IGNORECASE)
+
+
+def secret_hits(text: str) -> list[str]:
+    """What: the raw PIN forms in a text, after dropping format characters and combining marks (so "48<ZWSP>21"
+    and keycap digits are seen). Use when: the leak search and its fixture check. Inputs: text. Output: matches.
+    Side effects: none. Role: helper."""
+    import unicodedata
+    clean = "".join(c for c in text if unicodedata.category(c) not in ("Cf", "Mn", "Me"))
+    return SECRET.findall(clean)
 # The review PR #57 bypass list (same strings as packages/contracts/tests/test_pin_bypasses.py BYPASSES).
 BYPASSES = [
     "QS-10423,4821", "QS-10423.4821", "my PIN is four eight two one. One more thing",
@@ -75,6 +85,20 @@ BYPASSES = [
     "Q S one zero four two three four eight two one", "my PIN is 4821 and my account is QS-10423",
     "pin number four-eight-two-one", "my passcode: forty eight twenty one",
 ]
+# Fix round 2 (rereview-pr57-r1): the 14 realistic forms (two are split over two messages) and the cheap crafted
+# forms, each with the session state it was reproduced in (True: awaiting verification).
+ROUND2 = [
+    ("my pin is 4,821", False), ("my pin is 4 821", False), ("my pin is 4.8.2.1", False), ("my pin is 48\n21", False),
+    ("my pin is double four eight one", False), ("four thousand eight hundred twenty-one", True),
+    ("four thousand eight hundred and twenty-one", True), ("four, eight. two, one.", True),
+    ("my pin is four. eight. two. one.", False), ("yeah it's four eight two one", False),
+    ("my password is 4821", False), ("my secret number is 4821", False),
+    ("my pin is 48\u200b21", False), ("my pin is 4\u200b8\u200b2\u200b1", False),
+    ("my pin is 4\u03018\u03012\u03011\u0301", False), ("my pin is 4\ufe0f\u20e38\ufe0f\u20e32\ufe0f\u20e31\ufe0f\u20e3", False),
+    ("my p\u200bin is 4821", False), ("my \u0440in is 4821", False), ("my pin is 4/8/2/1", False),
+    ("my pin is nought four eight two", False),
+]
+SPLIT = [("my PIN is", "4821 by the way, which plan am I on?"), ("I am QS-10423", "and the number is 4821 if you need it")]
 SPOKEN_BYPASSES = ["my PIN is four eight two one. One more thing", "oh, four eight two one is my pin",
                    "I have 2, four eight two one is my PIN"]
 
@@ -410,6 +434,26 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                     for n, text in enumerate(SPOKEN_BYPASSES):
                         r = await post(sid, "/voice/ask", voice_body(vs_id, "customer gave a number", text, f"item_s{n}"))
                         assert events_of(r)[-1].type == "turn.completed"
+                    # 7. Fix round 2: each realistic and cheap crafted form in chat and in a voice transcript, in a
+                    # fresh session in the state it was reproduced in; the split forms as two chat turns.
+                    for n, (text, wait) in enumerate(ROUND2):
+                        for mode in ("chat", "voice"):
+                            sid, vs_id = await new_session(pool, sids)
+                            if wait:
+                                async with pool.connection() as conn:
+                                    await conn.execute("UPDATE agent.sessions SET awaiting_verification = true "
+                                                       "WHERE session_id = %s", (sid,))
+                            if mode == "chat":
+                                assert (await chat(sid, text))[-1].type == "turn.completed"
+                            else:
+                                r = await post(sid, "/voice/ask", voice_body(vs_id, "customer gave a number", text,
+                                                                             f"item_r{n}"))
+                                assert events_of(r)[-1].type == "turn.completed"
+                    for first, second in SPLIT:
+                        sid, _ = await new_session(pool, sids)
+                        await chat(sid, first)
+                        assert await awaiting(pool, sid), f"no awaiting flag after {first!r}"
+                        assert (await chat(sid, second))[-1].type == "turn.completed"
         tracer_client.flush()
         await trajectory.flush()
         assert trajectory.pending() == 0
@@ -418,7 +462,7 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
         # Proof that a zero is possible: every secret form is in the fixture, and the search finds it in raw form.
         fixture = json.dumps(bodies, ensure_ascii=False)
         assert SECRET.search(fixture) and SECRET.search(RAW) and SECRET.search(SPOKEN)
-        missed = [b for b in BYPASSES if not SECRET.search(b)]
+        missed = [b for b in BYPASSES + [t for t, _ in ROUND2] + [b for _, b in SPLIT] if not secret_hits(b)]
         assert missed == [], f"the leak search cannot see these raw forms: {missed}"
         from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
         _, raw_blob = JsonPlusSerializer().dumps_typed([HumanMessage(RAW)])
@@ -443,7 +487,7 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
         # checkpoint blobs are msgpack: decode them as UTF-8 too, so Unicode digits are searched in both forms.
         sinks["checkpoint_blobs (utf-8)"] = sinks["checkpoint_blobs"].encode("latin-1").decode("utf-8", "replace")
         sinks["checkpoint_writes (utf-8)"] = sinks["checkpoint_writes"].encode("latin-1").decode("utf-8", "replace")
-        leaks = {name: SECRET.findall(text)[:5] for name, text in sinks.items() if SECRET.search(text)}
+        leaks = {name: secret_hits(text)[:5] for name, text in sinks.items() if secret_hits(text)}
         assert leaks == {}, f"raw PIN found in: {leaks}"
     finally:
         run_trees.configure(client=previous_client, enabled=None)

@@ -325,6 +325,7 @@ Built is the thin slice (D-035). The rows below are designed and not built, so e
 | App-level daily budget counter | 06 s14 | Provider spend caps alone are not enough (proposed) |
 | Event log retention job | 06 s14 | The event tables grow beyond what the demo needs (proposed) |
 | Approval withdrawal (customer withdraws a submitted approval) | 06 s14 | Customers ask to retract a request after submitting it (proposed) |
+| Free-text PIN scanner residual: deliberately crafted encodings (other-language number words, homophones such as "for eight to one", mixed digits and words such as "48two1", hex, roman numerals, a quoted PIN without a PIN word while not awaiting, a PIN split across two messages with no announcing words). The secure card is the control; the scanner (07 s11.1) is defence in depth | D-060; 07 s11.1, s7.3 | Before real customer PINs exist: a core-side candidate check (every 4-digit candidate compared with the PIN HMAC, rate limited) |
 
 Triggers marked (proposed) are this README's wording: the architecture doc names the item as deferred but gives no trigger.
 

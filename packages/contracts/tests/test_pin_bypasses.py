@@ -45,6 +45,8 @@ BYPASSES = [
 
 @pytest.mark.parametrize("text", BYPASSES)
 def test_bypass_is_redacted_and_credential_looking(text: str) -> None:
+    """What: each bypass is caught for every session state (verified: the number is next to the account id or a PIN
+    word is present). Use when: CI. Inputs: text. Output: assertion. Side effects: none. Role: round 1 red tests."""
     for ctx in (UNVERIFIED, VERIFIED, AWAITING):
         scan = scan_pins(text, ctx)
         assert scan.redacted >= 1, (text, ctx, scan.text)
@@ -84,5 +86,5 @@ def test_without_context_amounts_dates_and_endings_are_kept(text: str, ctx: Reda
 
 
 def test_context_makes_every_4_digit_group_a_candidate() -> None:
-    scan = scan_pins("QS-10423 invoice 0412 for 4821", VERIFIED)
+    scan = scan_pins("QS-10423 invoice 0412 for 4821", UNVERIFIED)
     assert scan.text == "QS-10423 invoice [PIN] for [PIN]" and scan.credential_like

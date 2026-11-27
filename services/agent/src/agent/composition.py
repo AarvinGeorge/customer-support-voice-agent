@@ -89,7 +89,7 @@ def build_ingress(runtime: Any, *, store: PgTurnStore | Any, lock: TurnLock, ser
                       cost_of=runtime.registry.cost_for_model)
     return Ingress(store, lock, served_by=served_by, run_agent=body, call_keys=call_keys,
                    merge_transcript=merge_transcript,
-                   refuse_typed_pin=TypedPinRefusal(runtime.agent, flags), **extra)
+                   refuse_typed_pin=TypedPinRefusal(runtime.agent, flags), flags=flags, **extra)
 
 
 def wire_app(app: FastAPI, cfg: Settings) -> Ingress | None:

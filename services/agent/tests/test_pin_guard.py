@@ -225,3 +225,67 @@ def test_configure_tracing_sets_the_global_client(monkeypatch: pytest.MonkeyPatc
         assert client._hide_run_outputs({"a": RAW}) == {"a": "QS-10423 [PIN]"}  # noqa: SLF001
     finally:
         run_trees.configure(client=previous)
+
+
+# ---- fix round 2 (rereview-pr57-r1: N-I1 crash, N-I2 over-refusal, N-I3 split PINs) ----
+
+async def test_glued_tens_words_do_not_crash_the_turn() -> None:
+    w, _ = guarded(AIMessage(content="Pro is priced per seat."))
+    evs = await chat(w, "we have about twentyfive, 30 seats on the Pro plan, what does it cost?")
+    assert evs[-1].end_reason == "answered" and evs[-1].final.text == "Pro is priced per seat."
+
+
+async def test_verified_refusal_does_not_put_the_session_back_to_awaiting() -> None:
+    w, flags = guarded(AIMessage(content="never"))
+    w.turns.sessions[SID] = replace(w.turns.sessions[SID], verified_user_id="user-1")
+    evs = await chat(w, "my PIN is 4821")
+    assert evs[-1].final.text == TYPED_PIN_LINE and flags.calls == []
+    assert w.turns.sessions[SID].awaiting_verification is False
+
+
+async def test_verified_ordinary_message_with_account_and_invoice_goes_to_the_model() -> None:
+    w, flags = guarded(AIMessage(content="Yes, it went through."))
+    w.turns.sessions[SID] = replace(w.turns.sessions[SID], verified_user_id="user-1")
+    evs = await chat(w, "did the refund for QS-10423 go through, the one for invoice 0412")
+    assert evs[-1].final.text == "Yes, it went through." and flags.calls == []
+    assert "invoice 0412" in model_text(w)
+
+
+@pytest.mark.parametrize(("first", "second"), [
+    ("my PIN is", "4821 by the way, which plan am I on?"),  # N18
+    ("I am QS-10423", "and the number is 4821 if you need it"),  # N20
+])
+async def test_a_pin_split_over_two_messages_never_reaches_the_model(first: str, second: str) -> None:
+    w, flags = guarded(AIMessage(content="Noted."), AIMessage(content="Noted again."))
+    await chat(w, first)
+    assert (SID, True) in flags.calls and w.turns.sessions[SID].awaiting_verification is True
+    await chat(w, second)
+    assert PIN not in model_text(w) and PIN not in await thread_text(w)
+
+
+async def test_the_awaiting_flag_clears_when_the_topic_moves_on() -> None:
+    w, flags = guarded(AIMessage(content="We have Starter, Pro and Enterprise."))
+    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True)
+    await chat(w, "what plans do you offer for a team of twelve?")
+    assert flags.calls == [(SID, False)] and w.turns.sessions[SID].awaiting_verification is False
+
+
+async def test_a_short_ack_keeps_the_awaiting_flag() -> None:
+    w, flags = guarded(AIMessage(content="Take your time."))
+    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True)
+    await chat(w, "ok one sec")
+    assert flags.calls == [] and w.turns.sessions[SID].awaiting_verification is True
+
+
+def test_log_formatter_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agent.logs as logs
+
+    def boom(text: str, ctx: object) -> str:
+        """What: a failing redactor. Use when: this test. Inputs: text, ctx. Output: none. Side effects: raises.
+        Role: fixture."""
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(logs, "scan_text", boom)
+    rec = logging.LogRecord("agent.x", logging.INFO, __file__, 1, "text=%s", (RAW,), None)
+    out = logs.RedactingFormatter("%(message)s").format(rec)
+    assert PIN not in out and "redaction failed" in out
