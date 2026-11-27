@@ -71,7 +71,10 @@ async def test_combined_limiter_double_block_gives_one_tool_message_per_call_id(
                                                _call("create_ticket", "c4", summary="s")])
     model = Scripted(messages=iter([*singles, verify, tickets, poison, AIMessage(content="done")]))
     agent = create_agent(model, tools=[search_kb, request_verification, create_ticket],
-                         middleware=[ToolGuardMiddleware()])
+                         # the limiter alone: all three tools visible (D-070 hides create_ticket in V0, which is
+                         # tested in test_router_visibility.py and test_ticket_requester.py)
+                         middleware=[ToolGuardMiddleware(visible=lambda _state: ("create_ticket",
+                                                                                 "request_verification", "search_kb"))])
     control = TurnControl(session_id="s1", turn_id="t1")
     bind_turn_control(control)
     out = await agent.ainvoke({"messages": [HumanMessage("q")]})

@@ -2,7 +2,7 @@
 Use when: the app is assembled (routes.register_routes plugs them in by route name).
 Inputs: the request (scopes `identity.verify` and `claims.read`, X-Session-Id for verify, the JSON body).
 Output: identity_verify (200 Claims) and session_claims (200 Claims or the unverified answer).
-Side effects: verify runs one transaction that holds the counters, the audit row and any lockout ticket; the
+Side effects: verify runs one transaction that holds the counters and the audit row (no lockout ticket, D-070); the
 transaction commits before a failure is raised, so the counters survive the 401, 409 and 423 answers.
 Role: doc 07 s3.1. The PIN is read once, normalised and handed to core.identity; it is never logged, audited or echoed
 (the 422 handler shows only locations)."""
@@ -43,12 +43,12 @@ def _bad(field: str) -> CoreError:
 def _raise_for(outcome: VerifyOutcome) -> None:
     """What: turn a failed outcome into its envelope error. Use when: the transaction has committed.
     Inputs: outcome. Output: none. Side effects: raises CoreError VERIFY_FAILED (401, attempts_left), VERIFY_LOCKED
-    (423, ticket) or IDENTITY_CONFLICT (409). Role: unknown account and wrong PIN reach the same branch and the same text."""
-    ticket = outcome.ticket.model_dump(mode="json") if outcome.ticket else None
+    (423, details.ticket always null since D-070) or IDENTITY_CONFLICT (409). Role: unknown account and wrong PIN reach
+    the same branch and the same text."""
     if outcome.kind == "failed":
         raise CoreError("VERIFY_FAILED", _FAILED, details={"attempts_left": outcome.attempts_left, "ticket": None})
     if outcome.kind == "locked":
-        raise CoreError("VERIFY_LOCKED", _LOCKED, details={"ticket": ticket})
+        raise CoreError("VERIFY_LOCKED", _LOCKED, details={"ticket": None})
     raise CoreError("IDENTITY_CONFLICT", "This chat is already verified as a different person.")
 
 

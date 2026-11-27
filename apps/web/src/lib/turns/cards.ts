@@ -95,11 +95,11 @@ export function verificationNotice(ev: VerificationResultEvent): VerificationNot
       return { status: ev.status, tone: "error", text: `That account ID and PIN didn't match.${tail}` };
     }
     case "locked": {
-      const follow = ev.ticket ? ` on ${ev.ticket.display}` : "";
+      // D-070: a locked session has no verified requester, so no ticket exists and nobody can follow up.
       return {
         status: ev.status,
         tone: "error",
-        text: `For your security, verification is locked for this conversation. Our team will follow up${follow}.`,
+        text: "For your security, verification is locked for this conversation. See How to reach support in our help center for what to do next.",
       };
     }
     case "conflict":

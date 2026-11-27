@@ -159,9 +159,8 @@ def test_numbers_equal_l1_s5_s6():
     assert (c.tiers.pro.price_cents_per_seat_month, c.tiers.business.price_cents_per_seat_month) == (800, 1600)
     assert c.identity.pin_digits == 4 and c.identity.max_failures_per_session == 3
     t = c.tickets
-    assert (t.limits.verified_per_account_per_day, t.limits.unverified_per_session) == (5, 2)
-    assert dict(t.priority_by_tier) == {"enterprise": "P2", "business": "P2", "pro": "P3", "free": "P4",
-                                  "unverified": "P4"}
+    assert t.limits.verified_per_account_per_day == 5
+    assert dict(t.priority_by_tier) == {"enterprise": "P2", "business": "P2", "pro": "P3", "free": "P4"}
     assert t.enterprise_blocking_priority == "P1"
     assert dict(t.target_label) == {"P1": "1 hour", "P2_enterprise": "4 hours", "P2": "8 hours",
                               "P3": "24 hours", "P4": "72 hours"}
@@ -230,7 +229,7 @@ def test_numbers_appear_in_staged_articles():
         "billing-invoices-payments": ["at most once per day", "7 days, once per 12 months",
                                       "14 days, once per 6 months"],
         "plans-pricing-contracts": ["$8 per seat per month", "$16 per seat per month"],
-        "support-and-escalation": ["5 tickets per day", "up to 2 tickets", "72 hours", "24 hours",
+        "support-and-escalation": ["5 tickets per day", "after 5 failed attempts", "72 hours", "24 hours",
                                    "8 hours", "4 hours", "1 hour"],
     }
     for article, phrases in facts.items():
@@ -414,3 +413,85 @@ def test_frozen_config_dumps_and_deep_copies():
         c.tickets.priority_by_tier.update(pro="P1")  # type: ignore[attr-defined]
     with pytest.raises(TypeError):
         del c.tickets.target_label["P1"]  # type: ignore[attr-defined]
+
+
+def test_role_decline_states_the_next_step_it_allows():
+    """Browser pass 2b: the member decline gave no next step, so the agent's "an owner or billing admin can ask for
+    it" had no source and Gate 2 failed the S3 reply. The tool result must carry the step it allows (the
+    roles-and-permissions article's billing permissions section says the same)."""
+    msg = yaml.safe_load(POLICY.read_text())["reason_codes"]["ROLE_NOT_PERMITTED"]["message"]
+    assert msg.startswith("Only an account owner or billing admin can make billing changes.")
+    assert "an owner or billing admin on your account can ask for it" in msg.lower()
+
+
+_STOP = frozenset("that this with have been from your their there which while because cannot nothing already these "
+                  "those after than then only into they them what when where would could should about over also "
+                  "just".split())
+# A drift floor, with margin: measured 2026-11-27, lowest 0.50 (GRACE_ALREADY_USED), most 0.8 to 1.0. It catches a
+# message rewritten away from its section or a policy_ref moved to another section; numbers are not compared.
+MESSAGE_SECTION_OVERLAP_MIN = 0.4
+
+
+def _section_text(article: str, slug: str) -> str:
+    """What: the body of one article section, its subsections included, up to the next heading of the same or a
+    higher level. Use when: the message-to-section tie. Inputs: article slug, section slug. Output: text.
+    Side effects: reads one file. Role: helper."""
+    import re
+    lines, out, level = (REPO / "data" / "articles" / f"{article}.md").read_text().splitlines(), [], None
+    for line in lines:
+        m = re.match(r"(#+)\s+(.*)", line)
+        if m:
+            heading = re.sub(r"[^a-z0-9]+", "-", m.group(2).lower()).strip("-")
+            if level is not None and len(m.group(1)) <= level:
+                break
+            if level is None and heading == slug:
+                level = len(m.group(1))
+                continue
+        if level is not None:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _content_words(text: str) -> set[str]:
+    """What: lowercase words of 4 or more letters, placeholders and _STOP removed. Use when: the overlap test.
+    Inputs: text. Output: set. Side effects: none. Role: helper."""
+    import re
+    return {w for w in re.findall(r"[a-z]+", re.sub(r"\{[a-z_]+\}", " ", text.lower())) if len(w) >= 4
+            and w not in _STOP}
+
+
+def test_every_decline_message_is_stated_by_the_article_section_it_cites():
+    """Review PR #71 M3: a decline message is what the customer is told, and its policy_ref is the article section
+    Gate 2 and the customer can check it against. Most of the message's content words must appear in that section
+    (subsections included), so a message rewritten away from its article, or a policy_ref pointed at the wrong
+    section, fails here. Meaning is checked live by Gate 2; this is the drift floor."""
+    _articles_dir()
+    c = load_policy(POLICY)
+    low = {}
+    for code, rc in c.reason_codes.items():
+        if not rc.message:
+            continue
+        section = _section_text(rc.policy_ref.article, rc.policy_ref.section)
+        assert section.strip(), (code, rc.policy_ref)
+        words = _content_words(rc.message)
+        share = len(words & _content_words(section)) / len(words)
+        if share < MESSAGE_SECTION_OVERLAP_MIN:
+            low[code] = (round(share, 2), sorted(words - _content_words(section)))
+    assert not low, low
+
+
+def test_role_decline_next_step_is_stated_by_its_section():
+    """Browser pass 2b: the next step the decline gives ("an owner or billing admin ... can ask for it") must be
+    what the cited section says (the request needs an owner or billing admin)."""
+    c = load_policy(POLICY)
+    rc = c.reason_codes[ReasonCode.ROLE_NOT_PERMITTED]
+    section = _section_text(rc.policy_ref.article, rc.policy_ref.section).lower()
+    assert rc.message is not None
+    assert "needs an owner or billing admin" in section and "owner or billing admin" in rc.message.lower()
+
+
+def test_the_s3_fixture_decline_message_is_the_policy_message():
+    """Review PR #71 M3: the contract fixtures quote the decline core sends; a stale copy would test the old text."""
+    from contracts.fixtures_build import ROLE_DECLINE_MESSAGE
+
+    assert ROLE_DECLINE_MESSAGE == load_policy(POLICY).reason_codes[ReasonCode.ROLE_NOT_PERMITTED].message

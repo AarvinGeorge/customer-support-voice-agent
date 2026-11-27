@@ -16,7 +16,6 @@ CASES = [
     ("POST", "/v1/identity/verify", {"account_id": "QS-10423", "pin": "4821"}, c.Claims),
     ("GET", "/v1/sessions/sess-1/claims", None, c.Claims),
     ("GET", "/v1/me/context", None, c.MeContext),
-    ("GET", "/v1/me/profile", None, c.Profile),
     ("GET", "/v1/me/charges?ending=0412", None, c.ChargesResponse),
     ("GET", "/v1/me/tickets", None, c.TicketsResponse),
     ("POST", "/v1/actions/refund/prepare",
@@ -79,7 +78,7 @@ def test_missing_token_is_401_envelope(client):
     """What: no bearer token gives 401 AUTH_INVALID in the envelope. Use when: CI.
     Inputs: none. Output: assertion. Side effects: none. Role: auth shape."""
     tc, _ = client
-    r = tc.get("/v1/me/profile")
+    r = tc.get("/v1/me/context")
     assert r.status_code == 401
     assert ErrorEnvelope.model_validate(r.json()).error.code == "AUTH_INVALID"
 
@@ -135,7 +134,7 @@ def test_unverified_until_verify(client):
     r = tc.get("/v1/sessions/brand-new/claims", headers=HEAD)
     assert r.status_code == 200
     c.UnverifiedClaims.model_validate(r.json())
-    for path in ("/v1/me/context", "/v1/me/profile", "/v1/me/charges"):
+    for path in ("/v1/me/context", "/v1/me/charges"):
         r = tc.get(path, headers={**HEAD, "X-Session-Id": "brand-new"})
         assert r.status_code == 401, path
         assert ErrorEnvelope.model_validate(r.json()).error.code == "SESSION_NOT_VERIFIED"
@@ -182,7 +181,7 @@ def test_unknown_path_and_bad_query_use_envelope(client):
     _verify(tc)
     r = tc.get("/v1/nope", headers=HEAD)
     assert r.status_code == 404 and ErrorEnvelope.model_validate(r.json()).error.code == "NOT_FOUND"
-    r = tc.delete("/v1/me/profile", headers=HEAD)
+    r = tc.delete("/v1/me/context", headers=HEAD)
     assert r.status_code == 405 and ErrorEnvelope.model_validate(r.json()).error.trace_id == "trace-1"
     r = tc.get("/v1/me/charges?since_days=9999", headers=HEAD)
     err = ErrorEnvelope.model_validate(r.json()).error

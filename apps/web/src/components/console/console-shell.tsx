@@ -328,10 +328,11 @@ export function ConsoleShell({
       setAccount,
       pinRef,
       verify: (verification: VerificationInput) => run({ verification }).finally(() => refocus("verify")),
+      noPin: () => run({ verification: { no_pin: true } }).finally(() => store.getState().dismissVerification()),
       decide: (confirm: ConfirmInput) => run({ confirm }).finally(() => refocus("decide")),
       offerTicket: () => run({ ticket_offer: { accept: true } }).finally(() => refocus("decide")),
     }),
-    [busy, locked, run, account, refocus],
+    [busy, locked, run, account, refocus, store],
   );
 
   /**

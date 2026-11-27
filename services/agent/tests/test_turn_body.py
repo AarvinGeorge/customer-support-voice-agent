@@ -122,7 +122,7 @@ async def test_core_401_makes_the_next_model_call_use_v0() -> None:
     w = World(stub_verified=False)  # claims expired at core
     await w.seed({"messages": [HumanMessage("earlier"), AIMessage("ok", id="a0")], **OWNER_STATE})
     await w.turn("show my charges")
-    assert Recording.bound[-1] == ["create_ticket", "request_verification", "search_kb"]
+    assert Recording.bound[-1] == ["request_verification", "search_kb"]  # V0 (D-070: no create_ticket)
     human = [m for m in Recording.seen[-1] if isinstance(m, HumanMessage)][-1]
     assert "verified: false" in human.content and "account_context" not in human.content
     v = await w.values()

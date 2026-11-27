@@ -47,3 +47,81 @@ async def test_last_turn_is_the_latest_other_turn_of_the_session_with_its_status
             for s in (sid, other):
                 await conn.execute("DELETE FROM agent.sessions WHERE session_id = %s", (s,))
         await pool.close()
+
+
+async def test_recent_answers_are_the_latest_finals_of_the_session_newest_first() -> None:
+    # D-071: the issued-number source of POST /transcript; other sessions and turns without a final are left out.
+    import json
+
+    from psycopg_pool import AsyncConnectionPool
+
+    url = os.environ.get("AGENT_PG_TEST_URL", "")
+    if not url:
+        pytest.fail("AGENT_PG_TEST_URL is not set; run scripts/pg_tests.sh (Compose Postgres, migrate_agent)")
+    pool = AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
+    await pool.open()
+    sid, other = str(uuid.uuid4()), str(uuid.uuid4())
+    t0 = datetime.now(UTC)
+    final = {"text": "ticket ending 8352", "say": "ticket ending eight three five two"}
+    rows = [(sid, {"text": "old", "say": "old say"}, t0), (sid, final, t0 + timedelta(seconds=5)),
+            (sid, None, t0 + timedelta(seconds=9)), (other, {"text": "other 1111", "say": "x"}, t0)]
+    try:
+        async with pool.connection() as conn:
+            for s in (sid, other):
+                await conn.execute("INSERT INTO agent.sessions (session_id, visitor_id) VALUES (%s, 'pg-test')", (s,))
+            for s, fin, started in rows:
+                await conn.execute("INSERT INTO agent.turns (turn_id, session_id, client_turn_id, mode, input_kind, "
+                                   "status, deadline_at, started_at, final) VALUES (%s, %s, %s, 'voice', 'voice', "
+                                   "'completed', %s, %s, %s)",
+                                   (str(uuid.uuid4()), s, str(uuid.uuid4()), started + timedelta(seconds=45), started,
+                                    json.dumps(fin) if fin else None))
+        store = PgTurnStore(pool)
+        assert await store.recent_answers(sid, 5) == [final["text"], final["say"], "old", "old say"]
+        assert await store.recent_answers(sid, 1) == [final["text"], final["say"]]
+        assert await store.recent_answers(str(uuid.uuid4()), 5) == []
+        assert await store.issued_tickets(sid) == []  # finals without a ticket give none
+    finally:
+        async with pool.connection() as conn:
+            for s in (sid, other):
+                await conn.execute("DELETE FROM agent.sessions WHERE session_id = %s", (s,))
+        await pool.close()
+
+
+async def test_issued_tickets_are_the_ticket_refs_of_the_session_turn_finals() -> None:
+    # D-071 relay facts (rereview-pr76-r1 N3): positive assertion that the loader's ticket source returns the id.
+    import json
+
+    from psycopg_pool import AsyncConnectionPool
+
+    from agent.voice import load_relay_facts
+
+    url = os.environ.get("AGENT_PG_TEST_URL", "")
+    if not url:
+        pytest.fail("AGENT_PG_TEST_URL is not set; run scripts/pg_tests.sh (Compose Postgres, migrate_agent)")
+    pool = AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
+    await pool.open()
+    sid, other = str(uuid.uuid4()), str(uuid.uuid4())
+    t0 = datetime.now(UTC)
+    ticket = {"ticket_id": "TCK-26718352", "short_id": "8352", "display": "ticket ending 8352"}
+    rows = [(sid, {"text": "ticket ending 8352", "say": "s", "ticket": ticket}, t0),
+            (sid, {"text": "no ticket", "say": "s", "ticket": None}, t0 + timedelta(seconds=1)),
+            (other, {"text": "x", "say": "x", "ticket": {"ticket_id": "TCK-26111111", "short_id": "1111"}}, t0)]
+    try:
+        async with pool.connection() as conn:
+            for s in (sid, other):
+                await conn.execute("INSERT INTO agent.sessions (session_id, visitor_id) VALUES (%s, 'pg-test')", (s,))
+            for s, fin, started in rows:
+                await conn.execute("INSERT INTO agent.turns (turn_id, session_id, client_turn_id, mode, input_kind, "
+                                   "status, deadline_at, started_at, final) VALUES (%s, %s, %s, 'voice', 'voice', "
+                                   "'completed', %s, %s, %s)",
+                                   (str(uuid.uuid4()), s, str(uuid.uuid4()), started + timedelta(seconds=45), started,
+                                    json.dumps(fin)))
+        store = PgTurnStore(pool)
+        assert await store.issued_tickets(sid) == [ticket]
+        facts = await load_relay_facts(store, None, sid)
+        assert facts.ids == {"8352"} and "ticket ending 8352" in facts.lines
+    finally:
+        async with pool.connection() as conn:
+            for s in (sid, other):
+                await conn.execute("DELETE FROM agent.sessions WHERE session_id = %s", (s,))
+        await pool.close()

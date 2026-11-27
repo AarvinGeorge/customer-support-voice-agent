@@ -23,7 +23,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from test_real_gate2_eval import (POLICY, ROOT, SUBSET, VERIFIED, _doc_text, _marcus, _priya_after_refund, _Recorder,
                                   _turn)
 
-from agent.gates import GroundingVerifier, enforce_code_rules, grounded_evidence, reply_truncated
+from agent.gates import GroundingVerifier, enforce_code_rules, reply_truncated, session_evidence
 from agent.untrusted import wrap_search
 from agent.models.config import load_models_config
 from agent.models.registry import ModelRegistry
@@ -128,13 +128,13 @@ async def _run(registry: ModelRegistry, cases: list, *, mode: str = "chat", secs
     bad = []
     for label, draft, values, msgs, expect in cases:
         rec = _Recorder(registry.build("grounding_verifier"))
-        evidence, sources = grounded_evidence(values, msgs)
+        evidence = session_evidence(values, msgs)
         start = time.monotonic()
         raw = await GroundingVerifier(rec).verify(TurnControl(session_id="m", turn_id="m", mode=mode), draft, evidence)
         took = time.monotonic() - start
         if secs is not None:
             secs.append(took)
-        res = enforce_code_rules(raw, draft, {}, tool_names=sources)
+        res = enforce_code_rules(raw, draft, evidence.chunks, tool_names=evidence.ids)
         reply = rec.replies[-1] if rec.replies else None
         meta = getattr(reply, "response_metadata", {}) or {}
         usage = getattr(reply, "usage_metadata", {}) or {}

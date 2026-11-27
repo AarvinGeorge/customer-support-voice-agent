@@ -107,11 +107,12 @@ def build_agent(model: Any, *, fallback_model: Any, checkpointer: BaseCheckpoint
 
 
 def build_agent_from_registry(registry: Any, *, checkpointer: BaseCheckpointSaver,
-                              tools: Sequence[Any] = ()) -> Any:
+                              tools: Sequence[Any] = (), verifier: GroundingVerifier | None = None) -> Any:
     """What: build_agent with the agent, agent_fallback, scope_classifier and grounding_verifier roles from
     models.yaml.
     Use when: the service and the real two-turn cache check.
-    Inputs: ModelRegistry, checkpointer, tools.
+    Inputs: ModelRegistry, checkpointer, tools, the Gate 2 verifier (default: built from the registry; the service
+    passes its own so the start-up warm-up uses the same client).
     Output: compiled agent.
     Side effects: none (clients make no request until called).
     Role: wiring helper; the one place the gate models are attached in the service.
@@ -119,7 +120,7 @@ def build_agent_from_registry(registry: Any, *, checkpointer: BaseCheckpointSave
     return build_agent(registry.build("agent"), fallback_model=registry.build("agent_fallback"),
                        checkpointer=checkpointer, tools=tools,
                        scope_classifier=ScopeClassifier(registry.build("scope_classifier")),
-                       grounding_verifier=GroundingVerifier(registry.build("grounding_verifier")))
+                       grounding_verifier=verifier or GroundingVerifier(registry.build("grounding_verifier")))
 
 
 def run_config(session_id: str, **extra: Any) -> dict[str, Any]:

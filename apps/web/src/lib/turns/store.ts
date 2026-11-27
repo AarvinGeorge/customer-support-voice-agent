@@ -165,6 +165,8 @@ export interface TurnStoreState {
   /** The current 429 or 503 notice, or null. */
   limit: LimitNotice | null;
   clearLimit: () => void;
+  /** Closes the open verification card (after the card's "I don't have my PIN" press, D-070). */
+  dismissVerification: () => void;
   apply: (event: SseEvent) => void;
   /** Adds a user bubble; a voice final passes its Realtime item id, so a repeat is ignored. */
   addUserMessage: (text: string, mode: "chat" | "voice", itemId?: string) => void;
@@ -282,6 +284,7 @@ export function createTurnStore(): StoreApi<TurnStoreState> {
     lastFault: null,
     limit: null,
     clearLimit: () => set({ limit: null }),
+    dismissVerification: () => set({ conversation: { ...get().conversation, awaitingVerification: null } }),
     apply: (event) => {
       const prev = get().conversation;
       const next = reduceEvent(prev, event, Date.now());

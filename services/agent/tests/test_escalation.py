@@ -104,7 +104,8 @@ async def test_gate1_rows_open_exactly_one_code_ticket(reason: str, lead: str) -
     body = ticket_bodies(w)[0][0]
     assert "do you sign a HIPAA BAA?" in body["summary"] and body["category"] == "other"
     thread = (await w.values())["messages"]
-    assert thread[-1].content == outcome.final.text  # the thread line carries the ticket, not the fallback
+    assert thread[-2].content == outcome.final.text  # the thread line carries the ticket, not the fallback
+    assert str(thread[-1].id).startswith("record-")  # then the code-written record of the ticket (D-071)
 
 
 class _Gate2(AgentMiddleware):
@@ -144,7 +145,8 @@ async def test_gate2_hook_removes_the_draft_and_opens_exactly_one_ticket(monkeyp
     assert outcome.final.text.startswith(lead)
     assert_one_code_ticket(w, outcome, events, reason)
     thread = (await w.values())["messages"]
-    assert all(m.id != "draft-1" for m in thread) and thread[-1].content == outcome.final.text
+    assert all(m.id != "draft-1" for m in thread) and thread[-2].content == outcome.final.text
+    assert str(thread[-1].id).startswith("record-")
     if reason == "needs_commitment":
         assert ticket_bodies(w)[0][0]["category"] == "commitment"
 
@@ -179,6 +181,7 @@ async def test_customer_asks_for_a_human_gives_one_model_ticket_and_no_code_tick
     args = {"category": "human_requested", "summary": "Customer asked for a person about SSO setup.",
             "steps_tried": [], "blocking": False}
     w = World([call("create_ticket", args), AIMessage("I've opened ticket ending 8213 for our team.")])
+    await w.seed({"messages": [], **OWNER})  # D-070: the model's create_ticket is offered to verified customers only
     outcome, events = await w.send(text="I want to talk to a human")
     bodies = ticket_bodies(w)
     assert len(bodies) == 1 and bodies[0][0]["origin"] == "model" and bodies[0][1] == f"{SID}:c1"
@@ -188,13 +191,14 @@ async def test_customer_asks_for_a_human_gives_one_model_ticket_and_no_code_tick
     assert outcome.final.ticket.short_id == "8213"
 
 
-async def test_verify_lockout_is_core_owned_with_an_escalated_event_and_no_agent_ticket() -> None:
+async def test_verify_lockout_opens_no_ticket_and_no_escalated_event() -> None:
+    """D-070: a locked session has no requester, so nobody opens a ticket (core used to, inside verify)."""
     w = World(verified=False)
     for _ in range(2):
         await w.send(verification={"account_id": ex.ACCOUNT_ID, "pin": "0000"})
     outcome, events = await w.send(verification={"account_id": ex.ACCOUNT_ID, "pin": "0000"})
-    assert outcome.end_reason == "escalated"
-    assert [(e.reason, e.origin) for e in of(events, "escalated")] == [("verify_locked", "core")]
+    assert outcome.end_reason == "answered" and outcome.final.ticket is None
+    assert of(events, "escalated") == []
     assert w.transport.tickets == []
 
 
@@ -208,7 +212,7 @@ async def test_model_call_limit_opens_the_limit_reached_ticket_in_code() -> None
                                   "ticket for our team, ticket ending 8213.")
     assert_one_code_ticket(w, outcome, events, "limit_reached")
     thread = (await w.values())["messages"]
-    assert thread[-1].content == outcome.final.text
+    assert thread[-2].content == outcome.final.text and str(thread[-1].id).startswith("record-")
 
 
 async def test_both_models_unavailable_apologise_offer_a_ticket_and_create_none() -> None:

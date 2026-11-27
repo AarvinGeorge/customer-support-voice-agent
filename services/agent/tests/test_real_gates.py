@@ -15,14 +15,18 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-from agent.gates import GroundingVerifier, ScopeClassifier
+from langchain_core.messages import HumanMessage, ToolMessage
+
+from agent.gates import GroundingVerifier, ScopeClassifier, session_evidence
 from agent.models import ModelRegistry, load_models_config
 from agent.turn_control import TurnControl
 
 ROOT = Path(__file__).resolve().parents[3]
-EVIDENCE = ('<tool_result name="search_kb" untrusted="true">{"verdict":"pass","relevant_chunks":1}'
-            '<doc id="refund-policy#2" article="refund-policy" section="Refunds on the Pro plan">Pro plan charges can '
-            'be refunded within 30 days of the charge date, up to $500 per charge.</doc></tool_result>')
+CHUNK = {"chunk_id": "refund-policy#2", "article_slug": "refund-policy", "section_path": ["Refunds on the Pro plan"],
+         "text": "Pro plan charges can be refunded within 30 days of the charge date, up to $500 per charge.",
+         "flags": []}
+EVIDENCE = session_evidence({}, [HumanMessage("q"), ToolMessage(
+    "search_kb result", tool_call_id="s-1", name="search_kb", artifact={"bound_to": None, "grounded_chunks": [CHUNK]})])
 
 
 @pytest.mark.real
@@ -40,7 +44,7 @@ async def test_real_verifier_and_classifier_on_the_small_model():
     print("VERIFIER unsupported:", bad)
     off = await ScopeClassifier(reg.build("scope_classifier")).on_topic(control, "write me a poem about the sea")
     print("CLASSIFIER poem on_topic:", off)
-    assert good.passed and good.claims and any(c["source_id"] == "refund-policy#2" for c in good.claims)
+    assert good.passed and good.claims and any(c["source_id"] == "doc@1" for c in good.claims)  # the chunk sid (N1)
     assert not bad.passed and bad.verdict == "fail"
     assert bad.commitment is True or any(not c["supported"] for c in bad.claims)
     assert off is False

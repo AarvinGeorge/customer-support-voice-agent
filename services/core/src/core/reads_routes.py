@@ -64,8 +64,8 @@ def me_charges(request: Request, ending: Ending = None, on: date | None = None,
 
 def me_tickets(request: Request, status: Literal["open", "all"] = "open", ending: Ending = None) -> JSONResponse:
     """What: the tickets the caller may see. Use when: the list_tickets tool. Inputs: request, status (open or all),
-    ending. Output: 200 {tickets}. Side effects: reads. Role: doc 07 s3.2; an unverified session sees its own session's
-    tickets, so there is no 401 here."""
+    ending. Output: 200 {tickets}. Side effects: reads. Role: doc 07 s3.2; an unverified session gets an empty list
+    (D-070: it can own no ticket), so there is no 401 here."""
     session_id = get_ctx(request).require_session()
     policy, clock = request.app.state.policy, request.app.state.clock
     with _db(request).tx() as conn:

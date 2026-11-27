@@ -134,6 +134,7 @@ def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseT
         return "ok", {"verdict": verdict,
                       "instruction": WEAK_RETRIEVAL_INSTRUCTION if decision == "clarify" else None,
                       "docs": docs, "chunk_ids": [c["chunk_id"] for c in resp["chunks"]],
+                      "grounded_chunks": [c for c in resp["chunks"] if c.get("relevant")],  # D-065, code-held
                       "confidence": resp["confidence"]}
 
     async def request_verification(**raw: Any) -> Result:

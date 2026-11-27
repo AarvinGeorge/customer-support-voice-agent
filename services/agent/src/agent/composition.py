@@ -14,8 +14,10 @@ the step 9a PIN scan before any body, and the typed-PIN refusal (TypedPinRefusal
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +27,8 @@ from fastapi import FastAPI
 from agent.assembly import build_agent_from_registry
 from agent.clients.core_agent import CoreAgentClient
 from agent.clients.knowledge import KnowledgeClient
+from agent.gates import GroundingVerifier, warm_up_verifier
+from agent.escalation import EscalationHolds, Escalator
 from agent.ingress import CallKeys, Ingress, IngressInput, MergeTranscript, PgTurnStore, RedisTurnLock, TurnLock
 from agent.settings import Settings, secret_problem
 from agent.pin_guard import TypedPinRefusal
@@ -48,7 +52,8 @@ _PIN_PROBE = "my PIN is 4821"
 @dataclass(frozen=True)
 class AgentRuntime:
     """What: the built agent and what it was built from. Use when: build_ingress, tests.
-    Inputs: compiled agent, tools, core client, knowledge client, model registry (prices for cost_of).
+    Inputs: compiled agent, tools, core client, knowledge client, model registry (prices for cost_of), the Gate 2
+    verifier.
     Output: value. Side effects: none. Role: one bundle per process."""
 
     agent: Any
@@ -56,6 +61,7 @@ class AgentRuntime:
     core: CoreAgentClient
     knowledge: KnowledgeClient
     registry: Any
+    verifier: Any = None  # the Gate 2 GroundingVerifier the agent was built with (warm-up at start, PR #71 N2)
 
 
 def build_agent_runtime(cfg: Settings, *, http: httpx.AsyncClient, checkpointer: Any,
@@ -70,23 +76,49 @@ def build_agent_runtime(cfg: Settings, *, http: httpx.AsyncClient, checkpointer:
     core = CoreAgentClient(cfg.core_url, cfg.core_token_agent, http=http, demo_faults_enabled=cfg.demo_faults_enabled)
     knowledge = KnowledgeClient(cfg.knowledge_url, cfg.knowledge_token_agent, http=http)
     tools = build_tools(core, knowledge)
-    agent = build_agent_from_registry(registry, checkpointer=checkpointer, tools=tools)
-    return AgentRuntime(agent=agent, tools=tools, core=core, knowledge=knowledge, registry=registry)
+    verifier = GroundingVerifier(registry.build("grounding_verifier"))
+    agent = build_agent_from_registry(registry, checkpointer=checkpointer, tools=tools, verifier=verifier)
+    return AgentRuntime(agent=agent, tools=tools, core=core, knowledge=knowledge, registry=registry, verifier=verifier)
+
+
+PROVIDER_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+
+
+def start_verifier_warm_up(verifier: Any, provider: str) -> "asyncio.Task[bool] | None":
+    """What: schedule warm_up_verifier as a background task, so the provider compiles the verifier grammar before
+    the first customer turn (review PR #71 N2); readiness never waits for it.
+    Use when: wire_app, once per process, inside the running event loop.
+    Inputs: the verifier (None: skipped), the grounding_verifier provider (models.yaml). Output: the task, or None
+    when there is no verifier, the provider key is not set (tests, CI) or no loop is running. Side effects: one background model call; a log line.
+    Role: start-up warm-up; never fails startup."""
+    if verifier is None:
+        return None
+    if not os.environ.get(PROVIDER_KEYS.get(provider, ""), ""):
+        log.info("verifier warm-up skipped: no %s key", provider)
+        return None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    return loop.create_task(warm_up_verifier(verifier), name="verifier-warm-up")
 
 
 def build_ingress(runtime: Any, *, store: PgTurnStore | Any, lock: TurnLock, served_by: str, commit: CoreCommitClient,
                   flags: SessionFlags | None, call_keys: CallKeys | None = None,
-                  merge_transcript: MergeTranscript | None = None, **extra: Any) -> Ingress:
+                  merge_transcript: MergeTranscript | None = None, holds: EscalationHolds | None = None,
+                  **extra: Any) -> Ingress:
     """What: the one Ingress for chat and voice, with the TurnRunner body: StructuredInput (verification card,
     ticket_offer, confirm press, strict yes or no) on the agent client, the Confirmer on the commit client, and
     last_turn from the same turn store (so a typed yes after a delivered read-back commits).
     Use when: wire_app; tests with memory stores. Inputs: AgentRuntime (agent, core, registry), turn store (with
-    last_turn), turn lock, replica name, commit client, session flags, voice call keys, transcript merger, extra
-    Ingress keyword arguments (trajectory). Output: Ingress. Side effects: none. Role: wiring."""
+    last_turn), turn lock, replica name, commit client, session flags, voice call keys, transcript merger, the
+    escalation hold store (D-070; production passes the same PgSessionFlags), extra Ingress keyword arguments
+    (trajectory). Output: Ingress. Side effects: none. Role: wiring."""
     confirmer = Confirmer(commit, agent_ticket_opener(runtime.core))
-    structured = StructuredInput(runtime.core, confirmer, flags=flags, last_turn=store.last_turn)
+    escalator = Escalator(runtime.core, holds=holds)  # one escalator: the loop, step 13 and the card share the hold
+    structured = StructuredInput(runtime.core, confirmer, flags=flags, last_turn=store.last_turn, escalator=escalator)
     body = TurnRunner(runtime.agent, runtime.core, structured=structured, flags=flags,
-                      cost_of=runtime.registry.cost_for_model)
+                      cost_of=runtime.registry.cost_for_model, escalator=escalator)
     return Ingress(store, lock, served_by=served_by, run_agent=body, call_keys=call_keys,
                    merge_transcript=merge_transcript,
                    refuse_typed_pin=TypedPinRefusal(runtime.agent, flags), flags=flags, **extra)
@@ -117,12 +149,16 @@ def wire_app(app: FastAPI, cfg: Settings) -> Ingress | None:
         return None
     extra = {"trajectory": state.trajectory} if getattr(state, "trajectory", None) is not None else {}
     store = PgTurnStore(state.pg_pool)
+    flags = PgSessionFlags(state.pg_pool)  # also the D-070 escalation hold store (agent.sessions)
     ingress = build_ingress(runtime, store=store, lock=RedisTurnLock(state.redis), served_by=cfg.served_by,
-                            commit=commit, flags=PgSessionFlags(state.pg_pool), call_keys=RedisCallKeys(state.redis),
-                            merge_transcript=TranscriptMerger(PgVoiceStore(state.pg_pool)), **extra)
+                            commit=commit, flags=flags, call_keys=RedisCallKeys(state.redis),
+                            merge_transcript=TranscriptMerger(PgVoiceStore(state.pg_pool)), holds=flags, **extra)
     state.ingress = ingress
     if getattr(state, "voice", None) is not None:
         state.voice.ingress = ingress
+    spec = getattr(runtime.registry, "spec", None)
+    provider = str(getattr(spec("grounding_verifier"), "provider", "")) if callable(spec) else ""
+    state.verifier_warm_up = start_verifier_warm_up(getattr(runtime, "verifier", None), provider)
     return ingress
 
 
@@ -220,6 +256,9 @@ def wiring_gaps(app: Any) -> tuple[list[str], list[str]]:
                 gaps.append("last_turn: StructuredInput has no last_turn, every typed yes would repeat the read-back")
             if body.flags is None:
                 gaps.append("session flags: the TurnRunner has no flags, awaiting_verification would never be set")
+            if body.escalator.holds is None or structured.escalator is not body.escalator:
+                gaps.append("escalation holds: an unverified escalation would not be held for the verification card "
+                            "(D-070), or the loop and the card use different escalators")
             if body.cost_of is None:
                 gaps.append("cost_of: the TurnRunner has no price lookup, cost_usd_est would stay 0")
     return gaps, pending_safety(getattr(getattr(ingress, "run_agent", None), "agent", None))

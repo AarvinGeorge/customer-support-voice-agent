@@ -28,7 +28,7 @@ from contracts import limits
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import AIMessage, RemoveMessage
 
-from agent.line_ids import GATE2, line_id
+from agent.line_ids import GATE2, code_line
 from agent.gates import (
     CHECKING_POLICY_LINE,
     CLARIFY_LINE,
@@ -37,8 +37,8 @@ from agent.gates import (
     GroundingVerifier,
     citations_for,
     enforce_code_rules,
-    grounded_evidence,
     is_code_line,
+    session_evidence,
     start_gate_step,
 )
 from agent.middleware.router import OpenTicket, route_message
@@ -75,18 +75,25 @@ class GroundingMiddleware(AgentMiddleware):
         if control.events is not None:
             control.events.emit("status", kind="checking_policy", message=CHECKING_POLICY_LINE)
         step = start_gate_step(control, "grounding_gate", "Checking the answer against policy")
-        evidence, sources = grounded_evidence(state, messages[:-1])
+        evidence = session_evidence(state, messages[:-1], control)  # D-065, D-071: session-scoped, with provenance
         result = await self.verifier.verify(control, text, evidence)
-        result = enforce_code_rules(result, text, control.retrieval_chunks, tool_names=sources)
+        result = enforce_code_rules(result, text, evidence.chunks, tool_names=evidence.ids)
         failures = int(state.get("grounding_failures") or 0)
         claims = result.claims
+        # The gate event names a help-article claim by its chunk id (the drawer's id), not by its doc@n sid (N1).
+        shown = [{**c, "source_id": evidence.chunks[c["source_id"]]["chunk_id"]} if c.get("source_id") in evidence.chunks
+                 else c for c in claims]
         counts: dict[str, Any] = {"claims_total": len(claims), "claims_supported": sum(c["supported"] for c in claims),
-                                  "claims": claims, "commitment": result.commitment,
-                                  "chunk_ids": sorted(control.retrieval_chunks)}
+                                  "claims": shown, "commitment": result.commitment,
+                                  "chunk_ids": sorted(str(c["chunk_id"]) for c in evidence.chunks.values())}  # M6
+        sources = {c["source_id"]: evidence.provenance[c["source_id"]] for c in claims
+                   if c["supported"] and c.get("source_id") in evidence.provenance}  # review PR #71 I4
         if result.passed:
             control.grounding = "pass"
-            control.citations = citations_for(control, result)
-            step.finish(gate="grounding", verdict="pass", decision="answer", title=_TITLES["answer"], **counts)
+            control.grounding_supported = counts["claims_supported"]
+            control.citations = citations_for(control, result, evidence.chunks)
+            step.finish(gate="grounding", verdict="pass", decision="answer", title=_TITLES["answer"],
+                        sources=sources, **counts)
             return {"grounding_failures": 0} if failures else None
         control.grounding = "fail"
         if result.commitment:
@@ -101,10 +108,10 @@ class GroundingMiddleware(AgentMiddleware):
         detail = ERROR_DETAILS.get(result.reason or "") if error else (
             NO_CLAIMS_DETAIL if result.reason == "no_claims_unexplained" else None)
         step.finish(gate="grounding", verdict=verdict, decision=decision, title=_TITLES[decision],
-                    status="error" if error else "ok", reason=result.reason, detail=detail, **counts)
+                    status="error" if error else "ok", reason=result.reason, detail=detail, sources=sources, **counts)
         removal = RemoveMessage(id=str(draft.id))
         if reason is None:
-            line = AIMessage(CLARIFY_LINE, id=line_id(GATE2, control.turn_id))
+            line = code_line(GATE2, control.turn_id, CLARIFY_LINE, control.identity)
             control.gate_message_id = line.id
             return {"messages": [removal, line], "grounding_failures": failures + 1, "jump_to": "end"}
         control.route = None  # no route can be pending here: one would have ended the turn before this model call

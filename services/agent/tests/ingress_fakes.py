@@ -66,6 +66,18 @@ class MemoryTurnStore:
         rows = [t for t in self.turns.values() if t.session_id == session_id and t.turn_id != before_turn_id]
         return (rows[-1].turn_id, rows[-1].status) if rows else None
 
+    async def recent_answers(self, session_id: str, limit: int) -> list[str]:
+        """What: final text and say of the latest finished turns. Use when: POST /transcript (D-071).
+        Inputs: session id, turn count. Output: strings, newest first. Side effects: none. Role: fake."""
+        rows = [t for t in self.turns.values() if t.session_id == session_id and t.final][::-1][:limit]
+        return [v for t in rows for v in ((t.final or {}).get("text"), (t.final or {}).get("say")) if v]
+
+    async def issued_tickets(self, session_id: str) -> list[dict[str, Any]]:
+        """What: final.ticket of every finished turn that has one. Use when: RelayFacts (D-071).
+        Inputs: session id. Output: ticket dicts. Side effects: none. Role: fake."""
+        return [t.final["ticket"] for t in self.turns.values()
+                if t.session_id == session_id and t.final and isinstance(t.final.get("ticket"), dict)]
+
     async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None:
         """What: final row. Use when: step 16. Inputs: id, outcome, time. Output: none. Side effects: updates. Role: fake."""
         t = self.turns[turn_id]
