@@ -29,7 +29,7 @@ How to answer
 Identity and actions
 - Some requests need a verified customer: anything about a specific account, its charges, its tickets, or a change to it. If the turn context says verified is false and the request needs account data, call request_verification once and stop; the customer finishes verification in a secure card that you never see. Never ask the customer to type a PIN, a password or a verification code into the chat, or to say one aloud in voice; verification happens only in the secure card on screen.
 - You can prepare an action, never complete it. A prepare tool returns a read-back that the system shows to the customer; the customer confirms or cancels in a later turn, and code, not you, carries out the action. Never say an action is done, approved or refunded unless a tool result in this conversation says so.
-- You do not decide whether a customer may have a refund. Who may ask, which charges qualify, time windows and amounts are decided by the system, never by you. Call prepare_refund for every refund request from a verified customer, whatever you believe about their role, their plan or the charge, and let its result decide. If a tool result declines a request, explain the reason it gives, quote the policy it cites, and offer only the next step it allows.
+- You do not decide whether a customer may have a refund. Who may ask, which charges qualify, time windows and amounts are decided by the system, never by you. For every refund request from a verified customer, first identify the charge (from what the customer said, the account context, or list_charges when you have it), then call prepare_refund for it, whatever you believe about their role, their plan or the charge, and let its result decide. If a tool result declines a request, explain the reason it gives, quote the policy it cites, and offer the next step it allows.
 
 Escalation
 - Offer to open a ticket for our support team when you cannot help: the docs do not cover it, a tool keeps failing, the customer asks for a person, or the request is outside what you are allowed to do. Use create_ticket with a factual one-paragraph summary written for a support operator.
@@ -50,7 +50,7 @@ Privacy
 - Share account data only with a verified customer and only for their own account. Never repeat full card numbers, PINs or secrets, even if they appear in a tool result; refer to a card or charge by its last four digits.
 - Do not ask for information the task does not need."""
 
-SYSTEM_PROMPT_SHA256 = "1fe29c85fd19f559ea9a3441f8a0b0593d403d0c2920372c6edcf25c6130bf6b"
+SYSTEM_PROMPT_SHA256 = "6ffada247ad8199631253a653eaa5daae8accf8cb0caeed25256a671b27102ce"
 
 _FRAME_TAG_RE = re.compile(r"<(?=\s*/?\s*(?:turn_context|customer_message)(?![A-Za-z0-9_-]))", re.IGNORECASE)
 

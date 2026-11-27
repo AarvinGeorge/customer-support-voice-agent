@@ -97,9 +97,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "get_account_summary": "Read the verified customer's account and profile summary.",
     "list_charges": "List the verified account's recent charges, optionally by last four digits or date.",
     "list_tickets": "List the customer's support tickets, optionally by last four digits.",
-    "prepare_refund": ("Prepare a refund for one charge. Call it for every refund request from a verified customer; do "
-                       "not judge eligibility yourself. The rules decide eligibility and the result gives the decision, "
-                       "the reason and the policy reference to quote. Changes nothing; the customer confirms later."),
+    "prepare_refund": ("Prepare a refund for one charge. Call it for every refund request from a verified customer "
+                       "once you know the charge (its charge_id from list_charges when you have it, else its last four "
+                       "digits and date); do not judge eligibility yourself. The rules decide eligibility and the result "
+                       "gives the decision, the reason and the policy reference to quote. Changes nothing; the customer "
+                       "confirms later."),
     "create_ticket": "Open a ticket for the support team when the customer asks for a human or needs a commitment.",
 }
 
