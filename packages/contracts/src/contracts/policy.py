@@ -22,7 +22,6 @@ from pydantic import (AfterValidator, BaseModel, ConfigDict, PositiveInt, Valida
                       field_validator, model_validator)
 
 from contracts.core_api import ContractStatus, Role, TicketCategory
-from contracts.core_api import Tier as TierName
 from contracts.reason_codes import ReasonCode
 
 APPROVAL_QUESTION = "Shall I send this to our team for approval?"
