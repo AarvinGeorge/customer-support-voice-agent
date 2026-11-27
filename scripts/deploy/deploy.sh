@@ -32,6 +32,8 @@ commands:
   reseed          wipe and reseed the demo data (run before the Loom take), then smoke
   smoke           read /readyz from core, knowledge and the edge, then one chat turn
   check           validate the env file only
+  backup          take and verify the pre-migrate backup now (normally part of `up`)
+  restore         restore the recorded backup onto the rollback tag's state (normally `rollback --restore-db`)
   render-env      write an env file from the process environment (GitHub secrets); needs --out
 options: --env-file FILE (default .env)  --local (laptop dry-run: no git, local overlay)  --print (show commands, run none)
          --state-dir DIR  --out FILE  --restore-db (rollback only)
@@ -53,7 +55,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$CMD" ] || { usage >&2; die "usage: a command is required" 2; }
-case "$CMD" in up|rollback|reseed|smoke|check|render-env) ;; *) usage >&2; die "unknown command: $CMD" 2 ;; esac
+case "$CMD" in up|rollback|reseed|smoke|check|render-env|backup|restore) ;; *) usage >&2; die "unknown command: $CMD" 2 ;; esac
 [ "$CMD" != up ] || [ "$LOCAL" = 1 ] || [ -n "$TAG" ] || die "up needs --tag TAG (the tag to ship)" 2
 
 step() { echo "== $*"; }
@@ -104,6 +106,8 @@ preflight() {
 
 COMPOSE_FILES=(-f compose.yaml)
 [ "$LOCAL" = 0 ] || COMPOSE_FILES+=(-f scripts/deploy/compose.local.yaml)
+# DEPLOY_COMPOSE_FILES (space separated) replaces the list: only scripts/deploy/restore_pg_test.sh sets it, to a postgres-only stack.
+if [ -n "${DEPLOY_COMPOSE_FILES:-}" ]; then COMPOSE_FILES=(); for f in $DEPLOY_COMPOSE_FILES; do COMPOSE_FILES+=(-f "$f"); done; fi
 compose() { run docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" "$@"; }
 # dc: a read-only compose call whose output the script uses (not echoed).
 dc() { docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" "$@"; }
@@ -214,42 +218,75 @@ wait_note() { echo "(waiting for healthy: --wait, up to 180 s)"; }
 
 PSQL=(postgres psql -U postgres -v ON_ERROR_STOP=1 -tA)
 
-# schema_exists: 0 when the three service schemas already hold data (a re-deploy), 1 on a fresh database.
-schema_exists() {
+SCHEMAS="core knowledge agent"
+SCHEMA_IN="'core','knowledge','agent'"
+# tables_exist: 0 when the service schemas already hold tables (a re-deploy), 1 on a fresh database.
+tables_exist() {
   [ "$PRINT" = 0 ] || return 0
-  [ "$(dc exec -T "${PSQL[@]}" -d quillstack -c "select count(*) from information_schema.tables where table_schema in ('core','knowledge','agent')")" -gt 0 ]
+  [ "$(dc exec -T "${PSQL[@]}" -d quillstack -c "select count(*) from information_schema.tables where table_schema in ($SCHEMA_IN)")" -gt 0 ]
 }
-table_count() { dc exec -T "${PSQL[@]}" -d "$1" -c "select count(*) from information_schema.tables where table_schema in ('core','knowledge','agent')"; }
+table_count() { dc exec -T "${PSQL[@]}" -d "$1" -c "select count(*) from information_schema.tables where table_schema in ($SCHEMA_IN)"; }
+# counts DB: "schema.table rows" per base table, sorted. The manifest of a backup and the check after a restore.
+counts() {
+  dc exec -T "${PSQL[@]}" -d "$1" -c "select format('%s.%s', table_schema, table_name) || ' ' || (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', table_schema, table_name), false, true, '')))[1]::text from information_schema.tables where table_schema in ($SCHEMA_IN) and table_type='BASE TABLE' order by 1"
+}
 
-# backup TAG: pg_dump before any migration, then READ IT BACK: size, completion marker, table count, and a restore into a scratch DB.
+# Backup record (<state-dir>/backup, three lines): file, BASE (the good tag the dump was taken on top of, or none), TAG (the release it precedes).
+rec_get() { sed -n "$1p" "$STATE_DIR/backup" 2>/dev/null || true; }
+
+# backup TAG: pg_dump of the three service schemas before any migration, read back: size, marker, a restore into a scratch DB,
+# table count equal to live, and a manifest of row counts written beside the dump (taken from the scratch restore, so it describes the file).
 backup() {
-  step "backup before migrate (pg_dump, size, marker and a restore test into a scratch database)"
-  if [ "$PRINT" = 1 ]; then echo "+ pg_dump quillstack to $STATE_DIR/backups/pre-$1-<time>.sql, then restore into scratch db quillstack_restore_check and compare table counts"; return 0; fi
-  if ! schema_exists; then echo "backup: fresh database (no service schema yet), nothing to back up"; return 0; fi
+  step "backup before migrate (pg_dump of core, knowledge, agent; size, marker, scratch restore and row-count manifest)"
+  if [ "$PRINT" = 1 ]; then echo "+ pg_dump quillstack to $STATE_DIR/backups/pre-$1-<time>.sql, restore into scratch db quillstack_restore_check, write <file>.manifest, record base good tag"; return 0; fi
+  if ! tables_exist; then echo "backup: fresh database (no service tables yet), nothing to back up"; return 0; fi
+  local base; base="$(st_get good)"; base="${base:-none}"
+  if [ -f "$STATE_DIR/backup" ] && [ "$(rec_get 2)" = "$base" ] && [ -f "$(rec_get 1)" ]; then
+    echo "backup: keeping the backup of the first attempt on top of $base: $(rec_get 1) (a retry must not overwrite the good state)"; return 0
+  fi
   mkdir -p "$STATE_DIR/backups"; chmod 700 "$STATE_DIR/backups"
-  local f="$STATE_DIR/backups/pre-$1-$(date -u +%Y%m%dT%H%M%SZ).sql" want got size
-  ( umask 077; dc exec -T postgres pg_dump -U postgres --clean --if-exists quillstack > "$f" ) || die "pg_dump failed"
+  local f="$STATE_DIR/backups/pre-$1-$(date -u +%Y%m%dT%H%M%SZ).sql" want got size nargs=()
+  for n in $SCHEMAS; do nargs+=(-n "$n"); done
+  ( umask 077; dc exec -T postgres pg_dump -U postgres --clean --if-exists "${nargs[@]}" quillstack > "$f" ) || die "pg_dump failed"
   size="$(wc -c < "$f" | tr -d ' ')"
   [ "$size" -gt 1000 ] || die "backup is only $size bytes: refusing to continue"
   grep -q 'PostgreSQL database dump complete' "$f" || die "backup has no completion marker: refusing to continue"
   dc exec -T "${PSQL[@]}" -d postgres -c "drop database if exists quillstack_restore_check" >/dev/null
   dc exec -T "${PSQL[@]}" -d postgres -c "create database quillstack_restore_check" >/dev/null
+  dc exec -T "${PSQL[@]}" -d quillstack_restore_check -c "create extension if not exists vector" >/dev/null
   dc exec -T "${PSQL[@]}" -d quillstack_restore_check < "$f" >/dev/null || die "restore test into the scratch database failed"
   want="$(table_count quillstack)"; got="$(table_count quillstack_restore_check)"
+  ( umask 077; counts quillstack_restore_check > "$f.manifest" ) || die "could not write the manifest"
   dc exec -T "${PSQL[@]}" -d postgres -c "drop database quillstack_restore_check" >/dev/null
   [ "$want" = "$got" ] || die "restore test table count $got differs from live $want"
-  printf '%s\n' "$f" > "$STATE_DIR/last_backup"
-  echo "backup ok: $f ($size bytes, $got service tables restored into a scratch db and dropped)"
+  [ "$(wc -l < "$f.manifest" | tr -d ' ')" = "$got" ] || die "manifest does not list every table"
+  printf '%s\n%s\n%s\n' "$f" "$base" "$1" > "$STATE_DIR/backup"
+  echo "backup ok: $f ($size bytes, $got tables restored into a scratch db and dropped; manifest $f.manifest; base $base, precedes $1)"
 }
 
+# restore_backup EXPECT_TAG: put the database back to the backup taken on top of EXPECT_TAG (the last good tag), all or nothing.
+# The three service schemas are dropped (CASCADE, so objects a failed release added vanish) and the dump replayed in ONE transaction:
+# any failure rolls back and leaves the database exactly as it was. Then every table's row count is compared with the manifest.
 restore_backup() {
-  local f; f="$(cat "$STATE_DIR/last_backup" 2>/dev/null || true)"
-  [ -n "$f" ] && [ -f "$f" ] || die "--restore-db: no backup recorded in $STATE_DIR/last_backup"
-  step "restore database from $f (app services stopped first)"
+  local want_base="$1" f base
+  [ -f "$STATE_DIR/backup" ] || die "--restore-db: no backup recorded in $STATE_DIR/backup"
+  f="$(rec_get 1)"; base="$(rec_get 2)"
+  [ -f "$f" ] && [ -f "$f.manifest" ] || die "--restore-db: backup file or manifest is missing: $f"
+  [ "$base" = "$want_base" ] || die "--restore-db: the recorded backup was taken on top of '$base', not on the rollback tag '$want_base'; refusing to restore a backup from another release"
+  step "restore database from $f (app services stopped first; one transaction; manifest check after)"
   compose stop agent_a agent_b core knowledge
-  [ "$PRINT" = 1 ] && { echo "+ psql quillstack < $f"; return 0; }
-  dc exec -T "${PSQL[@]}" -d quillstack < "$f" >/dev/null || die "database restore failed; the backup file is kept at $f"
-  echo "restore ok"
+  if [ "$PRINT" = 1 ]; then echo "+ psql --single-transaction: drop schemas $SCHEMAS cascade, replay $f, then compare counts with $f.manifest"; return 0; fi
+  local drops="" n
+  for n in $SCHEMAS; do drops="$drops drop schema if exists $n cascade;"; done
+  if ! { echo "$drops"; cat "$f"; } | dc exec -T postgres psql -U postgres -d quillstack -v ON_ERROR_STOP=1 --single-transaction -q >/dev/null; then
+    echo "deploy: restore failed and was rolled back: the database is unchanged. Restarting the app services as they were." >&2
+    docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" start agent_a agent_b core knowledge >&2 || true
+    die "database restore failed; the backup file is kept at $f"
+  fi
+  if [ "$(counts quillstack)" != "$(cat "$f.manifest")" ]; then
+    die "restore finished but the row counts differ from the manifest $f.manifest: do not start the app; investigate (the database is the backup replay, not a partial state)"
+  fi
+  echo "restore ok: $(wc -l < "$f.manifest" | tr -d ' ') tables, every row count equals the manifest"
 }
 
 migrate_and_seed() {
@@ -265,10 +302,11 @@ migrate_and_seed() {
 inflight_gate() {
   step "in-flight check before the switch (agent.turns running and not past deadline)"
   if [ "$PRINT" = 1 ]; then echo "+ psql: count running turns; wait up to \${INFLIGHT_WAIT_S:-90} s, abort if any remain"; return 0; fi
-  local waited=0 max="${INFLIGHT_WAIT_S:-90}" n
+  local waited=0 max="${INFLIGHT_WAIT_S:-90}" n reg
   while :; do
-    if [ "$(dc exec -T "${PSQL[@]}" -d quillstack -c "select to_regclass('agent.turns') is not null")" = t ]; then
-      n="$(dc exec -T "${PSQL[@]}" -d quillstack -c "select count(*) from agent.turns where status='running' and deadline_at > now()")"
+    reg="$(dc exec -T "${PSQL[@]}" -d quillstack -c "select to_regclass('agent.turns') is not null")" || die "in-flight check could not read the database: not switching"
+    if [ "$reg" = t ]; then
+      n="$(dc exec -T "${PSQL[@]}" -d quillstack -c "select count(*) from agent.turns where status='running' and deadline_at > now()")" || die "in-flight count failed: not switching"
     else n=0; fi
     echo "in-flight turns: $n (running tag: $(cat "$STATE_DIR/good" 2>/dev/null || echo none))"
     [ "$n" = 0 ] && return 0
@@ -306,6 +344,8 @@ begin_up() { # begin_up TAG: save the rollback point BEFORE any change
   mkdir -p "$STATE_DIR"
   local g; g="$(st_get good)"
   if [ -n "$g" ]; then printf '%s\n' "$g" > "$STATE_DIR/rollback_to"; else rm -f "$STATE_DIR/rollback_to"; fi
+  # A backup record survives only for a retry on top of the same good tag (the first attempt's backup is the good state).
+  if ! { [ -f "$STATE_DIR/pending" ] && [ -f "$STATE_DIR/backup" ] && [ "$(rec_get 2)" = "${g:-none}" ] && [ -f "$(rec_get 1)" ]; }; then rm -f "$STATE_DIR/backup"; fi
   printf '%s\n' "$1" > "$STATE_DIR/pending"
   echo "rollback point: ${g:-none (first deploy)}"
 }
@@ -338,6 +378,8 @@ case "$CMD" in
     done
     chmod 600 "$tmp"; mv "$tmp" "$OUT"
     echo "wrote $OUT (mode 600, $(wc -l < "$OUT" | tr -d ' ') variables, single-quoted; values not shown)" ;;
+  backup) backup "${TAG:-manual}" ;;
+  restore) [ -f "$STATE_DIR/rollback_to" ] || die "no rollback tag recorded in $STATE_DIR/rollback_to"; restore_backup "$(st_get rollback_to)" ;;
   check) preflight ;;
   smoke) preflight; if ! ( smoke ); then die "smoke FAILED"; fi ;;
   up)
@@ -358,7 +400,7 @@ case "$CMD" in
     checkout_tag "$prev"
     step "rollback build"
     compose --profile seed --profile jobs build
-    [ "$RESTORE_DB" = 0 ] || restore_backup
+    [ "$RESTORE_DB" = 0 ] || restore_backup "$prev"
     rolling_restart
     if ! ( smoke ); then die "smoke FAILED after rollback to $prev"; fi
     if [ "$PRINT" = 0 ]; then

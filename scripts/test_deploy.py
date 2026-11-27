@@ -246,6 +246,8 @@ STUB_DOCKER = r"""#!/bin/bash
 a="$*"
 echo "docker $a" >> "$STUB_LOG"
 case "$a" in
+  *pg_dump*) if [ -n "${STUB_SHORT:-}" ]; then echo tiny; else echo "-- fake dump"; for i in $(seq 1 60); do echo "-- padding line $i to make the file longer than one thousand bytes"; done; echo "-- PostgreSQL database dump complete"; fi ;;
+  *query_to_xml*) for i in $(seq 1 "${STUB_SCHEMAS:-0}"); do echo "core.t$i 1"; done ;;
   *"-T core python"*) echo "200 {\"status\":\"ready\",\"contract_version\":\"$CV\",\"policy_version\":\"$PV\",\"demo_faults\":true,\"seed_date\":\"2026-11-27\"}" ;;
   *"-T knowledge python"*) echo "200 {\"status\":\"ready\",\"database\":\"ok\",\"chunks\":74,\"embedding_model\":\"$EM\",\"calibration_status\":\"provisional\"}" ;;
   *"ps -q "*) echo "cid-${a##* }" ;;
@@ -358,13 +360,57 @@ def test_inflight_turns_abort_the_switch(tmp_path: Path) -> None:
     assert "force-recreate" not in (tmp_path / "stub.log").read_text()
 
 
-def test_backup_runs_when_schemas_exist_and_marks_checks(tmp_path: Path) -> None:
-    """What: with existing schemas the backup step runs pg_dump and then refuses a tiny or unmarked dump. Use when: pytest.
-    Inputs: tmp. Output: assert. Side effects: tmp state. Role: I3 (the stub dumps nothing, so the read-back must fail loudly)."""
-    p = real(["up", "--tag", "v1"], tmp_path, STUB_SCHEMAS="3")
+def test_backup_read_back_refuses_a_tiny_dump(tmp_path: Path) -> None:
+    """What: with existing tables the backup step runs pg_dump and refuses a tiny dump before any migration. Use when: pytest.
+    Inputs: tmp. Output: assert. Side effects: tmp state. Role: I3 (the read-back must be able to fail)."""
+    p = real(["up", "--tag", "v1"], tmp_path, STUB_SCHEMAS="3", STUB_SHORT="1")
     assert p.returncode != 0 and "backup is only" in p.stderr
     assert "pg_dump" in (tmp_path / "stub.log").read_text()
     assert "migrate_core" not in (tmp_path / "stub.log").read_text()
+
+
+def test_backup_is_bound_to_base_and_release_and_a_retry_keeps_the_first(tmp_path: Path) -> None:
+    """What: each backup records its base good tag and the release it precedes; a retry on the same base keeps the first.
+    Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: N2 (last_backup could point at the wrong backup)."""
+    assert real(["up", "--tag", "v1"], tmp_path, STUB_SCHEMAS="3").returncode == 0
+    assert real(["up", "--tag", "v2"], tmp_path, STUB_SCHEMAS="3").returncode == 0
+    rec = (tmp_path / "state" / "backup").read_text().splitlines()
+    assert rec[1:] == ["v1", "v2"] and Path(rec[0]).exists() and Path(rec[0] + ".manifest").exists()
+    assert real(["up", "--tag", "v3"], tmp_path, STUB_SCHEMAS="3", STUB_FAIL_EDGE="1").returncode != 0
+    first = (tmp_path / "state" / "backup").read_text()
+    assert first.splitlines()[1:] == ["v2", "v3"]
+    retry = real(["up", "--tag", "v3"], tmp_path, STUB_SCHEMAS="3", STUB_FAIL_EDGE="1")
+    assert "keeping the backup of the first attempt" in retry.stdout
+    assert (tmp_path / "state" / "backup").read_text() == first
+    assert len(list((tmp_path / "state" / "backups").glob("*.sql"))) == 3  # v1, v2 and v3 once each: the retry took no extra dump
+
+
+def test_stale_backup_record_is_cleared_by_a_new_release(tmp_path: Path) -> None:
+    """What: a record left from an older cycle is removed when a new `up` starts with no pending attempt. Use when: pytest.
+    Inputs: tmp. Output: assert. Side effects: tmp state. Role: N2 (a failure before the backup step left a stale pointer)."""
+    st = tmp_path / "state"
+    st.mkdir()
+    (st / "good").write_text("v2\n")
+    (st / "backup").write_text("/nonexistent.sql\nv1\nv2\n")
+    assert real(["up", "--tag", "v3"], tmp_path).returncode == 0  # fresh database: no new backup is taken
+    assert not (st / "backup").exists()
+
+
+def test_restore_refuses_a_backup_from_another_release(tmp_path: Path) -> None:
+    """What: rollback --restore-db refuses when the recorded backup's base is not the rollback tag. Use when: pytest. Inputs: tmp.
+    Output: assert. Side effects: tmp state. Role: N2 (bind the backup to the release it precedes)."""
+    st = tmp_path / "state"
+    st.mkdir()
+    dump = st / "x.sql"
+    dump.write_text("-- dump")
+    Path(str(dump) + ".manifest").write_text("core.t1 1\n")
+    (st / "backup").write_text(f"{dump}\nv1\nv2\n")
+    (st / "rollback_to").write_text("v2\n")
+    bad = run(["rollback", "--restore-db"], good_env(), tmp_path)
+    assert bad.returncode != 0 and "another release" in bad.stderr
+    (st / "rollback_to").write_text("v1\n")
+    ok = run(["rollback", "--restore-db"], good_env(), tmp_path)
+    assert ok.returncode == 0 and "single-transaction" in ok.stdout and "manifest" in ok.stdout
 
 
 def test_every_job_image_is_built_before_it_runs(tmp_path: Path) -> None:

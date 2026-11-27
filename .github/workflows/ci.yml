@@ -245,3 +245,7 @@ jobs:
           # builds the schemas with the migrate jobs, then runs each service's `pg` tests. No provider is called
           # (fixture vectors). Fails if a pg test fails, errors, or is skipped. See scripts/pg_tests.sh.
           scripts/pg_tests.sh
+      - name: Deploy backup and restore against a real Postgres (add-a-table, corrupt and wrong-release cases)
+        run: |
+          set -euo pipefail
+          scripts/deploy/restore_pg_test.sh
