@@ -203,7 +203,7 @@ describe("verification card", () => {
       "Verified as Priya Shah, billing admin, Pro plan",
     ],
     ["failed", { attempts_left: 2 }, "That account ID and PIN didn't match. 2 attempts left."],
-    ["locked", { ticket: TICKET }, "For your security, verification is locked for this conversation. Our team will follow up on ticket ending 8213."],
+    ["locked", {}, "For your security, verification is locked for this conversation. See How to reach support in our help center for what to do next."],
     ["conflict", {}, "This conversation is already verified as someone else. Please start a new conversation to verify as another person."],
     ["unavailable", {}, "We couldn't reach our account system, so you aren't verified yet. Please try again in a moment."],
   ];

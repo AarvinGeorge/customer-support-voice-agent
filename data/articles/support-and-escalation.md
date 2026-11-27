@@ -12,7 +12,9 @@ This article explains how to reach Quillstack support, how fast we respond on ea
 
 You can talk to the Quillstack support assistant by chat or by voice, and switch between them in the same conversation without starting again.
 
-To look at your account or make a change, support first verifies you with your account ID and your 4-digit support PIN. Before you verify, support can answer general questions from public help articles and can open a ticket for you.
+To look at your account, make a change or open a ticket, support first verifies you with your account ID and your 4-digit support PIN, so our team knows who to follow up with. Before you verify, support can answer general questions from public help articles.
+
+If you cannot verify, for example because you have forgotten your support PIN or verification is locked after too many tries, support cannot open a ticket for you in that conversation. You can start a new conversation and verify there once you have your PIN; after 5 failed attempts on an account, verification for that account is paused for 15 minutes.
 
 ## Priorities and response targets
 
@@ -24,7 +26,7 @@ Every ticket gets a priority from your plan. The first-response target is the ti
 | Enterprise | P2 | 4 hours |
 | Business | P2 | 8 hours |
 | Pro | P3 | 24 hours |
-| Free, or not verified | P4 | 72 hours |
+| Free | P4 | 72 hours |
 
 ## Tickets
 
@@ -43,7 +45,7 @@ Limits keep the queue fair:
 
 - A verified account can open up to 5 tickets per day.
 - If you already have an open ticket in the same category, support adds a note to it instead of opening a duplicate.
-- Without verification, a conversation can open up to 2 tickets. These are always P4 and are not linked to any account.
+- Every ticket belongs to a verified person, so support verifies you before it opens one.
 
 ## Approvals
 

@@ -3,7 +3,15 @@
 # Networks: edge (caddy, web, agents) | backend, internal (agents, core, knowledge, postgres, redis) | egress (agents, knowledge).
 # Each service lists only the variables doc 07 s15.2 says it reads. Secrets come from .env (keys.py), never from this file.
 
+# D-071 part 4: every service logs to json-file with rotation, so logs survive a container recreate (locally and on
+# the VM) and cannot fill the disk: at most 5 files of 10 MB per container. Defined once, merged into each service.
+x-logging: &logging
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "5"}
+
 x-python: &python
+  <<: *logging
   build:
     context: .
     dockerfile: infra/python.Dockerfile
@@ -55,6 +63,7 @@ x-agent: &agent
 services:
   # Edge (CS-E-01.S3.T3, lane C). SITE_ADDRESS is required: the domain on the VM, or :80 locally (the override defaults it).
   caddy:
+    <<: *logging
     image: caddy:2.11-alpine
     restart: unless-stopped
     ports: ["80:80", "443:443"]
@@ -70,6 +79,7 @@ services:
 
   # Next.js app (CS-E-04.S4.T1 Dockerfile). Holds no secret (doc 07 s1.4), so no environment block.
   web:
+    <<: *logging
     build:
       context: .
       dockerfile: apps/web/Dockerfile
@@ -232,6 +242,7 @@ services:
       AGENT_DB_OWNER_URL: ${AGENT_DB_OWNER_URL}
 
   postgres:
+    <<: *logging
     image: pgvector/pgvector:pg17
     restart: unless-stopped
     networks: [backend]
@@ -256,6 +267,7 @@ services:
       retries: 30
 
   redis:
+    <<: *logging
     image: redis:7-alpine
     restart: unless-stopped
     networks: [backend]
