@@ -1,6 +1,6 @@
 # What: multi-stage image for the Quillstack web app (Next.js standalone output).
 # Use when: `docker build -f apps/web/Dockerfile .` from the repo root (Compose: context ".", dockerfile "apps/web/Dockerfile").
-# Inputs: apps/web sources and lockfile; build context is the repo root so packages/contracts/ts can be copied in once it merges.
+# Inputs: apps/web sources and lockfile; build context is the repo root so packages/contracts/ts is copied in.
 # Output: an image that serves the app on port 3000 as the non-root user "nextjs", with a HEALTHCHECK on /healthz.
 # Side effects: none at runtime beyond serving HTTP; no secrets are baked in (web holds none, doc 07 s1.4).
 # Role: lane C container for the `web` Compose service.
@@ -19,7 +19,8 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN corepack enable
 COPY --from=deps /repo/apps/web/node_modules ./node_modules
 COPY apps/web/ ./
-# TODO(CS-E-01.S6 merge): add `COPY packages/contracts/ts/ /repo/packages/contracts/ts/` when the client imports the generated types.
+# The app imports the generated contract types through the @contracts/* path alias.
+COPY packages/contracts/ts/ /repo/packages/contracts/ts/
 RUN pnpm build
 
 FROM ${NODE_IMAGE} AS runtime
