@@ -1,5 +1,5 @@
 /**
- * What: DEV-ONLY route /console/replay?fixture=s1|s4|edge|voice|verify|confirm that renders a
+ * What: DEV-ONLY route /console/replay?fixture=s1|s3|s4|s5|edge|voice|verify|confirm that renders a
  *   recorded fixture conversation in the console, for screenshots and design review (verify and
  *   confirm stop S1 after its first or second turn, so the open card shows).
  * Use when: `pnpm dev` (the `.dev.tsx` extension is in pageExtensions only for the dev server;
@@ -38,6 +38,8 @@ const SCRIPTS: Readonly<Record<string, { file: string; lines: (string | null)[];
     file: "s4_unsure.jsonl",
     lines: ["What's the weather like tomorrow?", "Are you HIPAA compliant?", "We need a signed BAA for HIPAA before we can renew."],
   },
+  s3: { file: "s3_decline.jsonl", lines: ["We were charged $240 for extra seats on 3 November. Can I get that refunded?", null] },
+  s5: { file: "s5_failures.jsonl", lines: ["Can you refund the duplicate $96 charge from 21 November?", null] },
   edge: { file: "edge_turns.jsonl", lines: ["Hi there", "Please refund the duplicate charge.", "What changed on my invoice?"] },
   voice: { file: "voice_turn.jsonl", lines: ["When will my refund arrive?"] },
   verify: {
