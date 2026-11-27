@@ -1,0 +1,39 @@
+# What: about 25 retrieval-labelled queries for Gate 1: answerable (with gold chunk ids), not_in_docs (including near-misses that
+#   share vocabulary with the docs, and a tier-filtered one) and off_topic (including a near-miss that reuses the word refund).
+# Use when: the golden runner prints Gate 1 confusion counts and recall@k, and when calibration replaces the provisional thresholds
+#   (doc 07 s4.1; D-052: not_in_docs probes can score close to tau_high, so near-misses are labelled on purpose; no cosine was measured here).
+# Inputs: schema/retrieval.schema.json; chunk ids from the knowledge chunker over data/articles (tests/test_golden_set.py resolves them).
+# Output: none (data). Side effects: none (running them against /v1/search costs one embedding call each; that is the runner's job).
+# Role: source of truth for the Gate 1 labels; train and test are reported separately. A gold id is a hit when any one appears in the
+#   fused top k. absent_terms prove a not_in_docs label: none of the words may appear in data/articles (a test checks).
+queries:
+  # answerable
+  - {id: R-01, split: train, label: answerable, query: "How do I request a refund for a duplicate charge?", tier: public, verified: false, gold_chunk_ids: ["refund-policy#refund-for-a-duplicate-charge", "refund-policy#how-refunds-work"]}
+  - {id: R-02, split: train, label: answerable, query: "How long does a refund take to reach my card?", tier: public, verified: false, gold_chunk_ids: ["refund-policy#did-my-refund-go-through-and-when-will-i-see-it", "refund-policy#how-refunds-work"], note: "A calibration probe (D-052), so train."}
+  - {id: R-03, split: train, label: answerable, query: "How do I change the billing email on my account?", tier: pro, verified: true, gold_chunk_ids: ["billing-invoices-payments#billing-contact"]}
+  - {id: R-04, split: train, label: answerable, query: "What can a member do compared with an owner?", tier: public, verified: false, gold_chunk_ids: ["roles-and-permissions#what-members-can-do", "roles-and-permissions#intro"]}
+  - {id: R-05, split: test,  label: answerable, query: "My SSO login fails with E-SSO-401, what should I check?", tier: public, verified: false, error_code: E-SSO-401, gold_chunk_ids: ["sso-login-troubleshooting#error-codes/e-sso-401"]}
+  - {id: R-06, split: train, label: answerable, query: "Sync shows E-SYNC-409 on a page, what do I do?", tier: public, verified: false, error_code: E-SYNC-409, gold_chunk_ids: ["integrations-sync-troubleshooting#error-codes/e-sync-409"]}
+  - {id: R-07, split: train, label: answerable, query: "What are the support response times for my plan?", tier: business, verified: true, gold_chunk_ids: ["support-and-escalation#priorities-and-response-targets"]}
+  - {id: R-08, split: test,  label: answerable, query: "Can I get a refund for a $96 Pro charge from ten days ago?", tier: pro, verified: true, gold_chunk_ids: ["refund-policy#pro-plan-refunds/refunds-we-can-issue-right-away"]}
+  - {id: R-09, split: train, label: answerable, query: "Why can I not get a refund while my account is past due?", tier: pro, verified: true, gold_chunk_ids: ["refund-policy#past-due-accounts", "billing-invoices-payments#past-due-accounts"]}
+  - {id: R-10, split: test,  label: answerable, query: "How do I set up SAML single sign-on with Okta?", tier: business, verified: true, gold_chunk_ids: ["sso-setup#set-up-saml-sso/okta", "sso-setup#set-up-saml-sso"]}
+  - {id: R-11, split: train, label: answerable, query: "How do I export my whole workspace?", tier: public, verified: false, gold_chunk_ids: ["import-export-retention#exporting-content"]}
+  - {id: R-12, split: test,  label: answerable, query: "How much does the Business plan cost per seat?", tier: public, verified: false, gold_chunk_ids: ["plans-pricing-contracts#pricing"]}
+  - {id: R-13, split: train, label: answerable, query: "How do I reconnect an integration that stopped syncing?", tier: public, verified: false, gold_chunk_ids: ["integrations-sync-troubleshooting#reconnecting-an-integration", "integrations-sync-troubleshooting#error-codes/e-sync-401"]}
+  - {id: R-14, split: test,  label: answerable, query: "What happens to my data when my subscription ends?", tier: public, verified: false, gold_chunk_ids: ["import-export-retention#when-a-subscription-ends"]}
+  # not_in_docs: far from the docs
+  - {id: R-15, split: train, label: not_in_docs, query: "Do you have an Android app?", tier: public, verified: false, absent_terms: ["android"]}
+  # not_in_docs: near-misses (same topic area as an article, but the answer is not there)
+  - {id: R-16, split: test,  label: not_in_docs, near_miss: true, query: "Does Quillstack support SCIM user provisioning?", tier: business, verified: true, absent_terms: ["scim"], note: "Neighbours the SSO articles."}
+  - {id: R-17, split: train, label: not_in_docs, near_miss: true, query: "How do I set up single sign-on with Google Workspace?", tier: business, verified: true, absent_terms: ["google workspace"], note: "sso-setup covers Okta and Azure AD only."}
+  - {id: R-18, split: test,  label: not_in_docs, near_miss: true, query: "Sync is failing with E-SYNC-999, what does that mean?", tier: public, verified: false, error_code: E-SYNC-999, absent_terms: ["E-SYNC-999"], note: "Unknown error code beside five listed ones (unknown_error_code)."}
+  - {id: R-19, split: train, label: not_in_docs, near_miss: true, query: "Do you offer a student discount on the Pro plan?", tier: public, verified: false, absent_terms: ["student"], note: "Pricing vocabulary; discounts are never promised (support-and-escalation)."}
+  - {id: R-20, split: test,  label: not_in_docs, near_miss: true, query: "Can I import my pages from Confluence?", tier: public, verified: false, absent_terms: ["confluence"], note: "import-export-retention lists Markdown and HTML imports only."}
+  # not_in_docs: tier-filtered (the docs cover it, but not for this tier)
+  - {id: R-21, split: train, label: not_in_docs, query: "How do I set up SAML single sign-on with Okta?", tier: free, verified: true, forbidden_chunk_ids: ["sso-setup#set-up-saml-sso/okta", "sso-setup#set-up-saml-sso", "sso-setup#who-can-use-sso"], note: "sso-setup is tiers business and enterprise; a Free user must get none of it."}
+  # off_topic
+  - {id: R-22, split: train, label: off_topic, query: "What is the weather like in Boston tomorrow?", tier: public, verified: false}
+  - {id: R-23, split: train, label: off_topic, query: "Write me a poem about autumn.", tier: public, verified: false}
+  - {id: R-24, split: test,  label: off_topic, query: "Who won the football match last night?", tier: public, verified: false}
+  - {id: R-25, split: test,  label: off_topic, near_miss: true, query: "How do I get a refund for an app I bought on the App Store?", tier: public, verified: false, note: "Reuses refund and billing words but is not about Quillstack."}
