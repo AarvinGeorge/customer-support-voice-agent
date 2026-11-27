@@ -27,6 +27,7 @@ from agent.escalation import Escalator
 from agent.clients.http import ToolCallError, base_headers, call_json_within
 from agent.middleware.router import NO_TICKET_CLAUSE
 from agent.middleware.tool_guard import clamp_timeout, retry_fits
+from agent.settings import secret_problem
 from agent.steps import Step
 from agent.turn_control import TurnControl
 
@@ -74,9 +75,14 @@ class CoreCommitClient:
     @classmethod
     def from_env(cls, base_url: str, *, http: httpx.AsyncClient, demo_faults_enabled: bool = False) -> "CoreCommitClient":
         """What: build the client with the commit token from the environment. Use when: the app composition root.
-        Inputs: base URL, client, fault flag. Output: client. Side effects: reads one env var (never logged).
-        Role: the only read of the commit token in the agent."""
-        return cls(base_url, os.environ[COMMIT_TOKEN_ENV], http=http, demo_faults_enabled=demo_faults_enabled)
+        Inputs: base URL, client, fault flag. Output: client; ValueError naming the variable (never its value) when
+        it is unset, empty, a placeholder or too short (review PR #58 I2: an empty token must not start healthy).
+        Side effects: reads one env var (never logged). Role: the only read of the commit token in the agent."""
+        token = os.environ.get(COMMIT_TOKEN_ENV)
+        problem = secret_problem(token)
+        if problem is not None or token is None:
+            raise ValueError(f"{COMMIT_TOKEN_ENV} is {problem}: every commit would get 401")
+        return cls(base_url, token, http=http, demo_faults_enabled=demo_faults_enabled)
 
     def _headers(self, control: TurnControl, *, idempotency_key: str | None = None, turn: bool = True) -> dict[str, str]:
         """What: s1.2 headers, X-Turn-Id, Idempotency-Key, and the forwarded tool_error fault (s10).

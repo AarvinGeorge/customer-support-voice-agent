@@ -47,10 +47,12 @@ class StructuredInput:
     Output: __call__(stream, inp, prep) -> StructuredResult. Side effects: see module. Role: s7.3 dispatcher."""
 
     def __init__(self, core: CoreAgentClient, confirmer: Confirmer, *, flags: SessionFlags | None = None,
-                 last_turn: LastTurn | None = None, escalator: Escalator | None = None) -> None:
+                 last_turn: LastTurn | None, escalator: Escalator | None = None) -> None:
         """What: keep dependencies. Use when: app start or tests. Inputs: see class; last_turn reads the session's
-        previous turn row (PgTurnStore.last_turn); escalator defaults to one on the same core client.
-        Output: none. Side effects: none. Role: constructor."""
+        previous turn row (PgTurnStore.last_turn), REQUIRED (no default: a composition root that forgets it fails at
+        start instead of making every typed yes repeat the read-back; rereview PR #47 N1; an explicit None stays the
+        fail-closed path); escalator defaults to one on the same core client. Output: none. Side effects: none.
+        Role: constructor."""
         self.core, self.confirmer, self.flags, self.last_turn = core, confirmer, flags, last_turn
         self.escalator = escalator or Escalator(core)
 

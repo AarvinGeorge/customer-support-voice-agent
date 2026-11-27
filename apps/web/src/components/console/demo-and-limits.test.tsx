@@ -88,6 +88,18 @@ function typeAndSend(text: string) {
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
 }
 
+/**
+ * What: waits until the message field holds the given text.
+ * Use when: a refused draft is restored. The restore runs in a passive effect after the banner
+ *   commits, so `findByRole` on the banner can resolve one tick before the field is filled.
+ * Inputs: the expected text.
+ * Output: a promise.
+ * Side effects: none.
+ * Role: test helper (removes a load-dependent race, CS-E-07.S1 flake fix).
+ */
+const fieldHolds = (text: string) =>
+  waitFor(() => expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe(text));
+
 describe("Demo controls: fault toggle", () => {
   it("is hidden when /api/me says demo_faults_enabled is false", async () => {
     const loadMe = vi.fn(me(false));
@@ -153,7 +165,7 @@ describe("429 and 503 banners", () => {
     const banner = await screen.findByRole("status", { name: "Sending paused" });
     expect(within(banner).getByText("You're sending messages quickly. You can send again shortly; your draft is kept.")).toBeTruthy();
     expect(within(banner).getByText("0:42")).toBeTruthy();
-    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("Can you also email me the receipt?");
+    await fieldHolds("Can you also email me the receipt?");
     expect(screen.getByRole("button", { name: "Send" }).getAttribute("aria-disabled")).toBe("true");
     expect(screen.getByText("Limit: 10 messages per minute in this conversation. Send unlocks when the countdown ends.")).toBeTruthy();
     expect(screen.queryByText("Can you also email me the receipt?", { selector: "[aria-label='You said'] *" })).toBeNull();
@@ -176,7 +188,7 @@ describe("429 and 503 banners", () => {
     const banner = await screen.findByRole("status", { name: "Sending paused" });
     expect(within(banner).getByText("We're handling a lot of conversations right now. You can send again shortly; your draft is kept.")).toBeTruthy();
     expect(within(banner).getByText("0:03")).toBeTruthy();
-    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("Is my refund done?");
+    await fieldHolds("Is my refund done?");
   });
 
   it("a draft the customer typed during the wait is not overwritten", async () => {
@@ -185,6 +197,7 @@ describe("429 and 503 banners", () => {
     render(<ConsoleShell sessionId={SID} store={store} />);
     typeAndSend("first draft");
     await screen.findByRole("status", { name: "Sending paused" });
+    await fieldHolds("first draft");
     fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "edited" } });
     act(() => store.setState({ thread: [...store.getState().thread] }));
     expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("edited");
@@ -228,7 +241,7 @@ describe("a refused message is never lost (fix round 1, I1)", () => {
     typeAndSend("plain");
     await screen.findByRole("status", { name: "Sending paused" });
     expect(screen.queryByRole("group", { name: "Message not sent" })).toBeNull();
-    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("plain");
+    await fieldHolds("plain");
   });
 });
 
@@ -246,7 +259,7 @@ describe("the wait is announced once (fix round 1, I2)", () => {
     render(<ConsoleShell sessionId={SID} store={createTurnStore()} />);
     typeAndSend("hi");
     await screen.findByRole("status", { name: "Sending paused" });
-    expect(live()).toContain("You can send again in about 42 seconds.");
+    await waitFor(() => expect(live()).toContain("You can send again in about 42 seconds."));
     const seen = new Set<string>();
     for (let i = 0; i < 5; i++) {
       await act(async () => void vi.advanceTimersByTime(1000));

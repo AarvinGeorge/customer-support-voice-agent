@@ -134,7 +134,7 @@ class World:
                                  fallback_model=fallback or Fake(messages=iter([])), checkpointer=InMemorySaver(),
                                  tools=list(built.values()))
         confirmer = Confirmer(CoreCommitClient("http://core:8000", "commit-tok", http=http), agent_ticket_opener(core))
-        handler = StructuredInput(core, confirmer)
+        handler = StructuredInput(core, confirmer, last_turn=None)
         self.ingress = Ingress(MemoryTurnStore(SessionRow(session_id=SID, visitor_id=VISITOR)), MemoryTurnLock(),
                                served_by="agent_a", run_agent=TurnRunner(self.agent, core, structured=handler),
                                turn_deadline_s=deadlines)
