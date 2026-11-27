@@ -5,7 +5,7 @@ Side effects: none. Role: pure parsing with loud IngestError messages that name 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 
 import yaml
@@ -71,6 +71,10 @@ def parse_article(raw: str, filename: str) -> Article:
     edited = fm["last_edited_time"]
     day = edited.date().isoformat() if isinstance(edited, datetime) else (
         edited.isoformat() if isinstance(edited, date) else str(edited)[:10])
+    try:
+        date.fromisoformat(day)
+    except ValueError as exc:
+        raise IngestError(f"{filename}: front matter field last_edited_time is not a date: {edited!r}") from exc
     body = m.group(2)
     first_line = raw[:m.start(2)].count("\n") + 1
     for b in parse_blocks(body, first_line):  # block based, so '# comment' inside a code fence is not an H1

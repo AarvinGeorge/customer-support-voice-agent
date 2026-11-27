@@ -38,7 +38,8 @@ def _respond(request: Request, status: int, code: str, class_: str, message: str
     Output: JSONResponse. Side effects: none. Role: single place that shapes the body (changed is false:
     knowledge never mutates on a request)."""
     trace_id = getattr(request.state, "trace_id", None) or uuid7()
-    body = ErrorEnvelope(error=ErrorBody(**{"class": class_}, code=code, message=message, retryable=retryable,
+    body = ErrorEnvelope(error=ErrorBody(**{"class": class_},  # pyright: ignore[reportArgumentType]
+                                         code=code, message=message, retryable=retryable,
                                          changed=False, retry_after_s=retry_after_s, fault_injected=False,
                                          trace_id=trace_id, details=details or {}))
     if retry_after_s is not None:

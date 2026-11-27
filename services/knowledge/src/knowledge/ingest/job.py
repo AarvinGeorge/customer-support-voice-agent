@@ -3,7 +3,8 @@ Use when: every deploy after migrations and on demand (Compose service ingest_kn
 Inputs: --articles dir (default /data/articles), --policy file (default /data/policy.yaml); env KNOWLEDGE_DB_URL,
 OPENAI_API_KEY. Output: one line "INGEST ok ... embedding_calls=N corpus_version=..." and exit 0; on failure the error
 on stderr and exit 1. Side effects: Postgres writes (one transaction per changed article), OpenAI embedding calls only
-for chunks whose content hash has no stored vector for the model. Role: draft A s2.2 steps 1 to 8."""
+for chunks whose content hash has no stored vector for the model. Limits: vectors are paid for before any swap
+and are lost if a swap then fails; two overlapping runs are not prevented (one deploy job at a time). Role: draft A s2.2 steps 1 to 8."""
 from __future__ import annotations
 
 import argparse
@@ -73,6 +74,21 @@ def _load(articles_dir: Path, policy) -> list[tuple[Article, list[Chunk], bytes]
     return out
 
 
+def _close_failed_run(store, s: RunSummary, exc: Exception) -> None:
+    """What: mark the run failed and record the corpus_version that is actually stored now. Use when: run_ingest
+    caught an error. Inputs: store, summary, the error. Output: none. Side effects: store reads and one UPDATE;
+    any error here is swallowed so the original error reaches the caller. Role: after a partly failed run earlier
+    articles stay swapped, so readers must see the hash of what is live (review-pr9-t6 Important 1, Minor 7)."""
+    try:
+        version = corpus_version(store.corpus_pairs())
+    except Exception:  # the database may be what failed; leave the version empty
+        version = None
+    try:
+        store.finish_run(s.run_id, "failed", version, {}, f"{type(exc).__name__}: {exc}"[:500])
+    except Exception:  # the original error is the one worth reporting
+        pass
+
+
 def run_ingest(articles_dir: Path, policy_path: Path, store, embedder) -> RunSummary:
     """What: run the whole ingest. Use when: the CLI or tests call it. Inputs: article dir, policy path, a Store
     (PgStore or a fake) and an embedder with embed_batch and calls. Output: RunSummary. Side effects: store writes,
@@ -126,7 +142,7 @@ def run_ingest(articles_dir: Path, policy_path: Path, store, embedder) -> RunSum
                           "chunks_embedded": s.chunks_embedded, "chunks_deleted": s.chunks_deleted}, None)
         return s
     except Exception as exc:
-        store.finish_run(s.run_id, "failed", None, {}, f"{type(exc).__name__}: {exc}"[:500])
+        _close_failed_run(store, s, exc)
         raise
 
 

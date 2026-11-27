@@ -41,7 +41,7 @@ class FakeStore:
     def __init__(self):
         """What: empty tables. Use when: construction. Inputs: none. Output: none. Side effects: none. Role: init."""
         self.articles, self.chunks, self.runs, self.swaps = {}, {}, {}, []
-        self.fail_swap_for = None
+        self.fail_swap_for: str | None = None
 
     def start_run(self, run_id, model):
         """What: record a running row. Use when: job start. Inputs: id, model. Output: none. Side effects: state.
@@ -96,17 +96,6 @@ class FakeStore:
         """What: (chunk_id, content_hash) for every chunk. Use when: corpus_version. Inputs: none.
         Output: list. Side effects: none. Role: fake."""
         return [(k, c["content_hash"]) for k, c in self.chunks.items()]
-
-
-@pytest.fixture()
-def corpus(tmp_path):
-    """What: a temp copy of three real articles. Use when: job tests. Inputs: tmp_path. Output: directory.
-    Side effects: copies files. Role: small, real input."""
-    d = tmp_path / "articles"
-    d.mkdir()
-    for name in ("refund-policy", "sso-login-troubleshooting", "support-and-escalation"):
-        (d / f"{name}.md").write_text((REAL / f"{name}.md").read_text())
-    return d
 
 
 def go(corpus, store, emb):

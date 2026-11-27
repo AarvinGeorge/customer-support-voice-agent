@@ -6,6 +6,8 @@ Role: all ingest SQL in one place. swap_article is one transaction per article s
 Vectors travel as text ('[0.1,...]' cast to vector) so no pgvector Python package is needed."""
 from __future__ import annotations
 
+from typing import Any
+
 import psycopg
 from psycopg.rows import dict_row
 
@@ -51,10 +53,10 @@ class PgStore:
         """What: keep the url. Use when: construction. Inputs: url. Output: none. Side effects: none. Role: init."""
         self.url = url
 
-    def _conn(self) -> psycopg.Connection:
+    def _conn(self) -> psycopg.Connection[dict[str, Any]]:
         """What: open a connection. Use when: every method. Inputs: none. Output: connection (dict rows).
         Side effects: network. Role: shared settings."""
-        return psycopg.connect(self.url, row_factory=dict_row)
+        return psycopg.connect(self.url, row_factory=dict_row)  # pyright: ignore[reportArgumentType, reportReturnType]
 
     def start_run(self, run_id: str, model: str) -> None:
         """What: insert a running ingest_runs row. Use when: job start. Inputs: id, model. Output: none.
@@ -117,7 +119,7 @@ class PgStore:
         Output: number of chunks removed. Side effects: DELETE in one transaction. Role: removed pages disappear."""
         with self._conn() as c, c.transaction():
             n = c.execute("SELECT count(*) AS n FROM chunks WHERE NOT (article_slug = ANY(%s))",
-                          (sorted(keep),)).fetchone()["n"]
+                          (sorted(keep),)).fetchone()["n"]  # pyright: ignore[reportOptionalSubscript]
             c.execute("DELETE FROM articles WHERE NOT (article_slug = ANY(%s))", (sorted(keep),))
         return n
 
