@@ -4,7 +4,7 @@ Output: a contract SearchResponse, or an ApiError 503 RETRIEVAL_UNAVAILABLE when
 Side effects: one embedding call (a second only for a fast failure with at least 2.5 s left), two SQL queries in parallel.
 Role: whole request hard-capped at 3.0 s (asyncio.wait_for in run_search): embedding 1.2 s (no retry after a timeout), SQL statement timeout 1 s per leg. When
 the embedding is unavailable the keyword leg still runs, so a degraded answer exists inside the budget (worst case about
-2.2 s). Gate 1 (verdicts, thresholds) is CS-E-02.S3.T3; here confidence is 'uncalibrated' except an embedding outage."""
+2.2 s). Gate 1 (verdicts, thresholds) lives in knowledge.gate; this module only feeds it."""
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +15,7 @@ from typing import Literal
 from contracts.knowledge_api import (Chunk, ChunkCitation, ChunkScores, Confidence, Legs, QueryInfo, SearchRequest,
                                      SearchResponse, TimingMs)
 
-from knowledge import config
+from knowledge import config, gate
 from knowledge.embeddings import EmbeddingError
 from knowledge.errors import ApiError
 from knowledge.normalize import normalize_query
@@ -29,7 +29,7 @@ SQL_RESERVE_S = 1.0
 READ_TIMEOUT_S = 0.6  # vocabulary and corpus_version reads (cached 30 s in Database)
 LEG_LIMIT = 20
 RRF_K = 60
-DEFAULT_TAU_LOW = 0.30  # provisional default (doc 07 s4.1); replaced by the calibration file in CS-E-02.S3.T3
+DEFAULT_TAU_LOW = 0.30  # doc 07 s4.1 default, used for `relevant` only when there is no calibration file
 
 
 def fuse(vec_rows: list[dict], kw_rows: list[dict], k: int, codes: list[str] | tuple = ()) -> list[dict]:
@@ -103,10 +103,10 @@ async def _leg(fn, trace_id: str, *args) -> list[dict] | None:
         return None
 
 
-def _chunk(r: dict, vector_ok: bool, codes: list[str]) -> Chunk:
+def _chunk(r: dict, vector_ok: bool, codes: list[str], tau_low: float = DEFAULT_TAU_LOW) -> Chunk:
     """What: build a contract Chunk from a fused row. Use when: assembling the response. Inputs: row, whether the
-    vector leg worked, detected codes. Output: Chunk with scores, relevant flag and a citation carrying source_url.
-    Side effects: none. Role: relevant = cosine at or above tau_low, or it carries a detected code."""
+    vector leg worked, detected codes, tau_low. Output: Chunk with scores, relevant flag and a citation carrying source_url.
+    Side effects: none. Role: relevant = cosine at or above tau_low (the calibration's, else the 0.30 default), or it carries a detected code."""
     cosine = float(r["cosine"]) if vector_ok else 0.0
     carries = bool(set(codes) & set(r["error_codes"]))
     path = r["section_path"]
@@ -119,7 +119,7 @@ def _chunk(r: dict, vector_ok: bool, codes: list[str]) -> Chunk:
                                spoken=f"the {r['article_title']} article, {path[-1]} section"),
         scores=ChunkScores(cosine=cosine, vector_rank=r["v_rank"], keyword_rank=r["f_rank"],
                            rrf_score=r["rrf_score"], fused_rank=r["fused_rank"]),
-        relevant=carries or cosine >= DEFAULT_TAU_LOW)
+        relevant=carries or cosine >= tau_low)
 
 
 async def _cached_read(fn, fallback, trace_id: str, what: str):
@@ -134,22 +134,24 @@ async def _cached_read(fn, fallback, trace_id: str, what: str):
         return fallback
 
 
-async def run_search(req: SearchRequest, db, embedder, request_id: str, trace_id: str) -> SearchResponse:
+async def run_search(req: SearchRequest, db, embedder, request_id: str, trace_id: str,
+                     calibration: gate.Calibration | None = None) -> SearchResponse:
     """What: answer one search within TOTAL_BUDGET_S. Use when: the route calls it. Inputs: request, db (vocabulary,
-    vector_leg, keyword_leg, corpus_version), embedder or None, ids. Output: SearchResponse. Side effects: see module
+    vector_leg, keyword_leg, corpus_version), embedder or None, ids, calibration or None. Output: SearchResponse. Side effects: see module
     docstring. Role: the 3.0 s cap covers every step, so a stalled database ends in 503 RETRIEVAL_UNAVAILABLE at about
     3.0 s (doc 07 s4.1); also 503 when the database fails in every leg that ran; 422 for a query empty after cleaning."""
     try:
-        return await asyncio.wait_for(_run_search(req, db, embedder, request_id, trace_id), TOTAL_BUDGET_S)
+        return await asyncio.wait_for(_run_search(req, db, embedder, request_id, trace_id, calibration), TOTAL_BUDGET_S)
     except asyncio.TimeoutError:
         log.warning("trace_id=%s search exceeded the %.1f s budget", trace_id, TOTAL_BUDGET_S)
         raise ApiError(503, "RETRIEVAL_UNAVAILABLE", "retrieval_failed", "Search is unavailable right now.",
                        retryable=True, retry_after_s=2)
 
 
-async def _run_search(req: SearchRequest, db, embedder, request_id: str, trace_id: str) -> SearchResponse:
+async def _run_search(req: SearchRequest, db, embedder, request_id: str, trace_id: str,
+                      calibration: gate.Calibration | None = None) -> SearchResponse:
     """What: the search steps without the outer time cap. Use when: run_search wraps it. Inputs: as run_search.
-    Output: SearchResponse. Side effects: see module docstring. Role: normalize, embed, two legs, fuse, respond."""
+    Output: SearchResponse. Side effects: see module docstring. Role: normalize, embed, two legs, fuse, gate, respond."""
     t0 = time.monotonic()
     vocab = await _cached_read(db.vocabulary, set(), trace_id, "vocabulary")
     norm = normalize_query(req.query, vocab)
@@ -184,18 +186,24 @@ async def _run_search(req: SearchRequest, db, embedder, request_id: str, trace_i
                        retryable=True, retry_after_s=2)
 
     fused = fuse(vec_rows or [], kw_rows or [], req.k, codes)
-    chunks = [_chunk(r, vec_rows is not None, codes) for r in fused]
+    tau_low = calibration.tau_low if calibration else DEFAULT_TAU_LOW
+    chunks = [_chunk(r, vec_rows is not None, codes, tau_low) for r in fused]
     carried = {c for ch in chunks for c in ch.error_codes}
     code_match = bool(set(codes) & carried)
     vector_failed = qvec is None or vec_rows is None
     version = await _cached_read(db.corpus_version, "none", trace_id, "corpus_version")
+    legs = Legs(vector=_status(vec_rows if qvec is not None else None), keyword=_status(kw_rows))
+    top = max((c.scores.cosine for c in chunks), default=None) if not vector_failed else None
+    verdict, reason = gate.decide(vector=legs.vector, keyword=legs.keyword, code_match=code_match,
+                                  has_unknown_code=bool(unknown), top_cosine=top, chunk_count=len(chunks),
+                                  calibration=calibration, calibration_mode=req.calibration)
     confidence = Confidence(
-        verdict="error" if vector_failed else "uncalibrated",
-        reason="embedding_unavailable" if vector_failed else "no_calibration",
-        top_cosine=max((c.scores.cosine for c in chunks), default=None) if not vector_failed else None,
-        support_count=sum(c.relevant for c in chunks), code_match=code_match,
-        legs=Legs(vector=_status(vec_rows if qvec is not None else None), keyword=_status(kw_rows)),
-        calibration_status="none", calibration_stale=False)
+        verdict=verdict, reason=reason, top_cosine=top,
+        tau_low=calibration.tau_low if calibration else None, tau_high=calibration.tau_high if calibration else None,
+        support_count=sum(c.relevant for c in chunks), code_match=code_match, legs=legs,
+        calibration_id=calibration.calibration_id if calibration else None,
+        calibration_status=calibration.status if calibration else "none",
+        calibration_stale=gate.is_stale(calibration, version or "none"))
     return SearchResponse(
         request_id=request_id, trace_id=trace_id, corpus_version=version or "none",
         embedding_model=config.embedding_model(),

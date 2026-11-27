@@ -5,15 +5,15 @@
  * Use when: the /console route and the dev-only fixture replay route.
  * Inputs: { sessionId, store?, onNewConversation? }.
  * Output: the full-height console frame.
- * Side effects: sending a message calls store.sendTurn (one network request); an in-flight turn
- *   is aborted on unmount (its turn ends in the failed state, review PR #16 I1).
+ * Side effects: sending a message or pressing a card calls store.sendTurn (one network request);
+ *   an in-flight turn is aborted on unmount (its turn ends in the failed state, review PR #16 I1).
  * Role: CS-E-04.S5.T1 shell, laid out from the Figma page "Console, chat (S1)".
  */
 import { MotionConfig } from "motion/react";
 import { PanelRight, Plus, Shield, ShieldCheck } from "lucide-react";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore, type StoreApi } from "zustand";
-import type { VerifiedPerson } from "@contracts/contracts";
+import type { ConfirmInput, TurnRequest, VerificationInput, VerifiedPerson } from "@contracts/contracts";
 
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -21,7 +21,7 @@ import type { TurnView } from "@/lib/turns/reducer";
 import { turnStore, type ThreadItem, type TurnStoreState } from "@/lib/turns/store";
 import { trailSummary } from "@/lib/turns/trail";
 
-import { ConversationLog } from "./conversation-log";
+import { ConversationLog, type CardActions } from "./conversation-log";
 import { InputBar } from "./input-bar";
 
 /**
@@ -126,37 +126,84 @@ export interface ConsoleShellProps {
  */
 export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }: ConsoleShellProps) {
   const thread = useStore(store, (s) => s.thread);
-  const turns = useStore(store, (s) => s.conversation.turns);
+  const conversation = useStore(store, (s) => s.conversation);
   const person = useStore(store, (s) => s.conversation.verified);
   const busy = useStore(store, (s) => s.connection.phase === "streaming");
   const inflight = useRef<AbortController | null>(null);
+  const messageRef = useRef<HTMLTextAreaElement | null>(null);
+  const pinRef = useRef<HTMLInputElement | null>(null);
+  const [account, setAccount] = useState("");
 
   useEffect(() => () => inflight.current?.abort(), []);
   useEffect(() => () => inflight.current?.abort(), [sessionId]);
+  useEffect(() => setAccount(""), [sessionId]);
 
   /**
-   * What: sends one chat message as a turn.
-   * Use when: the input bar submits.
-   * Inputs: the text.
+   * What: moves keyboard focus after a card press settles, so it never falls to the page body
+   *   when the pressed control goes away (WCAG 2.4.3, review PR #24 I2).
+   * Use when: a Verify, Confirm or Cancel turn has ended.
+   * Inputs: "verify" or "decide".
    * Output: none.
-   * Side effects: one streamed request; failures land on the turn (failed phase) or in
-   *   connection.error (shown by CS-E-04.S5.T3), so the rejection is swallowed here.
-   * Role: handler.
+   * Side effects: on the next task, focuses the PIN field of a retry card when one is showing
+   *   (verify only), else the message field.
+   * Role: helper.
    */
-  const send = useCallback(
-    (text: string) => {
-      if (sessionId === null) return;
+  const refocus = useCallback((after: "verify" | "decide") => {
+    setTimeout(() => {
+      const pin = pinRef.current;
+      if (after === "verify" && pin !== null && pin.isConnected) pin.focus();
+      else messageRef.current?.focus();
+    }, 0);
+  }, []);
+
+  /**
+   * What: sends one turn: a chat message, or a card's verification or confirm body.
+   * Use when: the input bar submits, or a card is pressed.
+   * Inputs: the TurnRequest without client_turn_id (exactly one of text, verification, confirm).
+   * Output: a promise that settles when the turn ends (resolves on success and on failure).
+   * Side effects: one streamed request with a fresh client_turn_id; failures land on the turn
+   *   (failed phase) or in connection.error (shown by CS-E-04.S5.T3), so the rejection is
+   *   swallowed here. Without a session nothing is sent.
+   * Role: handler. The request object is not kept anywhere after the call, so a card PIN lives
+   *   only for the request (doc 07 s11).
+   */
+  const run = useCallback(
+    (part: Omit<TurnRequest, "client_turn_id">): Promise<void> => {
+      if (sessionId === null) return Promise.resolve();
       const ctrl = new AbortController();
       inflight.current = ctrl;
-      store
+      return store
         .getState()
-        .sendTurn(sessionId, { client_turn_id: crypto.randomUUID(), text }, { signal: ctrl.signal })
+        .sendTurn(sessionId, { client_turn_id: crypto.randomUUID(), ...part }, { signal: ctrl.signal })
+        .then(() => undefined)
         .catch(() => undefined)
         .finally(() => {
           if (inflight.current === ctrl) inflight.current = null;
         });
     },
     [sessionId, store],
+  );
+
+  /**
+   * What: sends one chat message.
+   * Use when: the input bar submits.
+   * Inputs: the text.
+   * Output: none.
+   * Side effects: see run.
+   * Role: handler.
+   */
+  const send = useCallback((text: string) => void run({ text }), [run]);
+
+  const cards: CardActions = useMemo(
+    () => ({
+      disabled: busy,
+      account,
+      setAccount,
+      pinRef,
+      verify: (verification: VerificationInput) => run({ verification }).finally(() => refocus("verify")),
+      decide: (confirm: ConfirmInput) => run({ confirm }).finally(() => refocus("decide")),
+    }),
+    [busy, run, account, refocus],
   );
 
   /**
@@ -206,13 +253,13 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
         </header>
         <main className="mx-auto flex w-full max-w-[45rem] flex-1 flex-col px-4 pt-10 pb-6 sm:px-0">
           <div className="flex flex-1 flex-col">
-            <ConversationLog thread={thread} turns={turns} onRetry={retry} />
+            <ConversationLog thread={thread} conversation={conversation} cards={cards} onRetry={retry} />
             <div role="status" aria-live="polite" className="sr-only">
-              {announcement(thread, turns)}
+              {announcement(thread, conversation.turns)}
             </div>
           </div>
           <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
-            <InputBar onSend={send} busy={busy} disabled={sessionId === null} />
+            <InputBar onSend={send} busy={busy} disabled={sessionId === null} inputRef={messageRef} />
           </div>
         </main>
       </div>

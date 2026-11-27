@@ -1,6 +1,7 @@
 /**
- * What: DEV-ONLY route /console/replay?fixture=s1|s4|edge|voice that renders a recorded fixture
- *   conversation in the console, for screenshots and design review.
+ * What: DEV-ONLY route /console/replay?fixture=s1|s4|edge|voice|verify|confirm that renders a
+ *   recorded fixture conversation in the console, for screenshots and design review (verify and
+ *   confirm stop S1 after its first or second turn, so the open card shows).
  * Use when: `pnpm dev` (the `.dev.tsx` extension is in pageExtensions only for the dev server;
  *   `next build` never compiles this file, so fixtures never reach the production output).
  * Inputs: the `fixture` query value (unknown values fall back to s1).
@@ -20,9 +21,10 @@ import { FixtureReplay } from "@/dev-mock/fixture-replay";
  * Inputs: none.
  * Output: a frozen map.
  * Side effects: none.
- * Role: dev data (user lines are illustrative; the fixtures hold only server events).
+ * Role: dev data (user lines are illustrative; the fixtures hold only server events). `turns`
+ *   keeps only the first n turns of the file.
  */
-const SCRIPTS: Readonly<Record<string, { file: string; lines: (string | null)[] }>> = Object.freeze({
+const SCRIPTS: Readonly<Record<string, { file: string; lines: (string | null)[]; turns?: number }>> = Object.freeze({
   s1: {
     file: "s1_chat.jsonl",
     lines: [
@@ -38,6 +40,16 @@ const SCRIPTS: Readonly<Record<string, { file: string; lines: (string | null)[] 
   },
   edge: { file: "edge_turns.jsonl", lines: ["Hi there", "Please refund the duplicate charge.", "What changed on my invoice?"] },
   voice: { file: "voice_turn.jsonl", lines: ["When will my refund arrive?"] },
+  verify: {
+    file: "s1_chat.jsonl",
+    lines: ["Hi, we were charged twice for our Pro plan this month. Can you refund the duplicate charge?"],
+    turns: 1,
+  },
+  confirm: {
+    file: "s1_chat.jsonl",
+    lines: ["Hi, we were charged twice for our Pro plan this month. Can you refund the duplicate charge?", null],
+    turns: 2,
+  },
 });
 
 /**
@@ -51,11 +63,12 @@ const SCRIPTS: Readonly<Record<string, { file: string; lines: (string | null)[] 
 export default async function ReplayPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const q = await searchParams;
   const key = typeof q.fixture === "string" && q.fixture in SCRIPTS ? q.fixture : "s1";
-  const script = SCRIPTS[key] as { file: string; lines: (string | null)[] };
+  const script = SCRIPTS[key] as { file: string; lines: (string | null)[]; turns?: number };
   const text = readFileSync(path.join(process.cwd(), "..", "..", "packages", "contracts", "fixtures", script.file), "utf8");
   const events = text
     .split("\n")
     .filter((l) => l.trim() !== "")
     .map((l) => JSON.parse(l) as SseEvent);
-  return <FixtureReplay events={events} lines={script.lines} />;
+  const keep = new Set([...new Set(events.map((e) => e.turn_id))].slice(0, script.turns ?? Infinity));
+  return <FixtureReplay events={events.filter((e) => keep.has(e.turn_id))} lines={script.lines} />;
 }
