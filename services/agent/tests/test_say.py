@@ -67,6 +67,8 @@ def fixed_lines() -> dict[str, str]:
         "escalation.deadline_ticket": escalation.DEADLINE_TICKET_LINE.format(display=DISPLAY),
         "escalation.deadline_no_ticket": f"{escalation.DEADLINE_LEAD} {router.NO_TICKET_CLAUSE.format(ref=REF)}",
         "handler.not_current": handler.NOT_CURRENT_LINE,
+        "handler.verify_expired": handler.VERIFY_EXPIRED_LINE, "handler.voice_press_confirm": handler.VOICE_PRESS_CONFIRM,
+        "confirm.verify_lapsed": confirm.VERIFY_LAPSED_LINE,
         "verification.failed": verification.FAILED_LINE.format(n=2, tries="tries"),
         "verification.locked": verification.LOCKED_LINE.format(display=DISPLAY),
         "verification.locked_no_ticket": verification.LOCKED_NO_TICKET_LINE,

@@ -318,7 +318,7 @@ async def test_voice_ask_returns_a_say_from_the_same_agent() -> None:
     assert r.status_code == 200, r.text
     done = events_of(r)[-1]
     assert done.type == "turn.completed" and done.mode == "voice"
-    assert done.final.say == "You can ask for a refund within 30 days."
+    assert done.final.say == "You can ask for a refund within thirty days."  # spoken form (CS-E-05.S2.T1)
     human = [m for m in w.registry.primary.seen[0] if isinstance(m, HumanMessage)][-1]
     assert "mode: voice" in str(human.content) and "How long is the refund window?" in str(human.content)
     assert "how long is the refund window" in str(human.content)
