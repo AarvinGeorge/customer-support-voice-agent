@@ -26,8 +26,8 @@ quillstack-contracts = { path = "../packages/contracts", editable = false }
 # the repo root must be importable so `evals` is the package in this directory
 pythonpath = [".."]
 testpaths = ["tests"]
-addopts = "-q"
-markers = ["e2e: end to end on a running Compose stack with real model calls; skipped unless EVALS_E2E=1 (tests/test_s5_faults_e2e.py)"]
+addopts = "-q -m 'not e2e'"  # deselected, not skipped, so CI can fail on any skip; run them with `-m e2e`
+markers = ["e2e: end to end on a running Compose stack with real model calls; also needs EVALS_E2E=1 (tests/test_s5_faults_e2e.py)"]
 
 [tool.pyright]
 extraPaths = [".."]

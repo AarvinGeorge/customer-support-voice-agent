@@ -7,7 +7,7 @@ from collections import defaultdict
 import pytest
 from conftest import FIXTURES
 
-from contracts.events import EVENT_TYPES, TurnCompletedEvent, parse_event
+from contracts.events import EVENT_TYPES, TurnCompletedEvent, TurnStartedEvent, VerificationResultEvent, parse_event
 from contracts.fixtures_build import render_all
 
 FILES = ("s1_chat.jsonl", "voice_turn.jsonl", "edge_turns.jsonl", "s4_unsure.jsonl", "s3_decline.jsonl",
@@ -85,8 +85,10 @@ def test_voice_turn_is_voice():
     evs = [parse_event(ln) for ln in _lines("voice_turn.jsonl")]
     assert {e.turn_id for e in evs} and len({e.turn_id for e in evs}) == 1
     assert all(e.mode == "voice" for e in evs)
-    assert evs[0].input_kind == "voice"
-    say = evs[-1].final.say
+    first, last = evs[0], evs[-1]
+    assert isinstance(first, TurnStartedEvent) and first.input_kind == "voice"
+    assert isinstance(last, TurnCompletedEvent)
+    say = last.final.say
     assert say and "*" not in say and "$" not in say
 
 
@@ -148,7 +150,9 @@ def test_s3_decline_covers_the_scenario():
     Use when: CI. Inputs: none. Output: assertion. Side effects: reads a file.
     Role: S3 coverage for the decline note (CS-E-04.S5.T3)."""
     evs = [parse_event(ln) for ln in _lines("s3_decline.jsonl")]
-    person = [e for e in evs if e.type == "verification.result"][0].person
+    verified = [e for e in evs if isinstance(e, VerificationResultEvent)][0]
+    person = verified.person
+    assert person is not None
     assert (person.role, person.tier) == ("member", "business")
     rules = [e.rule for e in evs if e.type == "step.completed" and e.rule is not None]
     assert [(r.decision, r.reason_code) for r in rules] == [("declined", "ROLE_NOT_PERMITTED")]

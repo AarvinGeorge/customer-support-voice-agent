@@ -188,6 +188,20 @@ describe("input bar", () => {
   });
 });
 
+describe("InputBar restore", () => {
+  it("restores a refused draft into an empty field once per notice id, not on a later render of the same id", () => {
+    const { rerender } = render(<InputBar onSend={vi.fn()} busy={false} disabled={false} restore={{ id: 1, text: "my draft" }} />);
+    const box = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+    expect(box.value).toBe("my draft");
+    fireEvent.change(box, { target: { value: "edited" } });
+    rerender(<InputBar onSend={vi.fn()} busy={false} disabled={false} restore={{ id: 1, text: "my draft" }} />);
+    expect(box.value).toBe("edited");
+    rerender(<InputBar onSend={vi.fn()} busy={false} disabled={false} restore={{ id: 2, text: "second" }} />);
+    expect(box.value).toBe("edited");
+    expect(screen.getByRole("button", { name: "Restore" })).toBeTruthy();
+  });
+});
+
 describe("review PR #20 fixes", () => {
   afterEach(() => vi.unstubAllGlobals());
 

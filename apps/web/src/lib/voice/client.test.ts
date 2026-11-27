@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { VoiceToken } from "@contracts/contracts";
 import { createTurnStore } from "@/lib/turns/store";
 
-import { createVoiceClient, type VoiceClientDeps, type VoiceSnapshot } from "./client";
+import { createVoiceClient, type VoiceClientDeps } from "./client";
 
 const SID = "019a7c2e-5b10-7000-8000-00000000a001";
 

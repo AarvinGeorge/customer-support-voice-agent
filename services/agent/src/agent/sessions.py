@@ -19,8 +19,16 @@ class SessionStore(Protocol):
     """What: the two methods the API needs. Use when: typing app.state.session_store.
     Inputs: see methods. Output: see methods. Side effects: see methods. Role: structural type."""
 
-    async def create_session(self, visitor_id: str, ip_hash: str | None) -> tuple[str, datetime]: ...
-    async def get_session(self, session_id: str) -> SessionRow | None: ...
+    async def create_session(self, visitor_id: str, ip_hash: str | None) -> tuple[str, datetime]:
+        """What: create a session for a visitor. Use when: POST /api/sessions.
+        Inputs: visitor id, optional salted IP hash. Output: (session_id, created_at).
+        Side effects: none in the protocol; implementations write the store. Role: structural method signature."""
+        ...
+
+    async def get_session(self, session_id: str) -> SessionRow | None:
+        """What: read one session by id. Use when: ownership check. Inputs: session id. Output: SessionRow or None.
+        Side effects: none in the protocol; implementations read the store. Role: structural method signature."""
+        ...
 
 
 class PgSessionStore:
