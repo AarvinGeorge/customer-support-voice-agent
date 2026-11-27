@@ -1,6 +1,6 @@
 """What: ToolGuardMiddleware (doc 07 s2.5 item 10, s5.1 failure rules, s5.3, s8.1, s8.2; D-046, D-048): the one
 layer around every tool call. In order: hidden-tool block, the combined tool limiter (total 8, search_kb 3,
-request_verification 1), one prepare per turn, then the call with a clamped timeout, one budget-checked retry
+request_verification 1), one accepted prepare per turn (D-079), then the call with a clamped timeout, one budget-checked retry
 on a timeout or an unavailable service, failure counting (the second failure of the same tool in a turn sets
 route escalate(tool_failure); a failed search_kb sets escalate(retrieval_unavailable) at once, Gate 1 row 4),
 step events, and untrusted wrapping of every result.
@@ -14,6 +14,9 @@ EXECUTED calls only and are incremented before the first await, so parallel call
 A call that fails argument validation gives its counts back (it never left the process). A 4xx from
 core is an answer (returned to the model, never retried, not a failure); a timeout, 5xx, unreachable service or
 any unexpected exception (for example a malformed 200 body) is a failure. A failed, skipped, blocked or not-run result says "unknown", never empty.
+D-079: the one-prepare slot is reserved at the gate (so parallel prepares cannot race) and given back when core
+stored no pending action: a 4xx reject (ambiguous or missing charge) or a declined result. A timeout or failure
+keeps the slot (core may have stored one). Retries stay bounded by the total tool-call limit.
 """
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ from agent.turn_control import CURRENT_CALL, CallScope, Route, TurnControl, requ
 from agent.untrusted import unknown_result, wrap_result, wrap_search
 
 _log = logging.getLogger(__name__)
+ACCEPTED_DECISIONS = frozenset({"allowed", "needs_approval"})  # core stored a pending action (D-079)
 PER_TOOL_LIMITS: dict[str, int] = {"search_kb": limits.SEARCH_KB_PER_TURN,
                                    "request_verification": limits.REQUEST_VERIFICATION_PER_TURN}
 
@@ -243,6 +247,8 @@ class ToolGuardMiddleware(AgentMiddleware):
             else:
                 return self._success(control, step, call, spec, attempt, msg, request.state)
             if not err.retryable:  # 4xx: core's answer, given to the model; no retry, not a failure
+                if spec.prepare:  # D-079: core rejected it and stored nothing
+                    self._release_prepare(control)
                 self._done(control, step, "error", spec.failed, attempt, detail=err.message[:80] or None)
                 return self._message(call, {"status": "error", "code": err.code, "message": err.message,
                                             "details": err.details}, error=True)
@@ -279,9 +285,18 @@ class ToolGuardMiddleware(AgentMiddleware):
             self._done(control, step, "error", spec.failed, attempt, detail="Invalid arguments")
             return self._message(call, {"status": "invalid_arguments", "message": str(msg.content)[:500]}, error=True)
         artifact = msg.artifact
+        if spec.prepare and not (isinstance(artifact, dict) and artifact.get("decision") in ACCEPTED_DECISIONS):
+            self._release_prepare(control)  # D-079: declined, nothing stored
         self._done(control, step, "ok", spec.title, attempt, detail=_detail(name, artifact), rule=_rule(name, artifact))
         return ToolMessage(content=_content(name, artifact, msg.content), tool_call_id=call["id"], name=name,
                            artifact=_kept_artifact(name, artifact, state))
+
+    @staticmethod
+    def _release_prepare(control: TurnControl) -> None:
+        """What: give back the one-prepare slot _gate reserved. Use when: core stored no pending action (4xx reject
+        or a declined result). Inputs: control. Output: none. Side effects: decrements prepares only (the call
+        still counts toward the total tool limit). Role: D-079."""
+        control.prepares = max(control.prepares - 1, 0)
 
     @staticmethod
     def _refund(control: TurnControl, name: str, spec: ToolSpec) -> None:
