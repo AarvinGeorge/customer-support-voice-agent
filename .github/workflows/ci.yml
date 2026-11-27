@@ -1,8 +1,10 @@
 # What: the CI gate for every pull request and every push to main (CS-E-01.S5.T1; doc 06 s10; doc 07 s1.4, s15.1 row 5).
 # Use when: GitHub runs it automatically. Make the jobs below required checks in branch protection (owner gap G1).
 # Inputs: the repo. Needs no secrets (tests use fakes; nothing here calls a provider).
-# Output: one green or red check per job: python (ruff, pyright, pytest per project incl. infra), repo tests, web, gitleaks, contracts-sync, import-guard, descriptors, compose, pg tests.
-# Side effects: none beyond the run itself. Role: the merge gate. Every run step starts with `set -euo pipefail`.
+# Output: one green or red check per job: python (ruff, pyright, pytest per project incl. infra), repo tests, web, gitleaks, contracts-sync, import-guard, descriptors, compose, pg tests;
+#   then `images`, after every gate: the four service images built once and pushed to GHCR, plus the images-<sha> manifest artifact (D-072).
+# Side effects: `images` pushes to ghcr.io/aarvingeorge/customer-support-voice-agent/<image> (tag <sha> on main, pr-<n> on a same-repo
+#   pull request); nothing else beyond the run itself. Role: the merge gate and the one place images are built. Every run step starts with `set -euo pipefail`.
 name: ci
 
 on:
@@ -218,6 +220,11 @@ jobs:
           set -euo pipefail
           docker compose --env-file .env.example config -q
           docker compose --env-file .env.example -f compose.yaml config -q
+          # The deploy form (D-072): every built service takes a digest-pinned release image and has no build section left.
+          d="sha256:$(printf '0%.0s' $(seq 64))"
+          AGENT_IMAGE="ghcr.io/x/agent@$d" CORE_IMAGE="ghcr.io/x/core@$d" KNOWLEDGE_IMAGE="ghcr.io/x/knowledge@$d" WEB_IMAGE="ghcr.io/x/web@$d" \
+            docker compose --env-file .env.example -f compose.yaml -f scripts/deploy/compose.release.yaml --profile seed --profile jobs config --format json \
+            | python3 -c 'import json,sys; s=json.load(sys.stdin)["services"]; b=[n for n,v in s.items() if "build" in v]; u=[n for n,v in s.items() if "@sha256:" not in v.get("image","") and n not in ("caddy","postgres","redis")]; assert not b and not u, (b, u); print("release form: no build section;", len(s) - 3, "services pinned by digest")'
           # Static topology proof (core and knowledge off the edge network, env scoping, grace period); reads .env.
           cp .env.example .env
           python3 infra/tests/check_topology.py
@@ -242,3 +249,64 @@ jobs:
         run: |
           set -euo pipefail
           scripts/deploy/restore_pg_test.sh
+
+  # Build once, after every gate (D-072). A push to main tags each image with the commit sha and writes images-<sha>.json, the only
+  # digests a release may name (.github/workflows/release.yml). A same-repo pull request runs the same path as a dry run under the
+  # tag pr-<n>, which no release can name. Build definitions come from compose.yaml (bake reads its build sections), so CI builds
+  # exactly what local Compose builds; the migrate, seed and ingest jobs share these four images (scripts/deploy/compose.release.yaml).
+  images:
+    name: images (build once, push to GHCR)
+    needs: [python, repo-tests, web, gitleaks, contracts-sync, import-guard, descriptors, compose, pg-tests]
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR with this run's token (expires with the job)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build agent, core, knowledge and web once with OCI labels and push
+        env:
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT }}          # public build args of the web image (no secret)
+          LANGSMITH_PROJECT_URL: ${{ vars.LANGSMITH_PROJECT_URL }}
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
+          if [ "$EVENT" = push ]; then name="$GITHUB_SHA"; else name="pr-$PR"; fi
+          sets=()
+          for pair in agent:agent_a core:core knowledge:knowledge web:web; do
+            img="${pair%%:*}"; target="${pair##*:}"
+            sets+=(--set "$target.tags=$repo/$img:$name" --set "$target.labels.org.opencontainers.image.title=$img")
+          done
+          docker buildx bake -f compose.yaml "${sets[@]}" \
+            --set "*.labels.org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --set "*.labels.org.opencontainers.image.revision=$GITHUB_SHA" \
+            --push --metadata-file "$RUNNER_TEMP/bake-meta.json" agent_a core knowledge web
+          python3 scripts/deploy/release_manifest.py images --bake-metadata "$RUNNER_TEMP/bake-meta.json" --revision "$GITHUB_SHA" \
+            --repo "$repo" --name "$name" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --out "images-$GITHUB_SHA.json"
+          cat "images-$GITHUB_SHA.json"
+      - name: Read back every pushed digest from GHCR (labels included)
+        run: |
+          set -euo pipefail
+          for ref in $(python3 -c 'import json,sys; [print(v["ref"]) for v in json.load(open(sys.argv[1]))["images"].values()]' "images-$GITHUB_SHA.json"); do
+            docker buildx imagetools inspect "$ref" --format '{{json .Image}}' > "$RUNNER_TEMP/img.json"
+            python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d=d.get("linux/amd64", d); l=d["config"]["Labels"]; assert l["org.opencontainers.image.revision"]==sys.argv[2], l; print(sys.argv[3], "revision", l["org.opencontainers.image.revision"], "source", l["org.opencontainers.image.source"])' "$RUNNER_TEMP/img.json" "$GITHUB_SHA" "$ref"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ github.sha }}
+          path: images-${{ github.sha }}.json
+          if-no-files-found: error
+          retention-days: 90
