@@ -163,13 +163,7 @@ def _check_verdict_role(name: str, r: RoleSpec) -> None:
     Side effects: none. Role: audit open item 5; a judge cannot spend its cap on reasoning and return no verdict."""
     base = name.removesuffix("_fallback")
     if r.provider == "anthropic":
-        need = VERDICT_REPLY_MIN_TOKENS[base] * GATE_CAP_MARGIN
-        if thinking_always_on(r.model):
-            if r.effort != "low":
-                raise ValueError(f"role {name}: {r.model} cannot turn thinking off, so a verdict role needs effort: low")
-            need += GATE_THINKING_ALLOWANCE_TOKENS
-        elif r.thinking != "disabled":
-            raise ValueError(f"role {name}: a verdict role needs thinking: disabled (thinking spends the reply's tokens)")
+        need = VERDICT_REPLY_MIN_TOKENS[base] * GATE_CAP_MARGIN + _anthropic_thinking_allowance(name, r, "verdict")
     else:
         if r.effort is None:
             raise ValueError(f"role {name}: a verdict role on OpenAI needs an explicit effort (the API default is medium)")
@@ -177,6 +171,21 @@ def _check_verdict_role(name: str, r: RoleSpec) -> None:
                 else OPENAI_REASONING_RESERVE_TOKENS)
     if r.max_tokens is None or r.max_tokens < need:
         raise ValueError(f"role {name}: max_tokens must be at least {need} for the verdict (effort {r.effort})")
+
+
+def _anthropic_thinking_allowance(name: str, r: RoleSpec, kind: str) -> int:
+    """What: the Anthropic thinking rule shared by gate and verdict roles: thinking disabled (allowance 0), or on a
+    model that cannot turn thinking off, effort low plus GATE_THINKING_ALLOWANCE_TOKENS.
+    Use when: _check_gate_role and _check_verdict_role. Inputs: role name, spec, "gate" or "verdict" (for the
+    message). Output: extra tokens the cap must hold. Side effects: none; ValueError naming the role.
+    Role: one copy of the rule (review PR #72 M3)."""
+    if thinking_always_on(r.model):
+        if r.effort != "low":
+            raise ValueError(f"role {name}: {r.model} cannot turn thinking off, so a {kind} role needs effort: low")
+        return GATE_THINKING_ALLOWANCE_TOKENS
+    if r.thinking != "disabled":
+        raise ValueError(f"role {name}: a {kind} role needs thinking: disabled (thinking spends the reply's tokens)")
+    return 0
 
 
 def thinking_always_on(model: str) -> bool:
@@ -194,12 +203,8 @@ def _check_gate_role(name: str, r: RoleSpec) -> None:
     again; per-model rows from the claude-api skill thinking table (see THINKING_ALWAYS_ON). OpenAI needs effort
     none because the gpt-5 family reasons by default and a missing key does not say the model is non-reasoning."""
     need = GATE_REPLY_MIN_TOKENS[name.removesuffix("_fallback")] * GATE_CAP_MARGIN
-    if r.provider == "anthropic" and thinking_always_on(r.model):
-        if r.effort != "low":
-            raise ValueError(f"role {name}: {r.model} cannot turn thinking off, so a gate role needs effort: low")
-        need += GATE_THINKING_ALLOWANCE_TOKENS
-    elif r.provider == "anthropic" and r.thinking != "disabled":
-        raise ValueError(f"role {name}: a gate role needs thinking: disabled (thinking spends the reply's tokens)")
+    if r.provider == "anthropic":
+        need += _anthropic_thinking_allowance(name, r, "gate")
     if r.provider == "openai" and r.effort != "none":
         raise ValueError(f"role {name}: a gate role on OpenAI needs effort: none")
     if r.max_tokens is None or r.max_tokens < need:
