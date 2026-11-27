@@ -2,12 +2,13 @@
 mapped to ToolCallError, transport failures mapped to timeout or unavailable.
 Use when: CoreAgentClient and KnowledgeClient make a request inside a turn.
 Inputs: an httpx.AsyncClient, base URL, bearer token, the turn's TurnControl, method, path, body or params.
-Output: ToolCallError, call_json.
+Output: ToolCallError, call_json, call_json_within.
 Side effects: one HTTP request per call.
 Role: one place that knows headers and error classes. Holds no token itself: the caller passes the one it owns.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any, Literal
 
@@ -78,3 +79,15 @@ async def call_json(http: httpx.AsyncClient, method: str, url: str, headers: dic
     if resp.status_code >= 300:
         raise _error_from(resp)
     return resp.json()
+
+
+async def call_json_within(timeout_s: float, http: httpx.AsyncClient, method: str, url: str, headers: dict[str, str],
+                           *, params: dict[str, Any] | None = None, body: Any = None) -> Any:
+    """What: call_json bounded by a clamped timeout; the timeout becomes ToolCallError("timeout").
+    Use when: ingress code calls core itself (memory refresh, verify, commit, status, cancel) and owns the clamp.
+    Inputs: timeout seconds, then as call_json. Output: decoded JSON. Side effects: the request.
+    Role: doc 07 s8.2 "ingress for core calls it makes itself"."""
+    try:
+        return await asyncio.wait_for(call_json(http, method, url, headers, params=params, body=body), timeout_s)
+    except (TimeoutError, asyncio.TimeoutError) as exc:
+        raise ToolCallError("timeout", message="The service did not answer in time.") from exc
