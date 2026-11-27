@@ -48,7 +48,7 @@ docker compose run --rm ingest_knowledge     # TODO CS-E-02.S1: ingest job is in
 # TODO CS-E-01.S3.T3 and CS-E-04.S4.T1: Caddy and the web app are placeholders on main, so there is no page yet.
 ```
 
-What a healthy stack looks like on this commit: `postgres`, `redis`, `core`, `knowledge`, `agent_a` and `agent_b` show `healthy` and the three `migrate_*` jobs show `Exited (0)`. The `agent_*` services call model providers only when a turn runs, so readiness itself needs no valid key (see the setup check in `build-log/reports/laneB-readme-report.md` for the exact result with dummy keys). `caddy` and `web` are placeholders under the compose profile `edge` and do not start by default.
+What a healthy stack looks like on this commit: `postgres`, `redis`, `core`, `knowledge`, `agent_a` and `agent_b` show `healthy` and the three `migrate_*` jobs show `Exited (0)`. On this commit the three Python services are stubs that answer `/readyz` without calling a provider, so dummy keys still reach healthy. Once the real agent lands, check that readiness still holds without a valid key before relying on this. `caddy` and `web` are placeholders under the compose profile `edge` and do not start by default.
 
 Running several stacks on one machine: set `COMPOSE_PROJECT_NAME` and a distinct `EDGE_SUBNET` (and the same value in `FORWARDED_ALLOW_IPS`) in `.env`, so networks do not collide.
 
