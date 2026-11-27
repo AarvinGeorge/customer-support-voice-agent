@@ -61,8 +61,10 @@ def summary_from_thread(values: dict[str, Any] | None,
     """What: build the summary from the checkpointed SupportState values. Only what doc 07 s6.6 lists leaves:
     the verified name, the pending read-back, and the customer's own words (the <customer_message> block of a
     human message; human messages without one, such as merged <voice_transcript> blocks, are skipped, and no
-    <account_context> or <turn_context> ever leaves) plus agent replies. Every line goes through contracts redact
-    (emails masked, the s11.1 PIN scanner once CS-E-03.S7.T9 adds it).
+    <account_context> or <turn_context> ever leaves) plus agent replies. By provenance (D-071 part 3): customer
+    lines go through contracts redact with the session's context (the s11.1 scanner and the email mask); agent lines
+    (the agent model never saw a customer PIN, and code-written lines carry our own ids) go through redact_system
+    (emails masked, numbers kept).
     Use when: voice/token. Inputs: thread channel values or None for a new session; the session's RedactContext.
     Output: SessionSummary: verified name from claims_snapshot (or a neutral label), the last agent message as
     the read-back while state.pending is set, the last 8 customer and agent text messages.
@@ -87,7 +89,8 @@ def summary_from_thread(values: dict[str, Any] | None,
         else:
             continue
         if text:
-            lines.append((speaker, redaction.redact(text, ctx)))
+            clean = redaction.redact(text, ctx) if speaker == "customer" else redaction.redact_system(text)
+            lines.append((speaker, clean))
     readback = None
     if values.get("pending"):
         readback = next((t for s, t in reversed(lines) if s == "agent"), None)

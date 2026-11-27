@@ -12,7 +12,9 @@ Role: one brain for chat and voice (D-002): voice/ask is the chat ingress with m
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -110,7 +112,8 @@ class Minter(Protocol):
 class VoiceDeps:
     """What: everything the voice routes need. Use when: create_app(voice=...) or the lifespan builds it.
     Inputs: store, minter, voice RoleSpec (None: models.yaml failed to load, token answers 503), thread summary
-    callable, the shared Ingress (None until the agent loop is wired: voice/ask answers 503), clock.
+    callable, the shared Ingress (None until the agent loop is wired: voice/ask answers 503), the RelayFacts loader
+    for POST /transcript (None: no facts, every number in posted speech is scanned), clock.
     Output: value on app.state.voice. Side effects: none. Role: dependency bundle."""
 
     store: VoiceStore
@@ -118,6 +121,7 @@ class VoiceDeps:
     voice_spec: RoleSpec | None
     summary: Callable[[str, RedactContext], Awaitable[SessionSummary]]
     ingress: Ingress | None = None
+    relay_facts: Callable[[str], Awaitable["RelayFacts"]] | None = None
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
 
 
@@ -282,6 +286,83 @@ def _redact_context(session: SessionRow) -> RedactContext:
                          verified=session.verified_user_id is not None)
 
 
+RELAY_LINES_TURNS = 5  # the latest agent answers handed to the relay, matched sentence by sentence
+_TOOL_RESULT_RE = re.compile(r'^<tool_result name="([^"]+)" untrusted="true">(.*)</tool_result>$', re.DOTALL)
+_SHORT_ID_RE = re.compile(r"^[0-9]{4}$")
+_TAIL_RE = re.compile(r"^(?:TCK|INV)-(?:[0-9]+-)*[0-9]*?([0-9]{4})$")
+
+
+@dataclass(frozen=True)
+class RelayFacts:
+    """What: what POST /transcript needs to redact realtime speech by provenance: our recent answer lines and the
+    exact ids core issued in this session. Use when: scan_relayed. Inputs: lines, ids. Output: value.
+    Side effects: none. Role: D-071 part 3 (review-pr76 I1); empty means fail closed (every number scanned)."""
+
+    lines: tuple[str, ...] = ()
+    ids: frozenset[str] = frozenset()
+
+
+def core_ids(obj: Any) -> set[str]:
+    """What: the exact ids in core data a customer may hear back: ticket short ids, the last four digits of ticket
+    ids and invoice numbers, read from their typed fields only (short_id, ticket_id, invoice_number), never from
+    prose. Use when: building RelayFacts from tool results and turn finals. Inputs: JSON-like data.
+    Output: set of 4-digit strings. Side effects: none. Role: helper."""
+    out: set[str] = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "short_id" and isinstance(v, str) and _SHORT_ID_RE.match(v):
+                out.add(v)
+            elif k in ("ticket_id", "invoice_number") and isinstance(v, str) and (m := _TAIL_RE.match(v)):
+                out.add(m.group(1))
+            else:
+                out |= core_ids(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            out |= core_ids(v)
+    return out
+
+
+def thread_ids(messages: list[Any]) -> set[str]:
+    """What: core_ids of every core tool result in the thread (ToolMessages that ToolGuard wrapped from core's JSON
+    response; search_kb is knowledge text and is skipped). Use when: load_relay_facts. Inputs: thread messages.
+    Output: ids. Side effects: none. Role: the code-held session data, the same thread PR #71 reads tickets from."""
+    out: set[str] = set()
+    for m in messages:
+        if getattr(m, "type", None) != "tool" or not isinstance(m.content, str):
+            continue
+        found = _TOOL_RESULT_RE.match(m.content)
+        if not found or found.group(1) == "search_kb":
+            continue
+        try:
+            out |= core_ids(json.loads(found.group(2)))
+        except ValueError:
+            continue  # not core JSON: contributes nothing (fail closed)
+    return out
+
+
+async def load_relay_facts(store: Any, checkpointer: Any, session_id: str) -> RelayFacts:
+    """What: RelayFacts for a session: the final text and say of its latest turns (our lines), and the ids from
+    every turn's final ticket (agent.turns.final, the TicketRef core returned) plus every core tool result in the
+    checkpointed thread. Use when: production VoiceDeps.relay_facts. Inputs: turn store, LangGraph saver (or None),
+    session id. Output: RelayFacts; any read failure gives what was read so far, or nothing (fail closed).
+    Side effects: two SELECTs and one checkpoint read (2 s cap). Role: D-071 part 3."""
+    lines: list[str] = []
+    ids: set[str] = set()
+    try:
+        lines = await store.recent_answers(session_id, RELAY_LINES_TURNS)
+        for ticket in await store.issued_tickets(session_id):
+            ids |= core_ids({"ticket": ticket})
+        if checkpointer is not None:
+            async with asyncio.timeout(THREAD_READ_TIMEOUT_S):
+                tup = await checkpointer.aget_tuple(run_config(session_id))
+            values = tup.checkpoint.get("channel_values") if tup else None
+            ids |= thread_ids(list((values or {}).get("messages") or []))
+    except Exception:  # noqa: BLE001 - fail closed: without facts every number in relayed speech is scanned
+        log.warning("relay facts read failed session_id=%s", session_id, exc_info=True)
+        return RelayFacts()
+    return RelayFacts(tuple(lines), frozenset(ids))
+
+
 def _relay_ready(deps: VoiceDeps | None) -> bool:
     """What: whether voice/ask can run a turn: an Ingress with its call keys and transcript merge attached.
     Use when: voice/token (never mint for a dead relay, review M1) and voice/ask (never run voice without the
@@ -370,6 +451,12 @@ def install_voice(app: FastAPI) -> None:
         if vs is None or vs.session_id != sid:
             return error_response(request, 404, "not_found", "NOT_FOUND", "Not found.")
         ctx = _redact_context(session)
-        clean = [it.model_copy(update={"text": redaction.redact(it.text, ctx)}) for it in body.items]  # I1
+        # D-071 part 3 (review-pr76 I1): provenance is decided here, never from the browser's role label. Every
+        # posted item is realtime speech (the customer's, or the realtime model's, which heard the customer), so
+        # all get the full scan; only a sentence that is one of our own answer lines keeps the exact ids core
+        # issued in this session. The stored role stays a display label (doc 07 s2.3); redaction never reads it.
+        facts = await deps.relay_facts(sid) if deps.relay_facts is not None else RelayFacts()
+        clean = [it.model_copy(update={"text": redaction.scan_relayed(it.text, ctx, facts.lines, facts.ids)})
+                 for it in body.items]  # I1
         await deps.store.add_transcript_items(sid, vs.voice_session_id, clean)
         return Response(status_code=204)

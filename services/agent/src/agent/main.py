@@ -30,7 +30,7 @@ from agent.routes.turns import install_turns
 from agent.sessions import PgSessionStore, SessionStore
 from agent.settings import Settings
 from agent.trajectory import TrajectoryWriter
-from agent.voice import PgVoiceStore, VoiceDeps, install_voice, thread_summary
+from agent.voice import PgVoiceStore, VoiceDeps, install_voice, load_relay_facts, thread_summary
 from agent.web import install_http
 
 log = logging.getLogger("agent.main")
@@ -131,8 +131,13 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
             Output: summary. Side effects: one read. Role: closure."""
             return await thread_summary(app.state.checkpointer, sid, context)
 
+        async def relay_facts(sid: str) -> Any:
+            """What: RelayFacts from the turn store and the app's checkpointer. Use when: POST /transcript.
+            Inputs: sid. Output: RelayFacts. Side effects: reads. Role: closure (D-071 part 3)."""
+            return await load_relay_facts(PgTurnStore(pool), app.state.checkpointer, sid)
+
         return VoiceDeps(store=PgVoiceStore(pool), minter=OpenAIRealtimeMinter(http, cfg.openai_api_key),
-                         voice_spec=spec, summary=summary)
+                         voice_spec=spec, summary=summary, relay_facts=relay_facts)
 
     app = FastAPI(title="quillstack-agent", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = cfg

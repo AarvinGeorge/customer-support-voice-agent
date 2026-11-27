@@ -140,6 +140,15 @@ class TurnStore(Protocol):
         """What: set events_complete false. Use when: trajectory writer drops. Inputs: turn ids. Output: none.
         Side effects: UPDATE. Role: port method."""
         ...
+    async def recent_answers(self, session_id: str, limit: int) -> list[str]:
+        """What: the final text and say of the session's latest finished turns. Use when: POST /transcript matches
+        realtime speech to our own lines (D-071). Inputs: session id, turn count. Output: strings.
+        Side effects: SELECT. Role: port method."""
+        ...
+    async def issued_tickets(self, session_id: str) -> list[dict[str, Any]]:
+        """What: the TicketRef of every turn final of the session that has one. Use when: RelayFacts ids (D-071).
+        Inputs: session id. Output: ticket dicts. Side effects: SELECT. Role: port method."""
+        ...
 
 
 class TurnLock(Protocol):
@@ -609,6 +618,28 @@ class PgTurnStore:
                 "ORDER BY started_at DESC, turn_id DESC LIMIT 1", (session_id, before_turn_id))
             r = await cur.fetchone()
         return (r[0], r[1]) if r else None
+
+    async def recent_answers(self, session_id: str, limit: int) -> list[str]:
+        """What: final text and say of the session's latest `limit` turns that have a final.
+        Use when: POST /transcript (D-071: realtime speech is ours only when it is one of these lines).
+        Inputs: session id, turn count. Output: strings, newest turn first. Side effects: SELECT. Role: read."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT final->>'text', final->>'say' FROM agent.turns WHERE session_id = %s AND final IS NOT NULL "
+                "ORDER BY started_at DESC, turn_id DESC LIMIT %s", (session_id, limit))
+            rows = await cur.fetchall()
+        return [t for r in rows for t in r if t]
+
+    async def issued_tickets(self, session_id: str) -> list[dict[str, Any]]:
+        """What: final.ticket (the TicketRef core returned) of every turn of the session that has one.
+        Use when: RelayFacts ids for POST /transcript (D-071 part 3). Inputs: session id. Output: ticket dicts.
+        Side effects: SELECT. Role: read (structured, code-held: never parsed from text)."""
+        async with self.pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT final->'ticket' FROM agent.turns WHERE session_id = %s AND jsonb_typeof(final->'ticket') = "
+                "'object' ORDER BY started_at", (session_id,))
+            rows = await cur.fetchall()
+        return [r[0] for r in rows if isinstance(r[0], dict)]
 
     async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None:
         """What: the final row. Use when: step 16. Inputs: id, outcome, end time. Output: none.
