@@ -107,6 +107,16 @@ def _rule(name: str, artifact: Any) -> dict[str, Any] | None:
     return {"decision": artifact["decision"], "reason_code": codes[0], "policy_ref": refs[0]}
 
 
+def _kept_artifact(name: str, artifact: Any) -> dict[str, Any] | None:
+    """What: the part of a raw result kept on the ToolMessage (checkpointed, never sent to a model): for search_kb
+    the relevant chunks with their citation fields, so Gate 2 can cite them in later turns (D-065); nothing else.
+    Use when: the success path. Inputs: name, raw artifact. Output: {"grounded_chunks": [...]} or None.
+    Side effects: none. Role: code-held provenance for session evidence."""
+    if name == "search_kb" and isinstance(artifact, dict) and isinstance(artifact.get("grounded_chunks"), list):
+        return {"grounded_chunks": artifact["grounded_chunks"]}
+    return None
+
+
 def _content(name: str, artifact: Any, raw_content: Any) -> str:
     """What: the wrapped content the model sees for a successful call. Use when: success.
     Inputs: name, artifact (raw result), the tool's own content (used when there is no artifact).
@@ -263,7 +273,8 @@ class ToolGuardMiddleware(AgentMiddleware):
             return self._message(call, {"status": "invalid_arguments", "message": str(msg.content)[:500]}, error=True)
         artifact = msg.artifact
         self._done(control, step, "ok", spec.title, attempt, detail=_detail(name, artifact), rule=_rule(name, artifact))
-        return ToolMessage(content=_content(name, artifact, msg.content), tool_call_id=call["id"], name=name)
+        return ToolMessage(content=_content(name, artifact, msg.content), tool_call_id=call["id"], name=name,
+                           artifact=_kept_artifact(name, artifact))
 
     @staticmethod
     def _refund(control: TurnControl, name: str, spec: ToolSpec) -> None:

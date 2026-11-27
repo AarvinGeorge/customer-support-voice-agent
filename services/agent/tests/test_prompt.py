@@ -71,17 +71,3 @@ def test_system_prompt_forbids_advice_the_article_does_not_state():
     # the best place to check", which no article says, and Gate 2 replaced the whole answer with the clarify line.
     assert "Do not add tips, advice or next steps of your own" in SYSTEM_PROMPT
 
-
-def test_system_prompt_requires_a_search_in_the_same_turn_as_gate_2():
-    # Browser pass 2b (S1 follow-up, second run): the model skipped search_kb, answered from the refund receipt line
-    # and named the Refund policy article; Gate 2 only sees this turn's chunks (doc 07 s6.4), so it failed. The prompt
-    # must not allow article text from earlier turns.
-    assert "or earlier in this conversation" not in SYSTEM_PROMPT
-    assert "call search_kb in this turn" in SYSTEM_PROMPT
-
-
-def test_system_prompt_searches_the_cited_policy_after_a_decline():
-    # Browser pass 2b (S3 Marcus, second run): after the ROLE_NOT_PERMITTED decline the model wrote "an owner or
-    # billing admin on your account can request the refund" with no article in the turn; the roles-and-permissions
-    # section says exactly that, so the decline turn must search the policy the tool cites.
-    assert "If a tool result declines a request, call search_kb for the policy it cites in this turn" in SYSTEM_PROMPT

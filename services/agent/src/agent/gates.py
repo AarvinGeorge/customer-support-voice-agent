@@ -11,7 +11,9 @@ Inputs: the knowledge SearchResponse JSON, the checkpointed weak_streak, the bou
 the scope_classifier role (data/models.yaml).
 Output: retrieval_decision, apply_retrieval_gate, retrieval_unavailable, run_scope_check, next_weak_streak,
 ScopeClassifier, GateStep, start_gate_step, last_user_text, GATE_TAGS; matches_policy, needs_grounding, apply_floor,
-is_code_line, CODE_LINE_PREFIXES, FLOOR_DETAIL, NO_CLAIMS_REASONS, turn_messages, evidence_text, grounded_evidence, record_gate_call, verifier_input, enforce_code_rules, GroundingVerifier, GroundingResult,
+is_code_line, CODE_LINE_PREFIXES, FLOOR_DETAIL, NO_CLAIMS_REASONS, turn_messages, evidence_text, evidence_window,
+session_evidence, SessionEvidence, grounded_evidence, answered_with_citations, GATE2_EVIDENCE_USER_TURNS,
+record_gate_call, verifier_input, enforce_code_rules, GroundingVerifier, GroundingResult,
 parse_verifier_reply, reply_truncated, citations_for, CLARIFY_LINE, CHECKING_POLICY_LINE, ERROR_DETAILS.
 Side effects: emits step.started, gate and step.completed on the turn stream; sets TurnControl.route; the scope
 classifier (2 s) and the verifier (5 s in chat, 3 s in voice, D-061) each make one model call, 0 retries, tagged internal:gate and nostream.
@@ -251,7 +253,8 @@ def next_weak_streak(control: TurnControl) -> int:
     otherwise 0 (a pass, a turn with no search, a decline, or an escalation resets it).
     Side effects: none. Role: the streak never exceeds 1 because the second weak turn escalates."""
     r = control.retrieval
-    ended_weak = r is not None and r.get("verdict") in WEAK_VERDICTS and r.get("decision") == "clarify"
+    ended_weak = (r is not None and r.get("verdict") in WEAK_VERDICTS and r.get("decision") == "clarify"
+                  and not answered_with_citations(control))  # D-066: a cited answer did not end in clarify
     escalated = control.route is not None and control.route.kind in ("escalate", "decline_off_topic")
     return 1 if ended_weak and not escalated else 0
 
@@ -266,7 +269,7 @@ ERROR_DETAILS = {"truncated": "Verifier reply was cut at its token cap; failed c
                  "exception": "Verifier call failed; failed closed",
                  "unparseable": "Verifier reply was not a readable verdict; failed closed",
                  "no_time": "No time left for the verifier; failed closed"}
-EVIDENCE_MAX_CHARS = 48000  # far below the verifier's context; a longer turn keeps its first (best) results
+EVIDENCE_MAX_CHARS = 48000  # the evidence budget (about 12,000 tokens); D-065 evicts the oldest tool results first
 EXCERPT_MAX_CHARS = 240
 
 # The policy-claim pattern, now only the D-064 floor: the verifier runs on every model draft whatever this says;
@@ -415,37 +418,105 @@ def _source_block(source_id: str, kind: str, body: str) -> str:
             f"{escape_tags(harden(escape_untrusted(body)), _SOURCE_TAGS)}</source>")
 
 
-def grounded_evidence(values: dict[str, Any], messages: list[BaseMessage]) -> tuple[str, set[str]]:
-    """What: Gate 2 evidence from every grounded source of the turn, each with an id the verifier can cite:
-    0. agent_capabilities: the fixed AGENT_CAPABILITIES text, always (browser pass 2b: the ticket offer the system
-       prompt asks for was judged unsupported, so the S3 decline got the clarify line);
+GATE2_EVIDENCE_USER_TURNS = 6  # D-065: the session window, in user turns (the current one included)
+
+
+@dataclass(frozen=True)
+class SessionEvidence:
+    """What: Gate 2 evidence for one draft (D-065). Use when: GroundingMiddleware, the verifier and the code rules.
+    Inputs: text (what the verifier reads), ids (the non-chunk source ids a claim may cite), chunks (the citable
+    relevant chunks, full knowledge dicts with flags and citation fields, by chunk id), provenance (source id to
+    where it came from: "code", "state", a fixed-line message id, a tool_call_id, or "search_kb:<tool_call_id>").
+    Output: value. Side effects: none. Role: one evidence set; a source is citable only if its block is in text."""
+
+    text: str
+    ids: set[str]
+    chunks: dict[str, dict[str, Any]]
+    provenance: dict[str, list[str]]
+
+
+def evidence_window(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """What: the messages of the last GATE2_EVIDENCE_USER_TURNS user turns (from the oldest of those human
+    messages to the end). Use when: session_evidence. Inputs: thread messages before the draft.
+    Output: list. Side effects: none. Role: D-065 turn bound; anything older is evicted."""
+    humans = [i for i, m in enumerate(messages) if isinstance(m, HumanMessage)]
+    if len(humans) <= GATE2_EVIDENCE_USER_TURNS:
+        return list(messages)
+    return messages[humans[-GATE2_EVIDENCE_USER_TURNS]:]
+
+
+def _grounded_chunks(msg: ToolMessage) -> list[dict[str, Any]]:
+    """What: the code-held relevant chunks ToolGuard kept on a search_kb result (ToolMessage.artifact, never sent
+    to a model). Use when: session_evidence. Inputs: a search_kb ToolMessage. Output: chunk dicts (empty when the
+    artifact is missing or malformed). Side effects: none. Role: helper."""
+    art = msg.artifact if isinstance(msg.artifact, dict) else {}
+    chunks = art.get("grounded_chunks")
+    return [c for c in chunks if isinstance(c, dict) and c.get("chunk_id")] if isinstance(chunks, list) else []
+
+
+def session_evidence(values: dict[str, Any], messages: list[BaseMessage]) -> SessionEvidence:
+    """What: Gate 2 evidence from every grounded source of the session (D-065, amends doc 07 s6.4), each with an
+    id the verifier can cite and a provenance id:
+    0. agent_capabilities: the fixed AGENT_CAPABILITIES text, always (what the agent can do, such as opening a
+       ticket; it states no outcome, refund or reply time);
     1. account_context: the code-held verified context (state.verified with claims_snapshot and context_snapshot,
        which core returned at verify and memory refresh), only when the thread is verified;
     2. fixed_line:<message id>: the last FIXED_LINES_MAX lines our code wrote to the thread (route and ingress);
-    3. this turn's tool results (search_kb <doc> chunks and core <tool_result> blocks), with any <source> tag in
-       them escaped.
+    3. every tool result in the checkpoint within the last GATE2_EVIDENCE_USER_TURNS user turns (core
+       <tool_result> blocks, cited by tool name, and search_kb <doc> chunks, cited by chunk id from the code-held
+       artifact), as ToolGuard wrapped them, with any <source> tag escaped. Model text is never a source.
+    Budget: EVIDENCE_MAX_CHARS. Code sources go first; tool results are taken newest first and the first one
+    that does not fit evicts itself and everything older, so an evicted source is never citable.
     Use when: GroundingMiddleware, before the verifier. Inputs: agent state values, thread messages before the
-    draft. Output: (evidence text, the non-chunk source ids a claim may cite: agent_capabilities, account_context, fixed_line ids,
-    the names of non-search tools that returned a result). Code sources come first, so the 48,000-character cut
-    keeps them. Side effects: none.
-    Role: fix after s5-fault-scripts-report: KB chunks alone made every verification turn fail Gate 2."""
-    turn = turn_messages(messages)
+    draft. Output: SessionEvidence. Side effects: none.
+    Role: D-065: the agent knows what earlier turns retrieved, so the gate sees it too (browser pass 2b bugs 2 to 4)."""
     blocks: list[str] = [_source_block(CAPABILITIES_SOURCE_ID, "agent_capabilities", AGENT_CAPABILITIES)]
-    ids: set[str] = {CAPABILITIES_SOURCE_ID}
+    provenance: dict[str, list[str]] = {CAPABILITIES_SOURCE_ID: ["code"]}
     claims, context = values.get("claims_snapshot"), values.get("context_snapshot")
     if values.get("verified") and (claims or context):
         data = harden_obj(escape_untrusted_obj({"verified": True, "verified_person": claims, "account": context}))
         blocks.append(_source_block(ACCOUNT_SOURCE_ID, "verified_context",
                                     json.dumps(data, sort_keys=True, ensure_ascii=False)))
-        ids.add(ACCOUNT_SOURCE_ID)
+        provenance[ACCOUNT_SOURCE_ID] = ["state"]
     fixed = [m for m in messages if isinstance(m, AIMessage) and str(m.id or "").startswith(FIXED_LINE_PREFIXES)]
     for m in fixed[-FIXED_LINES_MAX:]:
         sid = f"fixed_line:{m.id}"
         blocks.append(_source_block(sid, "fixed_line", str(m.content)))
-        ids.add(sid)
-    tools = escape_tags(evidence_text(turn), ("source",))
-    ids |= {str(m.name) for m in turn if isinstance(m, ToolMessage) and m.name and m.status != "error"} - {"search_kb"}
-    return "\n".join([*blocks, tools])[:EVIDENCE_MAX_CHARS], ids
+        provenance[sid] = [str(m.id)]
+    used = sum(len(b) + 1 for b in blocks)
+    kept: list[str] = []
+    chunks: dict[str, dict[str, Any]] = {}
+    tools = [m for m in evidence_window(messages) if isinstance(m, ToolMessage) and m.name and m.status != "error"]
+    for m in reversed(tools):  # newest first: the budget evicts the oldest
+        body = escape_tags(str(m.content), ("source",))
+        if used + len(body) + 1 > EVIDENCE_MAX_CHARS:
+            break
+        used += len(body) + 1
+        kept.append(body)
+        if m.name == "search_kb":
+            for c in _grounded_chunks(m):
+                chunks.setdefault(str(c["chunk_id"]), c)
+                provenance.setdefault(str(c["chunk_id"]), []).append(f"search_kb:{m.tool_call_id}")
+        else:
+            provenance.setdefault(str(m.name), []).append(str(m.tool_call_id))
+    ids = set(provenance) - set(chunks)
+    return SessionEvidence("\n".join([*blocks, *reversed(kept)]), ids, chunks, provenance)
+
+
+def grounded_evidence(values: dict[str, Any], messages: list[BaseMessage]) -> tuple[str, set[str]]:
+    """What: session_evidence as (text, the non-chunk source ids a claim may cite).
+    Use when: callers that pass chunks themselves (the real-model evals). Inputs: state values, messages.
+    Output: (text, ids). Side effects: none. Role: thin wrapper."""
+    ev = session_evidence(values, messages)
+    return ev.text, ev.ids
+
+
+def answered_with_citations(control: TurnControl) -> bool:
+    """What: D-066: the model answered and Gate 2 passed with at least one help-article citation.
+    Use when: the turn's end_reason (agent.sse.classify_final) and the next weak_streak.
+    Inputs: control (grounding, citations). Output: bool. Side effects: none.
+    Role: a weak Gate 1 adds the clarify instruction only; what the customer saw decides the outcome."""
+    return control.grounding == "pass" and bool(control.citations)
 
 
 @dataclass(frozen=True)
@@ -602,14 +673,17 @@ def _excerpt(text: str) -> str:
     return cut[:EXCERPT_MAX_CHARS].rstrip()
 
 
-def citations_for(control: TurnControl, result: GroundingResult) -> list[dict[str, Any]]:
-    """What: FinalAnswer citations for a passed draft: the relevant chunks this turn showed the model that a
-    supported claim names as its source, in claim order, each once. Use when: Gate 2 passed.
-    Inputs: control (retrieval_chunks), result. Output: list of Citation dicts. Side effects: none.
+def citations_for(control: TurnControl, result: GroundingResult,
+                  chunks: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """What: FinalAnswer citations for a passed draft: the relevant chunks in the evidence (the session's, D-065;
+    this turn's retrieval_chunks when none are given) that a supported claim names as its source, in claim order,
+    each once. Use when: Gate 2 passed.
+    Inputs: control (retrieval_chunks), result, optional chunks. Output: list of Citation dicts. Side effects: none.
     Role: doc 07 s6.2 Citation (url = Chunk.source_url)."""
     out: list[dict[str, Any]] = []
+    pool = control.retrieval_chunks if chunks is None else chunks
     for claim in result.claims:
-        chunk = control.retrieval_chunks.get(claim.get("source_id") or "") if claim.get("supported") else None
+        chunk = pool.get(claim.get("source_id") or "") if claim.get("supported") else None
         if chunk is None or any(c["chunk_id"] == chunk["chunk_id"] for c in out):
             continue
         cite = chunk.get("citation") or {}

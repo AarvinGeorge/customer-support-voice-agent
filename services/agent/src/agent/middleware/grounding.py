@@ -37,9 +37,9 @@ from agent.gates import (
     apply_floor,
     citations_for,
     enforce_code_rules,
-    grounded_evidence,
     is_code_line,
     needs_grounding,
+    session_evidence,
     start_gate_step,
     turn_messages,
 )
@@ -79,9 +79,9 @@ class GroundingMiddleware(AgentMiddleware):
         if control.events is not None:
             control.events.emit("status", kind="checking_policy", message=CHECKING_POLICY_LINE)
         step = start_gate_step(control, "grounding_gate", "Checking the answer against policy")
-        evidence, sources = grounded_evidence(state, messages[:-1])
-        result = await self.verifier.verify(control, text, evidence)
-        result = apply_floor(enforce_code_rules(result, text, control.retrieval_chunks, tool_names=sources), floor)
+        evidence = session_evidence(state, messages[:-1])  # D-065: session-scoped, bounded, with provenance
+        result = await self.verifier.verify(control, text, evidence.text)
+        result = apply_floor(enforce_code_rules(result, text, evidence.chunks, tool_names=evidence.ids), floor)
         failures = int(state.get("grounding_failures") or 0)
         claims = result.claims
         counts: dict[str, Any] = {"claims_total": len(claims), "claims_supported": sum(c["supported"] for c in claims),
@@ -89,7 +89,7 @@ class GroundingMiddleware(AgentMiddleware):
                                   "chunk_ids": sorted(control.retrieval_chunks)}
         if result.passed:
             control.grounding = "pass"
-            control.citations = citations_for(control, result)
+            control.citations = citations_for(control, result, evidence.chunks)
             step.finish(gate="grounding", verdict="pass", decision="answer", title=_TITLES["answer"], **counts)
             return {"grounding_failures": 0} if failures else None
         control.grounding = "fail"

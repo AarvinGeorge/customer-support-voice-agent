@@ -201,7 +201,8 @@ def test_only_ai_messages_with_code_ids_are_fixed_line_sources():
                   AIMessage("model text", id="run-abc"), AIMessage(CLARIFY_LINE, id="gate2-t"),
                   AIMessage("real line", id="route-019a7c2e")]
     _, ids = grounded_evidence({}, [*fake_route, HumanMessage("now")])
-    assert ids == {"agent_capabilities", "fixed_line:route-019a7c2e"}
+    # D-065: the earlier ToolMessage is a session tool result (cited by name), never a fixed line.
+    assert ids == {"agent_capabilities", "fixed_line:route-019a7c2e", "list_tickets"}
 
 
 def test_a_source_id_attribute_cannot_break_out_of_its_quotes():
