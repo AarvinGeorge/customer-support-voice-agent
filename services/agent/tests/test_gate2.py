@@ -453,12 +453,18 @@ CLARIFYING_REPLIES = [
     "Understood. Do you want to change the plan or cancel it?", "Happy to help with billing. What do you need?",
     CLARIFY_LINE, "Is the last day of your trial today?", "Do you see an error code? If so, what does it say?",
     "To look at your account I need to verify you. Please enter your account ID and support PIN in the form below.",
+    # re-review r2 examples
+    "Are you on the Pro plan or the Business plan?", "Do you mean the 30 November renewal?",
+    "Do you want a refund or a credit?", "Just to check, are you the admin or a member?",
 ]
 ASSERTIVE_DRAFTS = [
     DRAFT, "You have a 14-day trial.", "It costs USD 96 per seat.", "You are ineligible for that on your plan.",
     "That is not allowed.", "You cannot do that.", "Your tier does not include that.", "Refunds are always approved.",
     "The Business plan includes audit logs.", "We can waive that fee.", "The rule PRO_PAST_LATE_BAND applies.",
     "Which plan are you on? The Pro plan refunds within 30 days.",
+    # re-review r2 examples
+    "Pro refunds are capped at $150.", "You qualify for a full refund.", "Owners cannot transfer a workspace.",
+    "Which plan are you on? Pro is $12 a seat.",
 ]
 
 
@@ -501,3 +507,32 @@ async def test_a_clarifying_question_after_a_weak_search_is_kept():
     h = Harness(verifier(claims_json()), replies=[search, AIMessage(q)], body=search_body("weak"))
     outcome, events, _ = await h.run()
     assert outcome.final.text == q and grounding_gate(events).verdict == "pass"
+
+
+# --- fix round 3 (re-review r2 N2): a policy claim phrased as a question still fails closed on zero claims ------
+QUESTION_FORM_POLICY = [
+    "Did you know Pro refunds are capped at $150?",
+    "Did you know you can get a full refund within 90 days?",
+    "You know refunds are always approved on Business, right?",
+    "Pro refunds are capped at $150, is that okay?",
+    "Your refund of $500 is approved, shall I go ahead?",
+    "You are eligible for a 60-day refund - want me to start it?",
+    "Isn't it great that Enterprise includes unlimited refunds?",
+    "Pro costs $5 per seat\nBusiness costs $9 per seat\nWhich do you want?",
+    "Refunds take 3 days; credits are instant; which would you like?",
+    "Would it help to know that the refund window is 45 days?",
+]
+
+
+@pytest.mark.parametrize("draft", QUESTION_FORM_POLICY)
+def test_zero_claims_on_a_policy_question_still_fails_closed(draft: str):
+    assert needs_grounding(draft, False) is True
+    assert enforce_code_rules(GroundingResult("pass", []), draft, SUSPECT, tool_names=set()).verdict == "fail"
+
+
+async def test_a_policy_question_with_zero_claims_is_not_flushed():
+    draft = "Did you know Pro refunds are capped at $150?"
+    h = Harness(verifier(claims_json()), replies=[AIMessage(draft)])
+    outcome, events, values = await h.run()
+    assert (grounding_gate(events).verdict, outcome.end_reason) == ("fail", "clarify")
+    assert draft not in texts(values)

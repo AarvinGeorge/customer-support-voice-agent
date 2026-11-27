@@ -274,7 +274,22 @@ _ASSERTION_PARTS = (
     r"\b(?:plan|tier)s?\b[^.!?]*\b(?:includ|cover|allow|support|get|come|ha[sv]e?)",  # tier rules
 )
 _ASSERTION_RE = re.compile("|".join(_ASSERTION_PARTS), re.IGNORECASE)
-_SENTENCE_RE = re.compile(r"[^.!?]+[.!?]*")
+_SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]*")
+# Re-review r2 N2: a sentence is exempt as a plain question only when it ends in "?", STARTS with a question word or
+# auxiliary, and carries no embedded-fact marker. "Pro refunds are capped at $150, is that okay?" starts with a
+# statement, so it is checked; "Did you know ..." and "... know that ..." smuggle a fact, so they are checked.
+_QUESTION_START_RE = re.compile(
+    r"^\W*(?:which|what|when|where|who|whom|whose|why|how|is|are|was|were|do|does|did|can|could|would|will|"
+    r"should|have|has|may|shall)\b", re.IGNORECASE)
+_TIER = r"\b(?:pro|business|enterprise|starter|premium|free\s+(?:plan|tier))\b"
+_RULE = (r"\b(?:includ\w*|costs?|cap(?:ped|s)?|limit\w*|unlimited|allow\w*|eligib\w*|always|never|within|only|"
+         r"approv\w*|guarantee\w*|free)\b")
+_FACT_MARKER_RE = re.compile(
+    r"\bdid\s+you\s+know\b|\byou\s+know\b|\bas\s+you\s+know\b|\bisn[’']?t\s+it\b|\bremember\s+that\b|"
+    r"\bnote\s+that\b|\b(?:know|aware|remember|great|true|correct)\s+that\b"
+    r"|[$€£¥₹%]|\b(?:usd|eur|gbp|cad|aud|inr|jpy|dollars?|euros?|cents?|percent)\b"  # money amounts
+    rf"|\d[\d,.]*[\s-]*(?:(?:business|calendar|working)[\s-]+)?(?:day|week|month|year|hour|seat|user|gb|percent)s?\b"
+    rf"|{_TIER}[^?]*{_RULE}|{_RULE}[^?]*{_TIER}", re.IGNORECASE)
 
 VERIFIER_PROMPT = (
     "You check a customer support draft against the evidence the support agent had in this turn. The evidence "
@@ -302,11 +317,22 @@ def matches_policy(draft: str) -> bool:
 def asserts_policy(draft: str) -> bool:
     """What: true when a sentence of the draft that is not a question states a number, money, a duration, an
     eligibility rule, a plan name or a tier rule (or names a reason code).
+    Plain questions (_plain_question) are left out; a question that smuggles a fact is not.
     Use when: enforce_code_rules, for a verifier reply with zero claims. Inputs: draft text. Output: bool.
     Side effects: none. Role: re-review N1: questions, acknowledgements, the fixed clarifying line and the
     verification prompt pass on zero claims; a policy assertion the verifier did not extract still fails closed."""
-    statements = [m.group(0) for m in _SENTENCE_RE.finditer(draft) if not m.group(0).rstrip().endswith("?")]
+    statements = [m.group(0) for m in _SENTENCE_RE.finditer(draft) if not _plain_question(m.group(0))]
     return any(_ASSERTION_RE.search(t) or _REASON_CODE_RE.search(t) for t in statements)
+
+
+def _plain_question(sentence: str) -> bool:
+    """What: true for a sentence that only asks: it ends in "?", starts with a question word or auxiliary, and has
+    no embedded-fact marker ("did you know", "note that", a money amount, a number with a unit, a tier name with a
+    rule word). Use when: asserts_policy. Inputs: one sentence. Output: bool. Side effects: none.
+    Role: re-review r2 N2, so a policy claim phrased as a question is still checked."""
+    text = sentence.strip()
+    return (text.endswith("?") and bool(_QUESTION_START_RE.search(text))
+            and not _FACT_MARKER_RE.search(text))
 
 
 def needs_grounding(draft: str, turn_had_tool_result: bool) -> bool:
