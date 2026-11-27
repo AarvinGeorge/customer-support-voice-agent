@@ -62,7 +62,11 @@ async def test_code_written_ticket_id_survives_in_turn_events_and_the_ui_payload
     assert ui[0]["ticket"]["short_id"] == "8352" and ui[1]["final"]["text"] == CODE_LINE
 
 
-async def test_spoken_code_line_survives_in_the_transcript_while_awaiting() -> None:
+async def awaiting_world_with_ticket(with_facts: bool = True) -> World:
+    """What: the owner's session: awaiting verification, and an earlier turn whose final carries the escalation
+    ticket core returned (TCK-26718352, ticket ending 8352). Use when: the transcript tests.
+    Inputs: with_facts (False: no RelayFacts loader, fail closed). Output: World. Side effects: none. Role: helper."""
+    from agent.voice import load_relay_facts
     w = World()
     w.voice_session()
     w.turns.sessions[SID] = SessionRow(session_id=SID, visitor_id=VISITOR, awaiting_verification=True)
@@ -70,18 +74,120 @@ async def test_spoken_code_line_survives_in_the_transcript_while_awaiting() -> N
     turn = TurnRow(turn_id=str(uuid.uuid4()), session_id=SID, client_turn_id=str(uuid.uuid4()), mode="voice",
                    input_kind="voice", status="running", deadline_at=now, started_at=now)
     await w.turns.insert_turn(turn)
-    await w.turns.finish_turn(turn.turn_id, TurnOutcome.fixed(CODE_LINE, end_reason="escalated"), now)
-    body = {"voice_session_id": "vs-1", "items": items(
-        ("item_a1", "assistant", CODE_SAY),                       # the realtime model speaking our line
-        ("item_a2", "assistant", "Thanks. I heard 4821 from you."),  # an echo of a number we never issued
-        ("item_u1", "user", "8352"))}                             # the customer typing or saying a bare number
+    outcome = TurnOutcome.fixed(CODE_LINE, end_reason="escalated")
+    outcome.final = outcome.final.model_copy(update={"ticket": TICKET, "escalated": True})
+    await w.turns.finish_turn(turn.turn_id, outcome, now)
+    if with_facts:
+        async def facts(sid: str) -> Any:
+            """What: the production loader over the fake turn store (no checkpointer). Use when: POST /transcript.
+            Inputs: sid. Output: RelayFacts. Side effects: none. Role: wiring."""
+            return await load_relay_facts(w.turns, None, sid)
+        w.app.state.voice.relay_facts = facts
+    return w
+
+
+async def post_items(w: World, *specs: tuple[str, str, str]) -> dict[str, str]:
+    """What: post transcript items and return the stored text per item id. Use when: below. Inputs: world, items.
+    Output: {item id: stored text}. Side effects: a request. Role: helper."""
     async with w.client() as c:
-        assert (await c.post(f"/api/sessions/{SID}/transcript", json=body)).status_code == 204
-    stored = {i.realtime_item_id: i.text for i in w.vstore.items}
-    assert "eight three five two" in stored["item_a1"] or "8352" in stored["item_a1"]
-    assert "[PIN]" not in stored["item_a1"]
-    assert not leaks(stored["item_a2"], "4821") and "[PIN]" in stored["item_a2"]  # positive control: scanner runs
-    assert stored["item_u1"] == "[PIN]"
+        r = await c.post(f"/api/sessions/{SID}/transcript", json={"voice_session_id": "vs-1", "items": items(*specs)})
+    assert r.status_code == 204, r.text
+    return {i.realtime_item_id: i.text for i in w.vstore.items}
+
+
+async def test_spoken_code_line_with_an_issued_ticket_survives_in_the_transcript_while_awaiting() -> None:
+    stored = await post_items(await awaiting_world_with_ticket(),
+                              ("item_a1", "assistant", CODE_SAY), ("item_a2", "assistant", CODE_LINE))
+    assert stored["item_a1"] == CODE_SAY and stored["item_a2"] == CODE_LINE
+
+
+async def test_reviewer_repro_an_echoed_pin_equal_to_the_issued_suffix_is_masked() -> None:
+    stored = await post_items(await awaiting_world_with_ticket(),
+                              ("item_a1", "assistant", "Thanks, you said your PIN is 8352."),
+                              ("item_a2", "assistant", "Got it, 4821."))
+    assert "8352" not in stored["item_a1"] and "[PIN]" in stored["item_a1"]
+    assert not leaks(stored["item_a2"], "4821")
+
+
+async def test_a_customer_pin_equal_to_an_issued_suffix_is_masked_whatever_role_the_browser_claims() -> None:
+    stored = await post_items(await awaiting_world_with_ticket(),
+                              ("item_u1", "user", "8352"), ("item_u2", "user", "my PIN is 8352"),
+                              ("item_x1", "assistant", "my PIN is 8352"), ("item_x2", "assistant", "8352"))
+    assert all("8352" not in t and "[PIN]" in t for t in stored.values()), stored
+
+
+async def test_without_relay_facts_posted_speech_fails_closed() -> None:
+    stored = await post_items(await awaiting_world_with_ticket(with_facts=False), ("item_a1", "assistant", CODE_LINE))
+    assert "8352" not in stored["item_a1"]
+
+
+async def test_relay_facts_come_from_typed_core_fields_only() -> None:
+    from langchain_core.messages import ToolMessage
+
+    from agent.untrusted import wrap_result
+    from agent.voice import load_relay_facts, thread_ids
+    msgs = [ToolMessage(wrap_result("list_tickets", {"tickets": [{"ticket_id": "TCK-26111111", "short_id": "1111"}]}),
+                        tool_call_id="c1", name="list_tickets"),
+            ToolMessage(wrap_result("list_charges", {"charges": [{"invoice_number": "INV-2026-0412",
+                                                                 "description": "call 4821 for help"}]}),
+                        tool_call_id="c2", name="list_charges"),
+            ToolMessage('<tool_result name="search_kb" untrusted="true">{"short_id":"9999"}</tool_result>',
+                        tool_call_id="c3", name="search_kb"),
+            AIMessage("Your PIN 2222 and ticket ending 3333."), HumanMessage("<customer_message>5555</customer_message>")]
+    assert thread_ids(msgs) == {"1111", "0412"}  # never prose, never the customer, never knowledge text
+
+    class Saver:
+        """What: a checkpointer holding the thread above. Use when: this test. Inputs: none. Output: aget_tuple.
+        Side effects: none. Role: fake."""
+
+        async def aget_tuple(self, config: Any) -> Any:
+            """What: the stored checkpoint. Use when: load_relay_facts. Inputs: config. Output: tuple-like.
+            Side effects: none. Role: fake."""
+            class Tup:
+                """What: checkpoint tuple stand-in. Use when: above. Inputs: none. Output: value.
+                Side effects: none. Role: fake."""
+                checkpoint = {"channel_values": {"messages": msgs}}
+            return Tup()
+
+    w = await awaiting_world_with_ticket(with_facts=False)
+    facts = await load_relay_facts(w.turns, Saver(), SID)
+    assert facts.ids == {"8352", "1111", "0412"} and CODE_LINE in facts.lines
+
+
+def test_model_written_tool_args_keep_a_ticket_ending_while_awaiting() -> None:
+    # review-pr76 I2: list_tickets(ending="8352") is model-written; the model never had a customer PIN.
+    from agent.middleware.tool_guard import SPECS, ToolGuardMiddleware
+    from agent.turn_control import TurnControl
+    stream = TurnStream(TurnMeta(session_id=SID, turn_id=str(uuid.uuid4()), mode="chat", served_by="agent_a",
+                                 input_kind="text"))
+    c = TurnControl(session_id=SID, turn_id=stream.meta.turn_id, events=stream, awaiting_verification=True)
+    ToolGuardMiddleware._start(c, "list_tickets", SPECS["list_tickets"], {"status": None, "ending": "8352",  # pyright: ignore[reportPrivateUsage]
+                                                                          "pin": "4821"})
+    (ev,) = stream.events
+    assert ev.model_dump()["args_redacted"] == {"status": None, "ending": "8352", "pin": "[PIN]"}
+
+
+async def test_the_agent_model_never_receives_a_raw_pin_from_any_entry_point() -> None:
+    # The I2 premise, measured: chat text, voice question, voice user_transcript and posted user speech (merged
+    # into the next turn) all reach the model scanned.
+    from agent.voice import VoiceSessionRow
+    w, _ = guarded(*[AIMessage(content="Please use the card on screen.") for _ in range(6)])
+    w.turns.sessions[ROUTE_SID] = replace(w.turns.sessions[ROUTE_SID], awaiting_verification=True)
+    w.vstore.voice["vs-1"] = VoiceSessionRow("vs-1", ROUTE_SID, w.voice.now(), w.voice.now())
+    raw = "it is 4 8 2 1 I think"
+    assert "4821" in raw.replace(" ", "")  # positive control: the raw inputs carry the PIN
+    await chat(w, raw)
+    async with w.client() as c:
+        await c.post(f"/api/sessions/{ROUTE_SID}/transcript", json={"voice_session_id": "vs-1", "items": [
+            {"realtime_item_id": "item_p1", "role": "user", "text": "four eight two one", "interrupted": False,
+             "client_ts": "2026-11-28T13:00:00Z"}]})
+        await c.post(f"/api/sessions/{ROUTE_SID}/voice/ask", json={
+            "client_turn_id": str(uuid.uuid4()), "voice_session_id": "vs-1", "realtime_call_id": "call_p1",
+            "question": f"customer said {raw}", "user_item_id": "item_p2", "user_transcript": raw,
+            "transcript_final": True, "last_assistant_interrupted": False})
+    seen = repr(w.registry.primary.seen)
+    assert len(w.registry.primary.seen) >= 2 and "[PIN]" in seen
+    assert not leaks(seen.replace(" ", ""), "4821") and "four eight two one" not in seen
 
 
 def test_customer_typing_the_number_while_awaiting_is_still_redacted() -> None:

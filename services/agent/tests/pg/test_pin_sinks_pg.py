@@ -46,7 +46,7 @@ from agent.tracing import build_langsmith_client
 from agent.trajectory import TrajectoryWriter
 from agent.structured.confirm import CoreCommitClient
 from agent.turn_body import PgSessionFlags
-from agent.voice import PgVoiceStore, TranscriptMerger, VoiceDeps, VoiceSessionRow
+from agent.voice import PgVoiceStore, TranscriptMerger, VoiceDeps, VoiceSessionRow, load_relay_facts
 
 pytestmark = pytest.mark.pg
 
@@ -398,8 +398,13 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                     Output: summary. Side effects: none. Role: fake."""
                     return SessionSummary()
 
+                async def relay_facts(sid: str) -> Any:
+                    """What: the production RelayFacts loader over Postgres and this saver. Use when: POST
+                    /transcript. Inputs: sid. Output: RelayFacts. Side effects: reads. Role: wiring (D-071)."""
+                    return await load_relay_facts(PgTurnStore(pool), saver, sid)
+
                 voice = VoiceDeps(store=PgVoiceStore(pool), minter=NoMinter(), voice_spec=None, summary=summary,
-                                  ingress=ingress)
+                                  ingress=ingress, relay_facts=relay_facts)
 
                 async def ok() -> str:
                     """What: healthy probe. Use when: readyz. Inputs: none. Output: ok. Side effects: none.
@@ -472,8 +477,17 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                             refused.append(text)
                     # 6. Every bypass as posted voice chatter, then merged; the spoken ones also as voice/ask.
                     sid, vs_id = await new_session(pool, sids)
-                    items = [{"realtime_item_id": f"item_b{n}", "role": "user", "text": text, "interrupted": False,
-                              "client_ts": "2026-11-28T13:00:00Z"} for n, text in enumerate(BYPASSES)]
+                    # D-071 / review-pr76 M3: every bypass also as an assistant item (the realtime model echoing it,
+                    # or a browser that labels customer speech "assistant"); provenance is decided server-side.
+                    items = [{"realtime_item_id": f"item_{role[0]}{n}", "role": role, "text": text,
+                              "interrupted": False, "client_ts": "2026-11-28T13:00:00Z"}
+                             for role in ("user", "assistant") for n, text in enumerate(BYPASSES)][:50]
+                    items2 = [{"realtime_item_id": f"item_{role[0]}{n}", "role": role, "text": text,
+                               "interrupted": False, "client_ts": "2026-11-28T13:00:00Z"}
+                              for role in ("user", "assistant") for n, text in enumerate(BYPASSES)][50:]
+                    if items2:
+                        assert (await post(sid, "/transcript", {"voice_session_id": vs_id,
+                                                                "items": items2})).status_code == 204
                     assert (await post(sid, "/transcript", {"voice_session_id": vs_id, "items": items})).status_code == 204
                     assert (await chat(sid, "thanks, any update?"))[-1].type == "turn.completed"
                     for n, text in enumerate(SPOKEN_BYPASSES):
