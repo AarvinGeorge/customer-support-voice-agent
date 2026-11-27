@@ -1,17 +1,20 @@
 """What: the redact(obj, context) interface (doc 07 s11) with its field-level rules.
 Use when: before anything is written to turn_events, transcript_items, logs, audit or LangSmith.
 Inputs: none.
-Output: RedactContext, redact, scan_text, scan_pins, PinScan, normalize_spoken_digits, hide_for_langsmith,
-mask_email, PIN_FIELD_NAMES, PIN_TOKEN.
+Output: RedactContext, redact, redact_system, scan_text, scan_pins, issued_numbers, PinScan, normalize_spoken_digits,
+hide_for_langsmith, mask_email, PIN_FIELD_NAMES, PIN_TOKEN.
 Side effects: none.
-Role: one redaction entry point for every sink: card PIN fields are replaced, email addresses are masked and every
-string goes through the doc 07 s11.1 free-text PIN scanner (CS-E-03.S7.T9), anywhere in the data, including inside
-models, dataclasses and sets. hide_for_langsmith is the LangSmith hide_inputs and hide_outputs function.
+Role: redaction by provenance (D-071 part 3). Card PIN fields are replaced and email addresses are masked in all data.
+The doc 07 s11.1 free-text PIN scanner applies to customer-originated text only: `redact` (every string scanned) is
+for what the customer typed or said; `redact_system` is for what our system wrote (assistant text, code-written lines,
+tool results, event fields holding code-generated ids), where only text inside a customer frame (<customer_message>,
+<voice_transcript>) is scanned again as a second net. `issued_numbers` lets a scan keep the numbers the system itself
+issued when a model that heard the customer repeats them. hide_for_langsmith is the LangSmith hide function.
 """
 import json
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -255,7 +258,7 @@ def _fallback(text: str) -> PinScan:
     return PinScan(out, max(n, 1), False)
 
 
-def scan_pins(text: str, context: RedactContext) -> PinScan:
+def scan_pins(text: str, context: RedactContext, issued: frozenset[str] = frozenset()) -> PinScan:
     """What: the doc 07 s11.1 scanner (fix rounds 1 and 2, D-060). A candidate is a 4-digit group, a spoken or grouped
     number run, or a cardinal, after normalization. It is redacted when: a strong credential word (PIN, passcode,
     password, secret number...) is anywhere in the message (a far year after "in", "since"... is still a date); "code"
@@ -263,17 +266,19 @@ def scan_pins(text: str, context: RedactContext) -> PinScan:
     sits right next to it); the session awaits verification or a step-up; or the message is only the number and
     fillers. Without a credential word, amounts, dates and decimals are kept.
     Use when: ingress step 9a, POST /transcript, and every string inside redact.
-    Inputs: text, context. Output: PinScan (the original text when nothing was redacted). Side effects: none; never
+    Inputs: text, context; issued: digit strings our system issued (issued_numbers), kept by provenance (D-071), for
+    text from a model that heard the customer (the realtime voice model); empty for customer text.
+    Output: PinScan (the original text when nothing was redacted). Side effects: none; never
     raises (on an internal error every number is masked). Role: the one free-text PIN rule."""
     try:
-        return _scan(text, context)
+        return _scan(text, context, issued)
     except Exception:  # noqa: BLE001 - D-060: never crash, never pass unscanned text
         return _fallback(text)
 
 
-def _scan(text: str, context: RedactContext) -> PinScan:
-    """What: scan_pins without the safety net. Use when: scan_pins. Inputs: text, context. Output: PinScan.
-    Side effects: none. Role: helper."""
+def _scan(text: str, context: RedactContext, issued: frozenset[str] = frozenset()) -> PinScan:
+    """What: scan_pins without the safety net. Use when: scan_pins. Inputs: text, context, issued numbers.
+    Output: PinScan. Side effects: none. Role: helper."""
     strict = _normalize(text)
     words = [m.group().lower() for m in _TOKEN_RE.finditer(strict)]
     strong = any(_is_strong(w) for w in words) or any(b in _STRONG_BIGRAMS for b in zip(words, words[1:]))
@@ -294,6 +299,8 @@ def _scan(text: str, context: RedactContext) -> PinScan:
     cred = False
     for m in cands:
         a, b = m.span()
+        if issued and m.group().strip(_LONG_OPEN + _LONG_CLOSE) in issued:
+            continue  # D-071: a number our system issued (ticket ending 8352) is not customer input
         i = index.get(a + (1 if norm[a] == _LONG_OPEN else 0), 0)
         near = [j for j in cred_idx if abs(j - i) <= _NEAR]
         strong_here = strong and not _is_far_year(m.group(), i, tokens, near)
@@ -388,48 +395,102 @@ def _moved_on(tokens: list[tuple[int, str]], cred_idx: list[int], account: list[
     return sum(1 for _, w in tokens if w not in _FILLERS) >= 3
 
 
-def scan_text(text: str, context: RedactContext) -> str:
-    """What: free-text redaction of one string: the s11.1 PIN scanner, then the email mask.
-    Use when: inside redact, and wherever one string goes to a sink. Inputs: text, context.
-    Output: redacted text. Side effects: none. Role: the single text hook."""
-    return mask_email(scan_pins(text, context).text)
+def scan_text(text: str, context: RedactContext, issued: frozenset[str] = frozenset()) -> str:
+    """What: free-text redaction of one customer-originated string: the s11.1 PIN scanner, then the email mask.
+    Use when: inside redact, and wherever one customer string goes to a sink. Inputs: text, context, issued numbers
+    (see scan_pins). Output: redacted text. Side effects: none. Role: the single customer text hook."""
+    return mask_email(scan_pins(text, context, issued).text)
+
+
+_ISSUED_RE = re.compile(r"(?<!\d)\d{4,}(?!\d)")
+
+
+def issued_numbers(texts: Any) -> frozenset[str]:
+    """What: every group of 4 or more digits in text our system wrote, after the scanner's normalization (so "ticket
+    ending eight three five two" gives "8352"). Use when: building the issued set for scan_pins from the session's
+    recent agent answers (agent.turns.final text and say). Inputs: iterable of strings (None entries skipped).
+    Output: frozenset of digit strings. Side effects: none. Role: D-071 provenance: the agent model never sees a
+    customer PIN (ingress redacts it first), so a number in its answer was issued by the system."""
+    out: set[str] = set()
+    for text in texts:
+        if text:
+            out.update(_ISSUED_RE.findall(_normalize(text, loose=True).replace(_LONG_OPEN, "").replace(_LONG_CLOSE, "")))
+    return frozenset(out)
+
+
+# Customer frames inside system text: the prompt frame (agent.prompt) and merged voice chatter (contracts.trust).
+_CUSTOMER_FRAME_RE = re.compile(r"(<customer_message>)(.*?)(</customer_message>)"
+                                r"|(<voice_transcript\b[^>]*>)(.*?)(</voice_transcript>)", re.DOTALL)
+
+
+def _system_text(text: str) -> str:
+    """What: redaction of one system-originated string: emails masked; the PIN scanner only inside customer frames
+    (default context: unverified, nothing awaiting). Use when: redact_system. Inputs: text. Output: text.
+    Side effects: none. Role: D-071: our own ids and lines keep their numbers; customer frames get a second net."""
+
+    def frame(m: re.Match[str]) -> str:
+        """What: scan one frame body. Use when: re.sub. Inputs: match. Output: text. Side effects: none.
+        Role: helper."""
+        if m.group(1) is not None:
+            return m.group(1) + scan_pins(m.group(2), _TRACE_CONTEXT).text + m.group(3)
+        return m.group(4) + scan_pins(m.group(5), _TRACE_CONTEXT).text + m.group(6)
+
+    return mask_email(_CUSTOMER_FRAME_RE.sub(frame, text))
 
 
 _SCALARS = (int, float, bool, type(None), date, datetime, time, UUID, Decimal, Enum)
 
 
-def redact(obj: Any, context: RedactContext) -> Any:
-    """What: return a redacted copy of data: values of PIN fields become "[PIN]", every string (and
-    bytes, decoded as UTF-8) goes through scan_text; Pydantic models and dataclasses are dumped to
-    dicts first; lists, tuples, sets and frozensets keep their container type.
-    Use when: before any sink write and in the LangSmith hide_inputs and hide_outputs functions.
-    Inputs: data, context. Output: a new redacted copy.
-    Side effects: none (input not mutated); raises TypeError for any other non-scalar type, so an
-    unknown object can never pass through unredacted (review PR4 I1).
-    Role: doc 07 s11 redact(obj, context)."""
+def _walk(obj: Any, text: Callable[[str], str]) -> Any:
+    """What: a redacted copy of data: values of PIN fields become "[PIN]", every string (and bytes, decoded as UTF-8)
+    goes through `text`; Pydantic models and dataclasses are dumped to dicts first; lists, tuples, sets and
+    frozensets keep their container type. Use when: redact and redact_system. Inputs: data, string function.
+    Output: a new copy. Side effects: none (input not mutated); raises TypeError for any other non-scalar type, so an
+    unknown object can never pass through unredacted (review PR4 I1). Role: the shared walker."""
     if isinstance(obj, str):
-        return scan_text(obj, context)
+        return text(obj)
     if isinstance(obj, (bytes, bytearray, memoryview)):
-        return scan_text(bytes(obj).decode("utf-8", errors="replace"), context)
+        return text(bytes(obj).decode("utf-8", errors="replace"))
     if isinstance(obj, BaseModel):
-        return redact(obj.model_dump(mode="python"), context)
+        return _walk(obj.model_dump(mode="python"), text)
     if is_dataclass(obj) and not isinstance(obj, type):
-        return redact(asdict(obj), context)
+        return _walk(asdict(obj), text)
     if isinstance(obj, Mapping):
         return {k: (PIN_TOKEN if isinstance(k, str) and k.lower() in PIN_FIELD_NAMES and v is not None
-                    else redact(v, context))
+                    else _walk(v, text))
                 for k, v in obj.items()}
     if isinstance(obj, list):
-        return [redact(v, context) for v in obj]
+        return [_walk(v, text) for v in obj]
     if isinstance(obj, tuple):
-        return tuple(redact(v, context) for v in obj)
+        return tuple(_walk(v, text) for v in obj)
     if isinstance(obj, frozenset):
-        return frozenset(redact(v, context) for v in obj)
+        return frozenset(_walk(v, text) for v in obj)
     if isinstance(obj, set):
-        return {redact(v, context) for v in obj}
+        return {_walk(v, text) for v in obj}
     if isinstance(obj, _SCALARS):
         return obj
     raise TypeError(f"redact cannot inspect {type(obj).__name__}; convert it to plain data first")
+
+
+def redact(obj: Any, context: RedactContext) -> Any:
+    """What: redact customer-originated data: PIN fields replaced, and every string through scan_text (the s11.1
+    scanner with the session's context, then the email mask).
+    Use when: text the customer typed or said, at the point it enters (ingress step 9a, POST /transcript user items,
+    the covered voice item, customer lines of the voice summary), and data of unknown provenance (core audit args).
+    Inputs: data, context. Output: a new redacted copy. Side effects: none; raises TypeError on an object it cannot
+    inspect. Role: doc 07 s11 redact(obj, context), scoped by provenance (D-071 part 3)."""
+    return _walk(obj, lambda s: scan_text(s, context))
+
+
+def redact_system(obj: Any) -> Any:
+    """What: redact system-originated data: PIN fields replaced, emails masked, and the PIN scanner only inside
+    customer frames (<customer_message>, <voice_transcript>), so code-generated ids ("short_id": "8352") and
+    code-written lines ("ticket ending 8352") keep their numbers.
+    Use when: turn_events payloads, LangSmith run inputs and outputs, agent lines of the voice summary.
+    Inputs: data. Output: a new redacted copy. Side effects: none; raises TypeError on an object it cannot inspect.
+    Role: D-071 part 3: customer text was already redacted where it entered, so system data is not scanned again
+    (the frame scan is the second net for a raw customer string that reached a frame by mistake)."""
+    return _walk(obj, _system_text)
 
 
 # ---- LangSmith second net (doc 07 s11.1: hide_inputs and hide_outputs set to redact) ----
@@ -456,13 +517,15 @@ def _plain(obj: Any) -> Any:
 
 
 def hide_for_langsmith(payload: Any) -> dict[str, Any]:
-    """What: the LangSmith Client hide_inputs and hide_outputs function: redact with the default context
-    (unverified, nothing awaiting), so the scanner runs a second time on every trace string.
+    """What: the LangSmith Client hide_inputs and hide_outputs function: redact_system (PIN fields, emails, and the
+    scanner on customer frames), so code-generated ids in traces keep their numbers. A payload redact cannot walk
+    is of unknown provenance: it is flattened and every string is scanned (default context).
     Use when: langsmith.Client(hide_inputs=hide_for_langsmith, hide_outputs=hide_for_langsmith).
     Inputs: a run's inputs or outputs dict. Output: a redacted dict (never the raw payload).
-    Side effects: none. Role: doc 07 s11.1 second net; ingress already redacted with the session's context."""
+    Side effects: none. Role: doc 07 s11.1 second net by provenance (D-071); ingress already redacted customer text
+    with the session's context."""
     try:
-        out = redact(payload, _TRACE_CONTEXT)
+        out = redact_system(payload)
     except Exception:  # noqa: BLE001 - review round 2 N-I1: any failure falls back, never raises into tracing
         try:
             out = redact(_plain(payload), _TRACE_CONTEXT)
