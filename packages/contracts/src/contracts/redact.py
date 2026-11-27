@@ -1,15 +1,16 @@
 """What: the redact(obj, context) interface (doc 07 s11) with its field-level rules.
 Use when: before anything is written to turn_events, transcript_items, logs, audit or LangSmith.
 Inputs: none.
-Output: RedactContext, redact, redact_system, scan_text, scan_pins, issued_numbers, PinScan, normalize_spoken_digits,
+Output: RedactContext, redact, redact_system, scan_text, scan_pins, scan_relayed, PinScan, normalize_spoken_digits,
 hide_for_langsmith, mask_email, PIN_FIELD_NAMES, PIN_TOKEN.
 Side effects: none.
 Role: redaction by provenance (D-071 part 3). Card PIN fields are replaced and email addresses are masked in all data.
 The doc 07 s11.1 free-text PIN scanner applies to customer-originated text only: `redact` (every string scanned) is
 for what the customer typed or said; `redact_system` is for what our system wrote (assistant text, code-written lines,
 tool results, event fields holding code-generated ids), where only text inside a customer frame (<customer_message>,
-<voice_transcript>) is scanned again as a second net. `issued_numbers` lets a scan keep the numbers the system itself
-issued when a model that heard the customer repeats them. hide_for_langsmith is the LangSmith hide function.
+<voice_transcript> customer lines) is scanned again as a second net. `scan_relayed` is for text the realtime voice
+model said: full scan, except our own lines keep the exact ids core issued in the session. hide_for_langsmith treats
+recognised model and tool messages as system data and every other string as unknown provenance (full scan).
 """
 import json
 import re
@@ -266,8 +267,9 @@ def scan_pins(text: str, context: RedactContext, issued: frozenset[str] = frozen
     sits right next to it); the session awaits verification or a step-up; or the message is only the number and
     fillers. Without a credential word, amounts, dates and decimals are kept.
     Use when: ingress step 9a, POST /transcript, and every string inside redact.
-    Inputs: text, context; issued: digit strings our system issued (issued_numbers), kept by provenance (D-071), for
-    text from a model that heard the customer (the realtime voice model); empty for customer text.
+    Inputs: text, context; issued: exact ids our code received from core for the session (ticket short ids,
+    invoice endings), kept by provenance (D-071); only scan_relayed passes it, for a sentence that is one of our
+    own lines; empty for customer text.
     Output: PinScan (the original text when nothing was redacted). Side effects: none; never
     raises (on an internal error every number is masked). Role: the one free-text PIN rule."""
     try:
@@ -402,20 +404,46 @@ def scan_text(text: str, context: RedactContext, issued: frozenset[str] = frozen
     return mask_email(scan_pins(text, context, issued).text)
 
 
-_ISSUED_RE = re.compile(r"(?<!\d)\d{4,}(?!\d)")
+_SENTENCE_RE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)")
+_HOLD = "\uf8f0"  # private-use placeholder for a held sentence (not a long-run marker); no digits, no word characters
 
 
-def issued_numbers(texts: Any) -> frozenset[str]:
-    """What: every group of 4 or more digits in text our system wrote, after the scanner's normalization (so "ticket
-    ending eight three five two" gives "8352"). Use when: building the issued set for scan_pins from the session's
-    recent agent answers (agent.turns.final text and say). Inputs: iterable of strings (None entries skipped).
-    Output: frozenset of digit strings. Side effects: none. Role: D-071 provenance: the agent model never sees a
-    customer PIN (ingress redacts it first), so a number in its answer was issued by the system."""
-    out: set[str] = set()
-    for text in texts:
-        if text:
-            out.update(_ISSUED_RE.findall(_normalize(text, loose=True).replace(_LONG_OPEN, "").replace(_LONG_CLOSE, "")))
-    return frozenset(out)
+def _sentence_key(sentence: str) -> str:
+    """What: a sentence compared by meaning of its characters: scanner normalization (spoken digits as numerals),
+    lower case, letters and digits only. Use when: scan_relayed matches a relayed sentence to one of our lines.
+    Inputs: sentence. Output: key. Side effects: none. Role: helper."""
+    norm = _normalize(sentence).replace(_LONG_OPEN, "").replace(_LONG_CLOSE, "").lower()
+    return " ".join(re.findall(r"[a-z0-9]+", norm))
+
+
+def scan_relayed(text: str, context: RedactContext, lines: Any, issued: frozenset[str]) -> str:
+    """What: redact text the realtime voice model said aloud. That model heard the customer, so its text is
+    customer-derived and gets the full scan, except a sentence that IS one of our own lines (same key as a sentence
+    of `lines`): there, a number is kept only when it is in `issued`, the exact ids our code received from core
+    for this session. Use when: POST /transcript, for every posted item (the browser's role label is not trusted).
+    Inputs: text, session context, our lines (the agent answers handed to the relay), exact issued ids.
+    Output: redacted text (emails masked). Side effects: none; never raises (scan_pins never raises).
+    Role: D-071 part 3, provenance by identity plus an exact allowlist (review-pr76 I1): "Thanks, you said your PIN
+    is 8352" matches none of our lines and is masked even when 8352 is an issued ticket suffix."""
+    text = text.replace(_HOLD, "")  # a posted placeholder character must never select one of our held sentences
+    ours = {_sentence_key(sent) for line in lines if line for sent in _SENTENCE_RE.findall(line)} - {""}
+    held: list[str] = []
+
+    def hold(m: re.Match[str]) -> str:
+        """What: hold out one of our sentences. Use when: re.sub. Inputs: match. Output: placeholder or the text.
+        Side effects: appends to held. Role: helper."""
+        if not (ours and issued) or _sentence_key(m.group()) not in ours:
+            return m.group()
+        held.append(m.group())
+        return " " + _HOLD * len(held) + " "
+
+    rest = _SENTENCE_RE.sub(hold, text)
+    if not held:
+        return scan_text(text, context)
+    out = scan_pins(rest, context).text  # the customer-derived rest, scanned as one message
+    ours_clean = [scan_pins(h, context, issued).text for h in held]
+    out = re.sub(rf" ?({_HOLD}+) ?", lambda m: ours_clean[len(m.group(1)) - 1], out)
+    return mask_email(out)
 
 
 # Customer frames inside system text: the prompt frame (agent.prompt) and merged voice chatter (contracts.trust).
@@ -425,7 +453,8 @@ _CUSTOMER_FRAME_RE = re.compile(r"(<customer_message>)(.*?)(</customer_message>)
 
 def _system_text(text: str) -> str:
     """What: redaction of one system-originated string: emails masked; the PIN scanner only inside customer frames
-    (default context: unverified, nothing awaiting). Use when: redact_system. Inputs: text. Output: text.
+    (the whole <customer_message>; the "customer" lines of a <voice_transcript>, whose "voice assistant" lines were
+    redacted when posted) with the default context (unverified, nothing awaiting). Use when: redact_system. Inputs: text. Output: text.
     Side effects: none. Role: D-071: our own ids and lines keep their numbers; customer frames get a second net."""
 
     def frame(m: re.Match[str]) -> str:
@@ -433,7 +462,9 @@ def _system_text(text: str) -> str:
         Role: helper."""
         if m.group(1) is not None:
             return m.group(1) + scan_pins(m.group(2), _TRACE_CONTEXT).text + m.group(3)
-        return m.group(4) + scan_pins(m.group(5), _TRACE_CONTEXT).text + m.group(6)
+        body = "".join(scan_pins(ln, _TRACE_CONTEXT).text if ln.lstrip().startswith("customer") else ln
+                       for ln in m.group(5).splitlines(keepends=True))  # review-pr76 M1: customer lines only
+        return m.group(4) + body + m.group(6)
 
     return mask_email(_CUSTOMER_FRAME_RE.sub(frame, text))
 
@@ -516,16 +547,70 @@ def _plain(obj: Any) -> Any:
     return json.loads(json.dumps(obj, default=default))
 
 
+_SYSTEM_KINDS = frozenset({"ai", "tool", "system", "function", "assistant", "AIMessage", "AIMessageChunk",
+                           "ToolMessage", "ToolMessageChunk", "SystemMessage", "FunctionMessage", "ChatGeneration",
+                           "ChatGenerationChunk", "Generation"})
+_HUMAN_KINDS = frozenset({"human", "user", "HumanMessage", "HumanMessageChunk"})
+
+
+def _message_kind(obj: Mapping[Any, Any]) -> str | None:
+    """What: "system" for a model, tool or system message (or a model generation), "human" for a human message,
+    else None. Reads the plain dump ({"type": "ai"}), the OpenAI shape ({"role": "assistant"}) and the LangChain
+    serialized shape ({"lc": 1, "id": [..., "AIMessage"]}). Use when: _trace. Inputs: mapping. Output: kind or None.
+    Side effects: none. Role: helper."""
+    names = [obj.get("type"), obj.get("role")]
+    ident = obj.get("id")
+    if obj.get("lc") is not None and isinstance(ident, list) and ident:
+        names.append(ident[-1])
+    for name in names:
+        if isinstance(name, str) and name in _SYSTEM_KINDS:
+            return "system"
+        if isinstance(name, str) and name in _HUMAN_KINDS:
+            return "human"
+    return None
+
+
+def _human_text(text: str) -> str:
+    """What: a human message string: the frame scan when it carries a customer frame, else the full scan (an
+    unframed human string is customer text of unknown shape). Use when: _trace. Inputs: text. Output: text.
+    Side effects: none. Role: helper."""
+    return _system_text(text) if _CUSTOMER_FRAME_RE.search(text) else scan_text(text, _TRACE_CONTEXT)
+
+
+def _trace(obj: Any) -> Any:
+    """What: redact a trace payload by provenance: model, tool and system messages are system data
+    (redact_system); human messages get the frame scan (or the full scan when unframed); every other string is of
+    unknown provenance and gets the full scan (default context). Use when: hide_for_langsmith. Inputs: payload.
+    Output: a redacted copy. Side effects: none; raises TypeError on an object it cannot inspect.
+    Role: D-071 part 3 with the second net kept where provenance is unknown (review-pr76 M2)."""
+    if isinstance(obj, BaseModel):
+        return _trace(obj.model_dump(mode="python"))
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return _trace(asdict(obj))
+    if isinstance(obj, Mapping):
+        kind = _message_kind(obj)
+        if kind == "system":
+            return redact_system(obj)
+        if kind == "human":
+            return _walk(obj, _human_text)
+        return {k: (PIN_TOKEN if isinstance(k, str) and k.lower() in PIN_FIELD_NAMES and v is not None
+                    else _trace(v))
+                for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_trace(v) for v in obj)
+    return redact(obj, _TRACE_CONTEXT)
+
+
 def hide_for_langsmith(payload: Any) -> dict[str, Any]:
-    """What: the LangSmith Client hide_inputs and hide_outputs function: redact_system (PIN fields, emails, and the
-    scanner on customer frames), so code-generated ids in traces keep their numbers. A payload redact cannot walk
-    is of unknown provenance: it is flattened and every string is scanned (default context).
+    """What: the LangSmith Client hide_inputs and hide_outputs function, by provenance (_trace): code ids in model
+    and tool messages keep their numbers, customer frames are scanned, and strings of unknown provenance get the
+    full second net. A payload it cannot walk is flattened and every string is scanned.
     Use when: langsmith.Client(hide_inputs=hide_for_langsmith, hide_outputs=hide_for_langsmith).
     Inputs: a run's inputs or outputs dict. Output: a redacted dict (never the raw payload).
     Side effects: none. Role: doc 07 s11.1 second net by provenance (D-071); ingress already redacted customer text
     with the session's context."""
     try:
-        out = redact_system(payload)
+        out = _trace(payload)
     except Exception:  # noqa: BLE001 - review round 2 N-I1: any failure falls back, never raises into tracing
         try:
             out = redact(_plain(payload), _TRACE_CONTEXT)

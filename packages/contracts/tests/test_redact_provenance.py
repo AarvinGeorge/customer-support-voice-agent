@@ -7,8 +7,8 @@ Inputs: none. Output: pass or fail. Side effects: none.
 Role: the contracts half of the provenance fix; the agent half is in services/agent/tests/test_redact_provenance.py."""
 from __future__ import annotations
 
-from contracts.redact import PIN_TOKEN, RedactContext, hide_for_langsmith, issued_numbers, redact, redact_system, \
-    scan_pins, scan_text
+from contracts.redact import PIN_TOKEN, RedactContext, hide_for_langsmith, redact, redact_system, scan_pins, \
+    scan_relayed, scan_text
 
 AWAITING = RedactContext(awaiting_verification=True)
 CODE_LINE = "I couldn't confirm that answer, so I've opened a ticket for our team, ticket ending 8352."
@@ -48,18 +48,52 @@ def test_system_data_scans_customer_frames_as_a_second_net() -> None:
     assert "my PIN is [PIN]" in out["a"] and "ticket ending 8352" in out["a"]
 
 
-def test_issued_numbers_reads_digits_and_spoken_digits() -> None:
-    assert issued_numbers(["ticket ending 8352", "ticket ending eight three five two", "no numbers"]) == {"8352"}
-    assert issued_numbers([]) == frozenset()
+def test_an_exact_issued_id_is_kept_and_any_other_number_is_masked() -> None:
+    kept = scan_pins("ticket ending 8352", AWAITING, issued=frozenset({"8352"}))
+    assert kept.redacted == 0
+    other = scan_pins("ticket ending 4821", AWAITING, issued=frozenset({"8352"}))
+    assert "4821" not in other.text and other.redacted == 1
 
 
-def test_a_value_the_system_issued_is_kept_when_repeated_but_a_new_number_is_not() -> None:
-    issued = issued_numbers([CODE_LINE])
+# ---- fix round 1 (review-pr76 I1): relayed text is ours only when it IS one of our lines ----
+
+LINES = [CODE_LINE, "I couldn't confirm that answer against our policies, so I won't guess. I've opened a ticket "
+         "for our team, ticket ending eight three five two."]
+ISSUED = frozenset({"8352"})
+
+
+def test_relayed_line_that_is_ours_keeps_its_issued_id() -> None:
     said = "I've opened a ticket for our team, ticket ending eight three five two."
-    kept = scan_pins(said, AWAITING, issued=issued)
-    assert kept.redacted == 0 and kept.text == said  # nothing redacted: the original text comes back
-    echoed = scan_pins("Thanks, I heard 4821, and your ticket ends 8352.", AWAITING, issued=issued)
-    assert "4821" not in echoed.text and "8352" in echoed.text and echoed.redacted == 1
+    assert scan_relayed(said, AWAITING, LINES, ISSUED) == said
+    assert "8352" in scan_relayed("I've opened a ticket for our team, ticket ending 8352.", AWAITING, LINES, ISSUED)
+
+
+def test_reviewer_repro_an_echoed_pin_equal_to_an_issued_id_is_masked() -> None:
+    out = scan_relayed("Thanks, you said your PIN is 8352.", AWAITING, LINES, ISSUED)
+    assert "8352" not in out and PIN_TOKEN in out
+
+
+def test_our_line_followed_by_an_echo_masks_only_the_echo() -> None:
+    out = scan_relayed("I've opened a ticket for our team, ticket ending 8352. And your PIN 4821 is noted.",
+                       AWAITING, LINES, ISSUED)
+    assert "ticket ending 8352" in out and "4821" not in out
+
+
+def test_a_number_in_our_line_that_core_did_not_issue_is_masked() -> None:
+    lines = ["I can't look up invoice 4821 until you verify."]  # the customer's number, repeated by the agent
+    out = scan_relayed("I can't look up invoice 4821 until you verify.", AWAITING, lines, ISSUED)
+    assert "4821" not in out
+
+
+def test_a_posted_placeholder_character_cannot_smuggle_a_number() -> None:
+    out = scan_relayed("\uf8f0\uf8f0 my PIN is 4821. I've opened a ticket for our team, ticket ending 8352.",
+                       AWAITING, LINES, ISSUED)
+    assert "4821" not in out and "ticket ending 8352" in out and "\uf8f0" not in out
+
+
+def test_relayed_text_without_facts_fails_closed() -> None:
+    out = scan_relayed("I've opened a ticket for our team, ticket ending 8352.", AWAITING, [], frozenset())
+    assert "8352" not in out
 
 
 def test_customer_redact_is_unchanged() -> None:
@@ -67,10 +101,26 @@ def test_customer_redact_is_unchanged() -> None:
     assert out == {"text": PIN_TOKEN, "pin": PIN_TOKEN}
 
 
+def test_voice_frame_scans_customer_lines_only() -> None:
+    frame = ('<voice_transcript source="client" untrusted="true">\ncustomer: my pin is 4821\n'
+             'voice assistant: Please enter your PIN in the secure card. Ticket ending 8352.\n</voice_transcript>')
+    out = redact_system(frame)
+    assert "4821" not in out and "Ticket ending 8352" in out
+
+
+def test_langsmith_scans_strings_of_unknown_provenance() -> None:
+    # Review M2: outside a recognised message, provenance is unknown, so the full second net runs.
+    out = hide_for_langsmith({"text": "my PIN is 4821", "inputs": {"q": "QS-10423 4821"}})
+    assert "4821" not in repr(out) and "QS-10423" in repr(out)
+
+
 def test_langsmith_keeps_system_ids_and_hides_framed_customer_pins() -> None:
+    serialized_ai = {"lc": 1, "type": "constructor", "id": ["langchain", "schema", "messages", "AIMessage"],
+                     "kwargs": {"content": CODE_LINE, "type": "ai"}}
     payload = {"messages": [[{"type": "human", "content": "<customer_message>\nQS-10423 4821\n</customer_message>"},
-                             {"type": "ai", "content": CODE_LINE}]],
-               "outputs": {"short_id": "8352"}, "pin": "7302", "email": "priya@acme.com"}
+                             {"type": "ai", "content": "Your ticket ending 8352 is open."}, serialized_ai,
+                             {"type": "tool", "content": '{"short_id":"8352"}'}]],
+               "pin": "7302", "email": "priya@acme.com"}
     out = repr(hide_for_langsmith(payload))
     assert "4821" not in out and "7302" not in out and "priya@acme.com" not in out
-    assert "QS-10423" in out and "ticket ending 8352" in out and "'short_id': '8352'" in out
+    assert "QS-10423" in out and "Your ticket ending 8352" in out and CODE_LINE in out and '"short_id":"8352"' in out
