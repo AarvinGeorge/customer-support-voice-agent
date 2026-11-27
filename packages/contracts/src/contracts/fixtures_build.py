@@ -5,7 +5,8 @@ Inputs: none.
 Output: render_all() -> {file name: JSONL text}.
 Side effects: none.
 Role: one S1 chat conversation (4 turns: ask, verify plus prepare, confirm, follow-up answer), one
-voice turn, and edge turns (fallback, tool failure escalation, deadline error) so lane C's reducer
+voice turn, and edge turns (fallback with a skipped grounding gate, tool failure escalation,
+deadline path with an error event and the deadline ticket) so lane C's reducer
 can assert on every doc 07 s6.2 event type."""
 import json
 from datetime import datetime, timedelta, timezone
@@ -238,6 +239,8 @@ def _edge() -> list[dict]:
     t.add("status", dt_ms=4000, kind="slow", message="This is taking a little longer than usual...")
     t.model_step(4800, 1900, 40, model=FALLBACK_MODEL)
     text = "Hi! I can help with billing, refunds, your account and tickets. What do you need?"
+    t.add("gate", step_id=f"{t.turn_id}:{t.steps}", gate="grounding", verdict="skipped", decision="skip",
+          chunk_ids=[])
     t.tokens(text)
     t.add("turn.completed", final=_final(text, text, confidence={"grounding": "skipped"}),
           usage=_usage(5000, 2, 0, 1900, 40, models=[AGENT_MODEL, FALLBACK_MODEL], fallback=True, ttft=4950),
@@ -269,9 +272,14 @@ def _edge() -> list[dict]:
     t.add("error", **{"class": "turn_deadline_exceeded", "code": "TURN_DEADLINE", "message":
                       "I couldn't finish that in time.", "retryable": True, "changed": None,
                       "retry_after_s": None, "fault_injected": False, "details": {}})
-    line = "I couldn't finish that in time. Please try again."
-    t.add("turn.completed", final=_final(line, line), usage=_usage(45000, 1, 0, 3000, 0, ttft=44900),
-          end_reason="error", replayed=False)
+    t.step("escalation", "create_ticket", "Opening a ticket", "Opened a ticket", 110, detail="ticket ending 8213")
+    ticket = ex.TICKET_REF.model_dump(mode="json")
+    t.add("escalated", reason="deadline", ticket=ticket, origin="code", offer_ticket_button=False)
+    line = "I couldn't finish that in time, so I've opened a ticket for our team: ticket ending 8213."
+    say = ("I couldn't finish that in time, so I've opened a ticket for our team, ticket ending eight "
+           "two one three.")
+    t.add("turn.completed", final=_final(line, say, escalated=True, ticket=ticket),
+          usage=_usage(45000, 1, 1, 3000, 0, ttft=44900), end_reason="deadline", replayed=False)
     out += t.events
     return out
 
