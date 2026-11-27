@@ -27,6 +27,8 @@ INSERT_SQL = ("INSERT INTO agent.turn_events (turn_id, seq, session_id, ts, type
 POOL_MAX = 2            # one flush at a time plus one spare; never competes with the turn pool
 FLUSH_INTERVAL_S = 0.25
 BATCH_MAX = 200
+CLOSE_RETRY_BACKOFF_S = 0.2
+INCOMPLETE_CAP = 10_000  # turn ids waiting for an events_complete=false mark; bounds memory when the mark keeps failing
 BUFFER_MAX = 5000       # about 125 turns of 40 events; beyond this new rows are dropped
 Row = tuple[Any, ...]
 
@@ -152,15 +154,18 @@ class TrajectoryWriter:
                 await cur.executemany(INSERT_SQL, batch)
 
     async def _report_incomplete(self) -> None:
-        """What: hand the dropped turns to on_incomplete once (bounded, never raises). Use when: end of flush.
-        Inputs: none. Output: none. Side effects: on_incomplete call. Role: events_complete=false."""
+        """What: hand the dropped turns to on_incomplete (bounded, never raises). When the mark fails the ids are
+        put back (capped at INCOMPLETE_CAP) so the next flush retries; the flag is never lost to one blip.
+        Use when: end of flush. Inputs: none. Output: none. Side effects: on_incomplete call.
+        Role: events_complete=false."""
         if not self._incomplete or self.on_incomplete is None:
             return
         ids, self._incomplete = {i for i in self._incomplete if i}, set()
         try:
             await asyncio.wait_for(self.on_incomplete(ids), limits.POSTGRES_CHECKPOINTER_TIMEOUT_S)
         except Exception:  # noqa: BLE001
-            log.exception("events_complete=false could not be recorded turns=%d", len(ids))
+            log.exception("events_complete=false could not be recorded turns=%d, will retry", len(ids))
+            self._incomplete |= set(list(ids)[:max(INCOMPLETE_CAP - len(self._incomplete), 0)])
 
     async def _loop(self) -> None:
         """What: flush every flush_interval_s. Use when: started by start(). Inputs: none. Output: none.
@@ -189,6 +194,9 @@ class TrajectoryWriter:
                 pass
             self._task = None
         await self.flush()
+        if self._incomplete:  # the mark failed in the final flush: one more try after a short backoff
+            await asyncio.sleep(CLOSE_RETRY_BACKOFF_S)
+            await self.flush()
         if self.pool is not None and hasattr(self.pool, "close"):
             try:
                 await self.pool.close()
