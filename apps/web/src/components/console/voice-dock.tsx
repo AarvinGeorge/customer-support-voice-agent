@@ -274,20 +274,25 @@ export interface VoiceDockProps {
  * Inputs: VoiceDockProps.
  * Output: a region labelled "Voice call".
  * Side effects: see module.
- * Role: see module. The state word sits in a polite live region so screen readers hear each
- *   change (PRODUCT.md: voice states carry a text label).
+ * Role: see module. Only the state word sits in the polite live region, so screen readers hear
+ *   each state change and not the countdown tick (PRODUCT.md: voice states carry a text label;
+ *   review PR #55 I3). Mute takes focus when the dock opens (review PR #55 M4).
  */
 export function VoiceDock({ voice, levels, step, agentLine, onMute, onStopSpeaking, onEnd }: VoiceDockProps) {
   const reduce = useReducedMotion() === true;
+  const muteRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => muteRef.current?.focus(), []);
   const Icon = VOICE_ICONS[voice.state];
   const caption = voice.caption !== null && voice.caption.text !== "" ? voice.caption : null;
   const agentSpeaking = voice.state === "speaking" && agentLine;
   return (
     <section aria-label="Voice call" data-voice-state={voice.state} className="flex w-full flex-col gap-5 rounded-[20px] border border-rule bg-raised p-6 max-sm:p-4">
       <div className="flex min-w-0 flex-col gap-3.5">
-        <p data-testid="voice-state" role="status" aria-live="polite" className="flex items-center gap-2">
+        <p data-testid="voice-state" className="flex items-center gap-2">
           <Icon aria-hidden data-icon={VOICE_ICON_NAMES[voice.state]} className={cn("size-[18px] shrink-0", voice.state === "interrupted" ? "text-warning" : voice.state === "error" ? "text-error" : "text-ink")} />
-          <span className="text-heading text-ink">{voice.label}</span>
+          <span role="status" aria-live="polite" className="text-heading text-ink">
+            {voice.label}
+          </span>
           {voice.endsAt !== null && <TimeLeft endsAt={voice.endsAt} />}
         </p>
         <VoiceBars levels={levels} reducedMotion={reduce} />
@@ -316,7 +321,7 @@ export function VoiceDock({ voice, levels, step, agentLine, onMute, onStopSpeaki
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <Button variant="quiet" aria-pressed={voice.muted} onClick={onMute} aria-label={voice.muted ? "Unmute" : "Mute"}>
+        <Button ref={muteRef} variant="quiet" aria-pressed={voice.muted} onClick={onMute} aria-label={voice.muted ? "Unmute" : "Mute"}>
           {voice.muted ? <Mic aria-hidden className="size-3.5" /> : <MicOff aria-hidden className="size-3.5" />}
           {voice.muted ? "Unmute" : "Mute"}
         </Button>

@@ -151,4 +151,22 @@ describe("VoiceDock", () => {
     expect(screen.getAllByText("Agent")).toHaveLength(2);
     expect(screen.getByText("The invoice ending 0412 is for 96 dollars.")).toBeTruthy();
   });
+
+  it("I3 (review PR #55): the status region holds the state only, so the countdown tick is not announced", () => {
+    vi.useFakeTimers();
+    render(<VoiceDock voice={snap("listening", { endsAt: Date.now() + 468_000 })} levels={noLevels} onMute={() => {}} onStopSpeaking={() => {}} onEnd={() => {}} />);
+    const status = screen.getByRole("status");
+    const before = status.textContent;
+    act(() => vi.advanceTimersByTime(1000));
+    expect(status.textContent).toBe(before);
+    expect(status.textContent).toBe("Listening");
+    expect(screen.getByTestId("voice-state").textContent).toMatch(/left/);
+    vi.useRealTimers();
+  });
+
+  it("M4 (review PR #55): opening the dock moves focus to Mute", () => {
+    render(<VoiceDock voice={snap("connecting")} levels={noLevels} onMute={() => {}} onStopSpeaking={() => {}} onEnd={() => {}} />);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Mute" }));
+  });
 });
+

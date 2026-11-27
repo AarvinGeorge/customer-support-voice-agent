@@ -257,3 +257,106 @@ describe("live transcripts", () => {
     expect(posts[1]?.items.map((i) => i.realtime_item_id)).toEqual(["item_u3"]);
   });
 });
+
+describe("fix round 1 (review PR #55)", () => {
+  /**
+   * What: runs one relay turn and returns the say tag.
+   * Use when: a test needs a read-back response.
+   * Inputs: the harness.
+   * Output: the tag.
+   * Side effects: drives the relay.
+   * Role: helper.
+   */
+  async function relayed(h: ReturnType<typeof harness>) {
+    for (const e of ask("item_u1", "resp_1", "call_1")) h.relay.handle(e);
+    await h.relay.settled();
+    return tagOf(h.sent);
+  }
+
+  it("I1: a read-back whose transcript is done early and is then interrupted is posted once, truncated and interrupted", async () => {
+    const h = harness();
+    const tag = await relayed(h);
+    for (const e of sayStarts("resp_say", "item_a1", READBACK, tag)) h.relay.handle(e);
+    await vi.advanceTimersByTimeAsync(1000);
+    h.relay.handle({ type: "response.output_audio_transcript.done", response_id: "resp_say", item_id: "item_a1", transcript: READBACK });
+    await vi.advanceTimersByTimeAsync(3000);
+    h.relay.handle({ type: "input_audio_buffer.speech_started", item_id: "item_u2" });
+    h.relay.handle({ type: "conversation.item.truncated", item_id: "item_a1", audio_end_ms: 3900 });
+    await vi.advanceTimersByTimeAsync(2000);
+    h.relay.close();
+    const items = h.posts.flatMap((p) => p.items).filter((i) => i.realtime_item_id === "item_a1");
+    expect(items).toEqual([expect.objectContaining({ text: heardText(READBACK, 3900), interrupted: true })]);
+  });
+
+  it("I1: a read-back that plays to the end is posted once, in full, after its audio stopped", async () => {
+    const h = harness();
+    const tag = await relayed(h);
+    for (const e of sayStarts("resp_say", "item_a1", READBACK, tag)) h.relay.handle(e);
+    h.relay.handle({ type: "response.output_audio_transcript.done", response_id: "resp_say", item_id: "item_a1", transcript: READBACK });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(h.posts.flatMap((p) => p.items).some((i) => i.realtime_item_id === "item_a1")).toBe(false);
+    h.relay.handle({ type: "output_audio_buffer.stopped", response_id: "resp_say" });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(h.posts.flatMap((p) => p.items).filter((i) => i.realtime_item_id === "item_a1")).toEqual([expect.objectContaining({ text: READBACK, interrupted: false })]);
+  });
+
+  it("M3: End while the agent speaks posts what was heard, marked interrupted", async () => {
+    const h = harness();
+    const tag = await relayed(h);
+    for (const e of sayStarts("resp_say", "item_a1", READBACK, tag)) h.relay.handle(e);
+    h.relay.handle({ type: "response.output_audio_transcript.done", response_id: "resp_say", item_id: "item_a1", transcript: READBACK });
+    await vi.advanceTimersByTimeAsync(2000);
+    h.relay.close();
+    const items = h.posts.flatMap((p) => p.items).filter((i) => i.realtime_item_id === "item_a1");
+    expect(items).toEqual([expect.objectContaining({ text: heardText(READBACK, 2000), interrupted: true })]);
+  });
+
+  it.each(["barge-in", "stop"])("I2: a read-back queued behind the holding phrase and cleared before it plays (%s) sets last_assistant_interrupted", async (how) => {
+    const h = harness();
+    // The holding phrase plays while the relay runs; the say is created and generated but not yet playing.
+    for (const e of ask("item_u1", "resp_1", "call_1")) h.relay.handle(e);
+    for (const e of sayStarts("resp_hold", "item_h1", "One moment while I check.")) h.relay.handle(e);
+    await h.relay.settled();
+    h.relay.handle({ type: "response.created", response: { id: "resp_say", status: "in_progress", output: [], metadata: { qs_say: tagOf(h.sent) } } });
+    h.relay.handle({ type: "response.output_audio_transcript.done", response_id: "resp_say", item_id: "item_a1", transcript: READBACK });
+    h.relay.handle({ type: "response.done", response: { id: "resp_say", status: "completed", output: [] } });
+    if (how === "stop") h.relay.stopSpeaking();
+    else h.relay.handle({ type: "input_audio_buffer.speech_started", item_id: "item_u2" });
+    const say = agentItems(h.store.getState().thread).find((i) => i.itemId === "item_a1");
+    expect(say).toMatchObject({ interrupted: true, heard: "" });
+    for (const e of ask("item_u2", "resp_2", "call_2", "Yes")) h.relay.handle(e);
+    await h.relay.settled();
+    expect(asks(h.fetchMock).map((b) => b.last_assistant_interrupted)).toEqual([false, true]);
+  });
+
+  it("M1: the fixed failure line after a failed relay is not linked to the previous turn", async () => {
+    const store = createTurnStore();
+    const sent: Array<{ at: number; msg: Record<string, unknown> }> = [];
+    let n = 0;
+    const fetchMock = vi.fn(async () => {
+      n += 1;
+      if (n === 1) return new Response(toWire(voice as SseEvent[]), { status: 200, headers: { "content-type": "text/event-stream" } });
+      return new Response(JSON.stringify({ error: { class: "provider_5xx", code: "VOICE_UNAVAILABLE", message: "x", retryable: true, fault_injected: false, changed: null, details: {} } }), { status: 503, headers: { "content-type": "application/json" } });
+    });
+    const relay = createVoiceRelay({ sessionId: SID, voiceSessionId: "vs-1", store, send: (msg) => sent.push({ at: Date.now(), msg }), deps: { fetch: fetchMock as unknown as typeof fetch } });
+    for (const e of ask("item_u1", "resp_1", "call_1")) relay.handle(e);
+    await relay.settled();
+    for (const e of ask("item_u2", "resp_2", "call_2", "And the invoice?")) relay.handle(e);
+    await relay.settled();
+    for (const e of sayStarts("resp_fail", "item_f1", "I couldn't finish that just now.", tagOf(sent))) relay.handle(e);
+    relay.handle({ type: "response.output_audio_transcript.done", response_id: "resp_fail", item_id: "item_f1", transcript: "I couldn't finish that just now." });
+    expect(agentItems(store.getState().thread).find((i) => i.itemId === "item_f1")?.turnId).toBeNull();
+  });
+
+  it("M2: a late cleared event for an earlier response does not cut the response now playing", () => {
+    const h = harness();
+    for (const e of sayStarts("resp_h1", "item_h1", "One moment.")) h.relay.handle(e);
+    h.relay.stopSpeaking();
+    for (const e of sayStarts("resp_h2", "item_h2", "Here is what I found.")) h.relay.handle(e);
+    h.relay.handle({ type: "output_audio_buffer.cleared", response_id: "resp_h1" });
+    expect(h.sent.filter((s) => s.msg.type === "output_audio_buffer.clear")).toHaveLength(1);
+    h.relay.handle({ type: "response.output_audio_transcript.done", response_id: "resp_h2", item_id: "item_h2", transcript: "Here is what I found." });
+    expect(agentItems(h.store.getState().thread).find((i) => i.itemId === "item_h2")?.interrupted).toBe(false);
+  });
+});
+

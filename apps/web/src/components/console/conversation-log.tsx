@@ -163,6 +163,18 @@ function InterruptedChip() {
 }
 
 /**
+ * What: the words the customer heard, or "Not played aloud." when audio was cleared before any played.
+ * Use when: an interrupted answer or spoken line.
+ * Inputs: { heard }.
+ * Output: a paragraph.
+ * Side effects: none.
+ * Role: helper (review PR #55 I2: a queued read-back cleared before it played has 0 ms heard).
+ */
+function HeardWords({ heard }: { heard: string }) {
+  return heard === "" ? <p className="text-body text-muted italic">Not played aloud.</p> : <p className="text-body text-ink">{heard}</p>;
+}
+
+/**
  * What: an interrupted read-back: the words heard, the Interrupted chip with a note, and a
  *   disclosure that shows the turn's full answer.
  * Use when: the voice item linked to a turn was interrupted.
@@ -176,7 +188,7 @@ function InterruptedAnswer({ heard, full, streaming }: { heard: string; full: st
   const [open, setOpen] = useState(false);
   return (
     <>
-      {open ? <AnswerMarkdown text={full} streaming={streaming} /> : <p className="text-body text-ink">{heard}</p>}
+      {open ? <AnswerMarkdown text={full} streaming={streaming} /> : <HeardWords heard={heard} />}
       <div className="flex flex-wrap items-center gap-2">
         <InterruptedChip />
         <span className="text-caption text-muted">Audio stopped here. The full answer stays in text.</span>
@@ -203,7 +215,7 @@ function SpokenLine({ item }: { item: SpokenItem }) {
         <Mic aria-hidden className="size-3" />
         <span>Voice, spoken</span>
       </span>
-      <p className="text-body text-ink">{item.heard}</p>
+      <HeardWords heard={item.heard} />
       {item.interrupted && <InterruptedChip />}
     </article>
   );

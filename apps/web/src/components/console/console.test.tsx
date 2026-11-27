@@ -324,3 +324,23 @@ describe("voice transcripts in the thread (CS-E-05.S4.T3)", () => {
     expect(within(line).getByText("Interrupted")).toBeTruthy();
   });
 });
+
+describe("fix round 1 (review PR #55)", () => {
+  it("M4: after Back to typing ends the call, focus returns to the message box", () => {
+    const base = { toggle: vi.fn(), end: vi.fn(), mute: vi.fn(), stopSpeaking: vi.fn(), levels: () => ({ mic: 0, agent: 0 }), available: true };
+    const v = (state: "listening" | "ended") => ({ ...base, voice: { state, label: state, caption: null, error: null, muted: false, endsAt: null, agentLine: null } });
+    const store = createTurnStore();
+    const { rerender } = render(<ConsoleShell sessionId="s" store={store} voice={v("listening")} />);
+    rerender(<ConsoleShell sessionId="s" store={store} voice={v("ended")} />);
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Message" }));
+  });
+
+  it("an interrupted read-back that was never played says so instead of an empty line", () => {
+    const voiceTurn = loadFixture("voice_turn.jsonl");
+    const store = replayed(voiceTurn, ["When will my refund arrive?"]);
+    store.getState().upsertAgentVoice({ itemId: "a1", text: "Refunds reach your card soon.", heard: "", interrupted: true, turnId: voiceTurn[0]?.turn_id as string });
+    render(<ConsoleShell sessionId="s" store={store} />);
+    expect(screen.getByText("Not played aloud.")).toBeTruthy();
+  });
+});
+

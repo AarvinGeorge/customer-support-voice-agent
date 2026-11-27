@@ -10,7 +10,8 @@
  *   an in-flight turn is aborted on unmount (its turn ends in the failed state, review PR #16 I1).
  *   The mic button starts a voice call (useVoice); while it is open the voice dock replaces the
  *   input bar; voice turns land in the same thread.
- *   Closing the drawer returns focus to the Inspector button. A 429 or 503 notice shows the
+ *   Closing the drawer returns focus to the Inspector button; ending a call returns focus to
+ *   the message box (review PR #55 M4). A 429 or 503 notice shows the
  *   limit banner with a countdown, pauses Send and the cards, and keeps the draft.
  * Role: CS-E-04.S5.T1 shell, laid out from the Figma page "Console, chat (S1)"; the drawer is
  *   CS-E-06.S3.T1 (Figma "Observability drawer"); limit banner and Create ticket are
@@ -202,6 +203,12 @@ export function ConsoleShell({
   const ownVoice = useVoice(voiceOverride === undefined ? sessionId : null, store);
   const vc = voiceOverride ?? ownVoice;
   const { voice, toggle, available } = vc;
+  const live = isLive(voice.state);
+  const wasLive = useRef(false);
+  useEffect(() => {
+    if (wasLive.current && !live) messageRef.current?.focus();
+    wasLive.current = live;
+  }, [live]);
   const step = useStore(store, (s) => {
     const last = s.conversation.turnOrder.at(-1);
     const turn = last === undefined ? undefined : s.conversation.turns[last];
@@ -390,7 +397,7 @@ export function ConsoleShell({
           </div>
           <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
             {limit !== null && <LimitBanner notice={limit} seconds={secondsLeft} />}
-            {isLive(voice.state) ? (
+            {live ? (
               <VoiceDock voice={voice} levels={vc.levels} step={step} agentLine={voice.agentLine} onMute={vc.mute} onStopSpeaking={vc.stopSpeaking} onEnd={vc.end} />
             ) : (
               <>
