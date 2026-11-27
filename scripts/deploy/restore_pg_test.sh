@@ -8,7 +8,11 @@ cd "$(dirname "$0")/../.."
 export COMPOSE_PROJECT_NAME=cs-restore-test DEPLOY_COMPOSE_FILES=scripts/deploy/compose.restore-test.yaml
 tmp="$(mktemp -d)"; : > "$tmp/env"; S="$tmp/state"; mkdir -p "$S"
 dc() { docker compose --env-file "$tmp/env" -f "$DEPLOY_COMPOSE_FILES" "$@"; }
-trap 'dc down -v >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
+# shellcheck source=../lib/compose_owner.sh
+source scripts/lib/compose_owner.sh
+# Tear down only a project this run created (PR #74 N1): an existing cs-restore-test is another run's; refuse, exit 2.
+compose_claim "$COMPOSE_PROJECT_NAME" || { rm -rf "$tmp"; echo "restore_pg_test: refusing project $COMPOSE_PROJECT_NAME; nothing started or removed" >&2; exit 2; }
+trap 'compose_teardown "$COMPOSE_PROJECT_NAME" dc down -v || true; rm -rf "$tmp"' EXIT
 sql() { dc exec -T postgres psql -U postgres -d quillstack -v ON_ERROR_STOP=1 -tAq -c "$1"; }
 D() { scripts/deploy/deploy.sh --local --env-file "$tmp/env" --state-dir "$S" "$@"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }

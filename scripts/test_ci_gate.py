@@ -47,8 +47,11 @@ def _world(tmp_path: Path) -> dict:
     (bin_dir / "gh").write_text(FAKE_GH)
     (bin_dir / "gh").chmod(0o755)
     bare = tmp_path / "remote" / f"{SLUG}.git"
-    env = {**os.environ, "GIT_CONFIG_GLOBAL": str(gcfg), "GIT_CONFIG_NOSYSTEM": "1",
-           "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_BARE": str(bare), "GH_LOG": str(tmp_path / "gh.log")}
+    from test_compose_owner import fake_env
+
+    env = fake_env(tmp_path)  # recording fake docker first on PATH: the gate tests can never touch a real stack
+    env.update({"GIT_CONFIG_GLOBAL": str(gcfg), "GIT_CONFIG_NOSYSTEM": "1",
+                "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}", "FAKE_BARE": str(bare), "GH_LOG": str(tmp_path / "gh.log")})
     env.pop("CI_GATE_NO_POST", None)
     bare.mkdir(parents=True)
     _git(bare, "init", "-q", "--bare", env=env)
@@ -108,8 +111,11 @@ def _posts(w: dict) -> list[str]:
 
 
 def _assert_clean(w: dict) -> None:
-    """What: assert no throwaway worktree or lock is left. Use when: after every gate run. Inputs: world. Output: none.
-    Side effects: none. Role: helper."""
+    """What: assert no throwaway worktree or lock is left and docker was never called. Use when: after every gate run.
+    Inputs: world. Output: none. Side effects: none. Role: helper."""
+    from test_compose_owner import docker_calls
+
+    assert docker_calls(w["tmp"]) == []
     tmpdir = w["lane"] / ".tmp"
     assert not [p for p in tmpdir.glob("ci-gate-pr*")] if tmpdir.exists() else True
     assert "ci-gate-pr" not in _git(w["main"], "worktree", "list", env=w["env"])
@@ -309,3 +315,40 @@ def test_signal_mid_run_posts_failure_over_pending(tmp_path: Path) -> None:
     assert "state=pending" in pending
     assert "state=failure" in call and "aborted (exit 143)" in call and world["main_sha"] in call
     _assert_clean(world)
+
+
+def test_live_lock_holder_is_refused(tmp_path: Path) -> None:
+    """What: a lock whose pid is alive (this pytest process) is refused and left alone (re-review N2).
+    Use when: CI. Inputs: fixture. Output: exit 2. Side effects: none. Role: reclaim only dead locks."""
+    w = _world(tmp_path)
+    lock = w["main"] / ".git" / "ci-gate.lock"
+    lock.mkdir()
+    (lock / "pid").write_text(f"{os.getpid()}\n")
+    r = _gate(w["lane"], w["env"], "1")
+    assert r.returncode == 2 and "alive" in r.stderr, r.stderr
+    assert (lock / "pid").read_text().strip() == str(os.getpid()) and _posts(w) == []
+
+
+def test_fork_check_fails_closed_on_null(tmp_path: Path) -> None:
+    """What: isCrossRepository that is not exactly false (null) is refused (re-review N3). Use when: CI."""
+    _refused(_world(tmp_path), "fork", FAKE_CROSS="null")
+
+
+def test_status_helper_rejects_non_hex_uppercase_blank_context_and_bad_repo(tmp_path: Path) -> None:
+    """What: a 40-char non-hex sha, an uppercase sha, a blank context and a malformed repo are refused, nothing posted
+    (re-review N3, N4). Use when: CI. Inputs: fixture. Output: assertions. Side effects: none. Role: helper validation."""
+    w = _world(tmp_path)
+    lib = GATE.parent / "lib" / "commit_status.sh"
+
+    def call(*args: str, **env: str) -> int:
+        """What: source the helper and call it. Use when: this test. Inputs: args, env. Output: return code.
+        Side effects: fake gh log. Role: helper."""
+        return subprocess.run(["bash", "-c", f'source "{lib}"; commit_status "$@"', "x", *args],
+                              env={**w["env"], **env}, capture_output=True, text=True).returncode
+
+    assert call("z" * 40, "success", "ctx", "d") == 2
+    assert call("A" * 40, "success", "ctx", "d") == 2
+    assert call("a" * 40, "success", " ", "d") == 2
+    assert call("a" * 40, "success", "ctx", "d", COMMIT_STATUS_REPO="no-slash") == 2
+    assert call("a" * 40, "success", "ctx", "d", COMMIT_STATUS_REPO="a/b/../c") == 2
+    assert _posts(w) == []

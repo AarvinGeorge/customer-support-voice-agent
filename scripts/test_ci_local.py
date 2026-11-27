@@ -91,12 +91,15 @@ def test_no_job_or_step_can_be_softened_in_the_workflow() -> None:
 
 
 def test_pg_project_outside_the_localci_namespace_is_refused(tmp_path: Path) -> None:
-    """What: CI_PG_PROJECT must start with cs-localci (review M4): cs-demo or a lane project (cs-a) is never taken down.
-    Use when: CI. Inputs: tmp log dir. Output: assertions. Side effects: none (refused before docker). Role: guard."""
-    import os
+    """What: CI_PG_PROJECT must start with cs-localci (review M4). Runs with a recording fake docker and uv FIRST on PATH
+    and fake project names only, so even a removed guard cannot reach a real stack (PR #74 N1 incident).
+    Use when: CI. Inputs: tmp log dir. Output: assertions. Side effects: fakes only. Role: guard."""
+    from test_compose_owner import docker_calls, fake_env
 
-    for proj in ("cs-demo", "cs-a"):
-        env = {**os.environ, "CI_LOG_DIR": str(tmp_path), "CI_PG_PROJECT": proj}
-        r = subprocess.run(["bash", str(LOCAL), "pg-tests"], capture_output=True, text=True, env=env)
+    for proj in ("qs-probe-notlocalci", "cs-guardprobe-x"):
+        env = fake_env(tmp_path, CI_LOG_DIR=str(tmp_path / "logs"), CI_PG_PROJECT=proj)
+        env.pop("GITHUB_ACTIONS", None)
+        r = subprocess.run(["bash", str(LOCAL), "pg-tests"], capture_output=True, text=True, env=env, timeout=120)
         assert r.returncode == 2 and "cs-localci" in r.stderr, r.stdout + r.stderr
         assert "--- pg tests" not in r.stdout
+    assert [c for c in docker_calls(tmp_path) if not c.startswith("uv ")] == []  # refused before any docker call
