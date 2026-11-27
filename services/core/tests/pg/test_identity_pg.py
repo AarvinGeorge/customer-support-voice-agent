@@ -23,6 +23,7 @@ from core.clock import FixedClock
 from core.config import Settings
 from core.seeds.seed import pin_hmac
 from tests.conftest import TOKENS
+from tests.pin_probe import leaks
 
 pytestmark = pytest.mark.pg
 NY = ZoneInfo("America/New_York")
@@ -245,8 +246,8 @@ def test_pin_never_reaches_audit_logs_or_tables(stack, caplog):
         r2 = s.verify(sid, s.w.a, right)
         bad = s.verify(sid, s.w.a, wrong + "1")
     assert r1.status_code == 401 and r2.status_code == 200 and bad.status_code == 422
-    assert json.dumps({"account_id": s.w.a, "pin": wrong}).count(wrong) == 1  # the secret is present in the input
-    assert wrong not in caplog.text and right not in caplog.text and wrong + "1" not in bad.text
+    assert leaks(json.dumps({"account_id": s.w.a, "pin": wrong}), wrong)  # the secret is present in the input
+    assert not leaks(caplog.text, wrong) and not leaks(caplog.text, right) and not leaks(bad.text, wrong + "1")
     with psycopg.connect(s.app_url) as c:
         audits = c.execute("SELECT event, actor, account_id, args_redacted::text, session_id::text FROM audit_events "
                            "WHERE session_id = %s::uuid ORDER BY ts", (sid,)).fetchall()
@@ -255,7 +256,7 @@ def test_pin_never_reaches_audit_logs_or_tables(stack, caplog):
     assert [a[0] for a in audits] == ["verify_failed", "verify_ok"]
     assert all(a[2] in (s.w.a, None) for a in audits)
     dump = json.dumps(audits) + json.dumps(attempts, default=str)
-    assert wrong not in dump and right not in dump
+    assert not leaks(dump, wrong) and not leaks(dump, right)
     assert attempts == [(s.w.a, "verify", False), (s.w.a, "verify", True)]
 
 

@@ -10,6 +10,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from contracts.redact import RedactContext
+from psycopg.types.json import Jsonb
 
 from core.audit import AuditEvent, audit_row, write_audit
 from core.clock import FixedClock
@@ -80,7 +81,9 @@ def test_write_audit_inserts_the_redacted_row_and_logs_nothing_secret(caplog):
         audit_id = write_audit(conn, AuditEvent(event="verify", actor="agent", session_id=uuid.uuid4(),
                                                 trace_id="t-1", args=fixture_args()), clock=clock)
     assert len(conn.calls) == 1 and conn.calls[0][0].lstrip().startswith("INSERT INTO audit_events")
-    sink = json.dumps(conn.calls[0][1], default=str) + "\n".join(r.getMessage() for r in caplog.records)
+    params = [x.obj if isinstance(x, Jsonb) else x for x in conn.calls[0][1]]  # Jsonb repr is truncated: unwrap it
+    assert any(isinstance(x, dict) and x.get("pin") == "[PIN]" for x in params)  # args_redacted is really inspected
+    sink = json.dumps(params, default=str) + "\n".join(r.getMessage() for r in caplog.records)
     assert not leaks(sink, PIN) and EMAIL not in sink
     assert any(str(audit_id) in r.getMessage() for r in caplog.records)  # it did log, so the absence means something
 
