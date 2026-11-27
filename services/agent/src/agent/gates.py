@@ -13,13 +13,14 @@ ScopeClassifier, GateStep, start_gate_step, last_user_text, GATE_TAGS; matches_p
 turn_messages, evidence_text, grounded_evidence, record_gate_call, verifier_input, enforce_code_rules, GroundingVerifier, GroundingResult,
 parse_verifier_reply, citations_for, CLARIFY_LINE, CHECKING_POLICY_LINE.
 Side effects: emits step.started, gate and step.completed on the turn stream; sets TurnControl.route; the scope
-classifier (2 s) and the verifier (3 s) each make one model call, 0 retries, tagged internal:gate and nostream.
+classifier (2 s) and the verifier (5 s in chat, 3 s in voice, D-061) each make one model call, 0 retries, tagged internal:gate and nostream.
 Role: Gate 1 lives in code, never in the prompt. An error (or any verdict this code does not know) routes to
 retrieval_unavailable and never to not_in_docs: an outage is not evidence that the docs lack the answer.
 """
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import re
@@ -47,7 +48,8 @@ def record_gate_call(control: TurnControl, model: Any, reply: Any = None) -> Non
     Side effects: appends to control.gate_calls. Role: doc 07 s2.3: usage.model_calls equals LangSmith's llm run
     count, and gate calls are llm runs, so stream_agent_turn adds these to the turn usage."""
     meta = getattr(reply, "response_metadata", None) or {}
-    name = meta.get("model_name") or getattr(model, "model", None) or getattr(model, "model_name", None) or "unknown"
+    # The configured id first, so a success and a timeout of one model share one spelling (review PR #66 M-2).
+    name = getattr(model, "model", None) or getattr(model, "model_name", None) or meta.get("model_name") or "unknown"
     control.gate_calls.append((str(name), getattr(reply, "usage_metadata", None)))
 WEAK_VERDICTS = frozenset({"weak", "uncalibrated"})
 
@@ -341,9 +343,10 @@ _SOURCE_TAGS = ("source", *VERIFIER_TAGS)
 
 def _source_block(source_id: str, kind: str, body: str) -> str:
     """What: one code-written evidence block, its body hardened and with every source, evidence or draft tag
-    escaped, so the body cannot close it or forge another. Use when: grounded_evidence. Inputs: id, kind, body.
+    escaped, so the body cannot close it or forge another; the id is attribute-escaped (review PR #66 M-3).
+    Use when: grounded_evidence. Inputs: id, kind, body.
     Output: '<source id=".." kind=".." untrusted="true">..</source>'. Side effects: none. Role: helper."""
-    return (f'<source id="{source_id}" kind="{kind}" untrusted="true">'
+    return (f'<source id="{html.escape(source_id, quote=True)}" kind="{kind}" untrusted="true">'
             f"{escape_tags(harden(escape_untrusted(body)), _SOURCE_TAGS)}</source>")
 
 

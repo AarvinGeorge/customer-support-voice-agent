@@ -341,7 +341,8 @@ async def stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[st
     (default: the bound one, else a new one for this stream; it is bound here, once, before astream, when not
     already bound), cost_of(model_name, usage) -> USD (ModelRegistry.cost_for_model; None: cost 0).
     Output: TurnOutcome with usage (tokens, cached tokens, cost_usd_est, model_calls = provider attempts counted by
-    DeadlineAndFaultMiddleware, tool_calls, models_used, fallback_used).
+    DeadlineAndFaultMiddleware plus the gate calls on TurnControl.gate_calls, doc 07 s2.3; tool_calls, models_used,
+    fallback_used).
     Side effects: model and tool calls through the agent; a limit line is replaced in the thread; binds
     TURN_CONTROL for the run and resets it afterwards.
     Role: adapter between LangGraph streams (messages, tasks, values) and doc 07 s6.2 events."""

@@ -1,6 +1,6 @@
 """What: GroundingMiddleware, Gate 2 (doc 07 s2.5 item 9, s6.4): after each model call that produced a final draft
 (no tool calls) it decides skip or check; a check emits status checking_policy, calls the grounding_verifier
-(3 s, 0 retries, fail closed) and emits the `gate` event; pass keeps the draft (the SSE adapter flushes it with
+(5 s in chat, 3 s in voice per D-061; 0 retries, fail closed) and emits the `gate` event; pass keeps the draft (the SSE adapter flushes it with
 the citations recorded here); fail removes the draft from the thread with RemoveMessage (spike 3) and ends the
 turn with the fixed clarifying line, or on the second consecutive fail, or at once on commitment, with an
 escalate(grounding_failed | needs_commitment) route line and its ticket.

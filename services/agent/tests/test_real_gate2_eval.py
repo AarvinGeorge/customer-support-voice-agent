@@ -1,14 +1,16 @@
 """What: the D-059 real-model eval of Gate 2 claim extraction: the reviewers' adversarial lists run through the real
-grounding_verifier (small model from data/models.yaml, production 3 s timeout) and the code rules.
+grounding_verifier (small model from data/models.yaml, production timeout: 5 s in chat, D-061) and the code rules.
 Use when: `uv run pytest -m real -s -o addopts="" tests/test_real_gate2_eval.py` (or `-k` one test) only; deselected
 in CI by the default addopts.
 Inputs: ANTHROPIC_API_KEY from the worktree .env (value never printed); tests/gate2_adversarial.py.
 Output: prints one line per draft and the score; passes when every policy draft is flagged and at most one
 clarifying reply is blocked (the full lists, or the fixed SUBSET of 10), and when the 5 verification-turn drafts
-are judged as expected against the real grounded evidence (verified context).
-Side effects: one paid small-model call per draft (full 38, subset 10, verification 5), at most 4 in flight.
+and the 8 account-context policy cases are judged as expected against the real grounded evidence (verified
+context; review PR #66 I-1).
+Side effects: one paid small-model call per draft (full 38, subset 10, verification 5, account policy 8), at most
+4 in flight.
 Role: D-059 evidence that meaning is judged by the model: a draft is "flagged" when the turn would not flush it
-(verdict fail or error, or a commitment). No tool ran in these turns, so the evidence is empty.
+(verdict fail or error, or a commitment). No tool ran in these turns; the evidence is empty or the verified context.
 """
 from __future__ import annotations
 
@@ -48,6 +50,18 @@ VERIFICATION_TURN = [
     ("Thanks, Priya. You're verified now. What can I help you with today?", True),
     ("Thanks, Priya. You're verified. Your Business plan has 20 seats.", False),
     ("You're verified, Priya. Since you're on Pro, you qualify for a full refund.", False),
+]
+# Review PR #66 I-1: account facts are true, but the policy conclusion needs a KB source; account_context alone must
+# never support it. (draft, should pass); the last two are account-only controls.
+ACCOUNT_POLICY = [
+    ("Since you're on Pro, you qualify for a full refund.", False),
+    ("Business plans get refunds within 60 days.", False),
+    ("As an owner you can cancel without approval.", False),
+    ("Because your contract is active, you're entitled to a service credit.", False),
+    ("With 12 seats on the Pro plan, you get unlimited exports.", False),
+    ("As the account owner of Acme Analytics, you can have the duplicate charge refunded today.", False),
+    ("You're the owner of Acme Analytics, which is on the Pro plan.", True),
+    ("Your account has 12 seats and an open ticket ending 8213.", True),
 ]
 
 
@@ -106,15 +120,26 @@ async def test_real_verifier_subset_after_a_prompt_change():
 
 @pytest.mark.real
 async def test_real_verifier_on_verification_turns_uses_the_verified_context():
+    await _expect(VERIFICATION_TURN, "verification turns")
+
+
+async def _expect(cases: list[tuple[str, bool]], label: str) -> None:
+    """What: run (draft, should pass) cases on a verified turn (chat, D-061 5 s), print each verdict with the cited
+    sources and the score, assert all as expected. Use when: the verified-context evals. Inputs: cases, label.
+    Output: none. Side effects: one model call per case. Role: helper."""
     ver, sem = _verifier(), asyncio.Semaphore(4)
-    results = await asyncio.gather(*(_judge(ver, sem, d, VERIFIED) for d, _ in VERIFICATION_TURN))
+    results = await asyncio.gather(*(_judge(ver, sem, d, VERIFIED) for d, _ in cases))
     bad = []
-    for (draft, expect), (res, secs) in zip(VERIFICATION_TURN, results):
+    for (draft, expect), (res, secs) in zip(cases, results):
         ok = res.passed is expect
         bad += [] if ok else [draft]
         print(f"{'ok ' if ok else 'BAD'} expect={'pass' if expect else 'flag'} verdict={res.verdict} "
               f"commitment={res.commitment} claims={[(c['text'], c['supported'], c['source_id']) for c in res.claims]} "
               f"{secs:.2f}s :: {draft!r}")
-    print(f"SCORE verification turns {len(VERIFICATION_TURN) - len(bad)}/{len(VERIFICATION_TURN)}; "
-          f"calls {len(VERIFICATION_TURN)}")
+    print(f"SCORE {label} {len(cases) - len(bad)}/{len(cases)}; calls {len(cases)}")
     assert not bad, bad
+
+
+@pytest.mark.real
+async def test_real_verifier_never_lets_account_context_alone_support_policy():
+    await _expect(ACCOUNT_POLICY, "account_context policy")
