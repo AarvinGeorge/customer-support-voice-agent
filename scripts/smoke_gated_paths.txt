@@ -1,0 +1,28 @@
+# What: the one list of paths that change agent behaviour. A PR changing any of them needs a passing `live-smoke`
+#   commit status (scripts/live_smoke.sh) on a PR commit with no gated change after it (scripts/check_smoke_status.py).
+# Use when: read by scripts/check_smoke_status.py; scripts/test_check_smoke_status.py proves every gate, prompt, model
+#   setting and wiring point found in the source is covered.
+# Format: one path per line; a trailing "/" means everything under it; "!" excludes a prefix; "#" starts a comment.
+# Role: misses nothing by gating whole source trees (renames inside them stay gated; the diff uses --no-renames).
+services/agent/src/
+services/agent/migrations/
+services/core/src/
+services/core/migrations/
+services/knowledge/src/
+services/knowledge/config/
+services/knowledge/scripts/
+services/knowledge/migrations/
+packages/contracts/src/
+data/
+compose.yaml
+compose.override.yaml
+Caddyfile
+infra/
+!infra/tests/
+evals/
+!evals/tests/
+scripts/live_smoke.sh
+scripts/commit_status.sh
+scripts/check_smoke_status.py
+scripts/smoke_gated_paths.txt
+.github/workflows/smoke-gate.yml

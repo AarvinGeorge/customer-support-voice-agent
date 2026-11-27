@@ -21,10 +21,10 @@
 
 - [ ] ruff, pyright, pytest and the descriptor check pass on the changed files
 - [ ] No secrets in the diff (BRIEF secret scan); no `.env` tracked
-- [ ] **Live smoke (agent behaviour):** if this PR touches agent gates, middleware, prompts, tool descriptions, model adapters, `data/models.yaml` or the agent wiring (the `GATED` list in `scripts/check_smoke_summary.py`), run `RUN_REAL=1 scripts/live_smoke.sh` on a pushed commit of this PR and paste its whole summary below, from the `LIVE SMOKE` line to `RESULT: PASS`. The `smoke summary` check fails without it. About 20 real model calls, hard cap 25.
+- [ ] **Live smoke (agent behaviour):** if this PR changes a path in `scripts/smoke_gated_paths.txt` (agent, core and knowledge source, gates, prompts, middleware, `sse.py`, `data/`, wiring, evals), push, then run `RUN_REAL=1 scripts/live_smoke.sh` on the PR head. It posts the `live-smoke` commit status on that exact commit; the `smoke-gate` status then turns green on its own. A later push that changes a gated path needs a new run. About 20 real model calls, hard cap 25. Paste the printed summary below for readers (the gate reads the status, not this text).
 
 ## Live smoke summary
 
 ```
-(paste here, or write "not required: no gated path changed")
+(paste the scripts/live_smoke.sh summary, or write "not required: no gated path changed")
 ```

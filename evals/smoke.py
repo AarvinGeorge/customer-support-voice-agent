@@ -20,6 +20,7 @@ from .agent_client import AgentClient
 from .model import CaseGrade, Check, Event, TurnResult
 
 DEFAULT_CAP = 25
+MAX_CAP = 60  # ceiling for SMOKE_MAX_CALLS / --cap (PR #73 review M9); scripts/check_smoke_status.py accepts cap <= 25
 
 # (case id, label, gates the case must show). S1-CHAT is G-03 played in chat without the voice barge-in turn, so one
 # session covers S1 verify and commit and the S1 policy follow-up (the turn that showed the clarify line live).
@@ -93,7 +94,10 @@ def turn_calls(t: TurnResult) -> dict[str, int] | None:
     s2.3), split into verifier (grounding gate steps that called the model), classifier (scope gate steps), agent (the
     rest: primary, retries and fallback), plus search (search_kb tool steps, one query embedding each).
     Use when: after each turn. Inputs: turn. Output: dict, or None when the turn streamed but sent no turn.completed
-    (the count is unknown). A non-200 turn made no call: zeros. Side effects: none. Role: the call ledger."""
+    (the count is unknown), or for a transport error before any status (status 0: the agent may have started the turn).
+    A turn the agent answered with a non-200 status made no call: zeros. Side effects: none. Role: the call ledger."""
+    if t.status_code == 0:
+        return None
     if t.status_code != 200:
         return {"total": 0, "agent": 0, "verifier": 0, "classifier": 0, "search": 0}
     u = _usage(t)
@@ -262,7 +266,7 @@ def render_summary(rows: list[SmokeRow], ledger: list[tuple[str, int, dict[str, 
     """What: the one-screen summary and whether the smoke passed. Use when: the smoke ends (also after an abort).
     Inputs: rows, call ledger, log counts (None when unread), meta (when, project, edge port, commit, dirty, ingest
     embedding calls, cost), cap, abort reason. Output: (text, passed). Side effects: none.
-    Role: the block a PR body pastes; scripts/check_smoke_summary.py reads its first line and RESULT line."""
+    Role: the block a PR body pastes for readers; the gate itself reads the live-smoke commit status."""
     tot = {k: sum(c[k] for _, _, c in ledger) for k in ("total", "agent", "verifier", "classifier", "search")}
     ingest = int(meta.get("ingest_embedding_calls") or 0)
     retries = (logs or {}).get("embedding retries (upper bound)", 0)
@@ -300,3 +304,18 @@ def render_summary(rows: list[SmokeRow], ledger: list[tuple[str, int, dict[str, 
               and logs is not None and not bad_logs and not meta.get("dirty"))
     lines.append(f"RESULT: {'PASS' if passed else 'FAIL'}")
     return "\n".join(lines), passed
+
+
+def status_description(rows: list[SmokeRow], ledger: list[tuple[str, int, dict[str, int]]], cap: int, passed: bool,
+                       abort: str | None) -> str:
+    """What: the one-line commit status description (at most 140 characters, the GitHub statuses API limit).
+    Use when: the smoke ends; scripts/live_smoke.sh posts it as the `live-smoke` status. Inputs: rows, ledger, cap,
+    passed, abort reason. Output: text like "PASS 5/5 cases, 19 calls, cap 25, 4 searches".
+    Side effects: none. Role: scripts/check_smoke_status.py reads "calls N, cap M" from it."""
+    ok = sum(r.verdict == "PASS" for r in rows)
+    calls = sum(c["total"] for _, _, c in ledger)
+    searches = sum(c["search"] for _, _, c in ledger)
+    head = "PASS" if passed else ("ABORTED" if abort else "FAIL")
+    failed = ", ".join(r.label.split(" ")[0] for r in rows if r.verdict != "PASS")
+    text = f"{head} {ok}/{len(SMOKE)} cases, {calls} calls, cap {cap}, {searches} searches"
+    return (text + (f"; not passing: {failed}" if failed else ""))[:140]

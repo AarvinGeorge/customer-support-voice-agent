@@ -18,6 +18,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from contracts.policy import load_policy
@@ -45,6 +46,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--cap", type=int, help=f"hard cap on real model calls (default SMOKE_MAX_CALLS or {smoke.DEFAULT_CAP})")
     s.add_argument("--out-dir", help="where the summary and the JSON go (default: no files)")
     s.add_argument("--agent-url")
+    s.add_argument("--status-out", help="write the one-line commit status description here (scripts/live_smoke.sh)")
     return p
 
 
@@ -111,9 +113,11 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
     args = _parser().parse_args(list(sys.argv[1:] if argv is None else argv))
     e = os.environ if env is None else env
     when = now or dt.datetime.now(dt.UTC)
-    if args.command == "smoke" and e.get("RUN_REAL") != "1":
-        print("refusing: the live smoke makes real model calls; set RUN_REAL=1 (scripts/live_smoke.sh)", file=sys.stderr)
-        return 2
+    if args.command == "smoke":
+        why = _smoke_refusal(args, e)
+        if why:
+            print(f"refusing: {why}", file=sys.stderr)
+            return 2
     code = e.get("DEMO_ACCESS_CODE")
     if not code:
         print("DEMO_ACCESS_CODE is not set: cannot open the agent API", file=sys.stderr)
@@ -156,6 +160,34 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
     v = rep["cases"]["verdicts"]
     print(f"{rep['cases']['total']} cases: {v['pass']} pass, {v['fail']} fail, {v['error']} error. Report: {md} and {js}")
     return 0 if v["fail"] == 0 and v["error"] == 0 and rep["cases"]["total"] > 0 else 1
+
+
+def _smoke_refusal(args: argparse.Namespace, e: Mapping[str, str]) -> str | None:
+    """What: why `python -m evals smoke` must not run here, or None. Use when: before any wiring, HTTP or reseed.
+    Inputs: args, env. Output: reason or None. Side effects: reads the run marker.
+    Role: real calls only with RUN_REAL=1; only on the throwaway stack scripts/live_smoke.sh created in this run (its
+    cs-smoke-* project and marker), at an explicit agent URL that is not cs-demo's port 3000; cap at most MAX_CAP."""
+    if e.get("RUN_REAL") != "1":
+        return "the live smoke makes real model calls; set RUN_REAL=1 (scripts/live_smoke.sh)"
+    why = reseed.smoke_run_refusal(e, ROOT)
+    if why:
+        return why
+    url = args.agent_url or e.get("EVALS_AGENT_URL")
+    if not url:
+        return "EVALS_AGENT_URL must name the smoke stack's Caddy explicitly (no default)"
+    try:
+        port = urlsplit(url).port
+    except ValueError:
+        port = None
+    if port is None or port == reseed.OWNER_DEMO_PORT:
+        return f"EVALS_AGENT_URL={url!r} must carry the smoke stack's port, never {reseed.OWNER_DEMO_PORT} (cs-demo)"
+    try:
+        cap = args.cap if args.cap is not None else int(e.get("SMOKE_MAX_CALLS") or smoke.DEFAULT_CAP)
+    except ValueError:
+        return "SMOKE_MAX_CALLS must be a whole number"
+    if not 1 <= cap <= smoke.MAX_CAP:
+        return f"the call cap must be 1 to {smoke.MAX_CAP}, got {cap}"
+    return None
 
 
 def _smoke(args: argparse.Namespace, e: Mapping[str, str], w: _Setup, code: str, when: dt.datetime,
@@ -203,6 +235,8 @@ def _smoke(args: argparse.Namespace, e: Mapping[str, str], w: _Setup, code: str,
             "ingest_embedding_calls": e.get("SMOKE_INGEST_EMBEDDING_CALLS", "0"), "cost": cost, "models": ",".join(models)}
     text, passed = smoke.render_summary(rows, agent.ledger, logs, meta, cap, abort)
     print(text)
+    if args.status_out:
+        Path(args.status_out).write_text(smoke.status_description(rows, agent.ledger, cap, passed, abort) + "\n")
     if args.out_dir:
         out = Path(args.out_dir)
         out.mkdir(parents=True, exist_ok=True)

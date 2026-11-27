@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from starlette.testclient import TestClient
 
-from evals import cli, smoke
+from evals import cli, reseed, smoke
 from evals.cases import load_cases
 from evals.model import Check, TurnResult
 from evals.tests.fakes import ACCESS_CODE, FakeStore, FakeWorld, Script, build_app
@@ -85,6 +85,12 @@ def test_turn_calls_splits_model_calls_into_agent_verifier_and_classifier() -> N
              *gate_step("grounding_gate", "error", "clarify", status="error", reason="no_time")]
     t = turn(0, "text", parts, model_calls=5)[0]
     assert smoke.turn_calls(t) == {"total": 5, "agent": 3, "verifier": 1, "classifier": 1, "search": 1}
+
+
+def test_a_transport_error_before_any_status_is_an_unknown_count() -> None:
+    """What: status 0 (ReadTimeout before headers) is unknown, not zero calls. Use when: CI. Inputs: none.
+    Output: none. Side effects: none. Role: PR #73 review M4."""
+    assert smoke.turn_calls(TurnResult(0, "text", {}, 0, error="transport error: ReadTimeout")) is None
 
 
 def test_turn_calls_is_zero_for_a_rejected_request_and_unknown_without_turn_completed() -> None:
@@ -184,6 +190,23 @@ def test_clarify_is_allowed_where_the_turn_expects_it() -> None:
 
 # --- patterns pinned to the source (a zero must be able to be non-zero) --------------------------------------------
 
+def test_the_stream_names_the_checks_read_are_the_ones_the_agent_emits() -> None:
+    """What: the step names and summary keys the counts and checks read exist in the agent source, so a rename
+    breaks this test instead of turning a check into a permanent zero. Use when: CI. Inputs: agent source.
+    Output: none. Side effects: reads files. Role: PR #73 review M7."""
+    gates = (AGENT_SRC / "gates.py").read_text()
+    grounding = (AGENT_SRC / "middleware" / "grounding.py").read_text()
+    sse = (AGENT_SRC / "sse.py").read_text()
+    catalog = (AGENT_SRC / "tools" / "catalog.py").read_text()
+    assert 'start_gate_step(control, "scope_gate"' in gates
+    assert 'start_gate_step(control, "retrieval_gate"' in gates
+    assert grounding.count('start_gate_step(control, "grounding_gate"') >= 2
+    assert 'summary["reason"] = reason' in gates and 'reason=result.reason if error else None' in grounding
+    assert 'summary={"truncated": cuts}' in sse and 'kind="model"' in sse
+    assert 'GroundingResult("error", reason="truncated")' in gates and 'reason="no_time"' in gates
+    assert re.search(r'name\s*=\s*"search_kb"|"search_kb"', catalog)
+
+
 def test_the_clarify_line_copy_matches_the_agent_source() -> None:
     assert smoke.CLARIFY_LINE in (AGENT_SRC / "gates.py").read_text()
 
@@ -271,7 +294,20 @@ def _deps(world: FakeWorld) -> dict[str, Any]:
             "log_run": _logs(UP, UP)}
 
 
-ENV = {"DEMO_ACCESS_CODE": ACCESS_CODE, "RUN_REAL": "1", "COMPOSE_PROJECT_NAME": "cs-smoke-x", "SMOKE_COMMIT": "abc1234"}
+PROJECT = "cs-smoke-x"
+ENV = {"DEMO_ACCESS_CODE": ACCESS_CODE, "RUN_REAL": "1", "COMPOSE_PROJECT_NAME": PROJECT, "SMOKE_COMMIT": "abc1234",
+       "SMOKE_RUN_NONCE": "n1", "EVALS_AGENT_URL": "http://localhost:3141"}
+
+
+@pytest.fixture(autouse=True)
+def _marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """What: point the run marker root at tmp and write this run's marker for PROJECT. Use when: every test here.
+    Inputs: monkeypatch, tmp dir. Output: none. Side effects: a tmp file. Role: what live_smoke.sh writes."""
+    real = reseed.smoke_marker
+    monkeypatch.setattr(reseed, "smoke_marker", lambda root, project: real(tmp_path, project))
+    m = reseed.smoke_marker(tmp_path, PROJECT)
+    m.parent.mkdir(parents=True)
+    m.write_text("n1\n")
 
 
 def test_smoke_refuses_without_run_real_and_sends_nothing(capsys: pytest.CaptureFixture[str]) -> None:
@@ -281,12 +317,39 @@ def test_smoke_refuses_without_run_real_and_sends_nothing(capsys: pytest.Capture
     assert cli.main(["smoke"], {**ENV, "RUN_REAL": "true"}, **_deps(w)) == 2
 
 
+@pytest.mark.parametrize("change", [
+    {"COMPOSE_PROJECT_NAME": None},  # the bare command: no project at all
+    {"COMPOSE_PROJECT_NAME": "cs-demo"},
+    {"COMPOSE_PROJECT_NAME": "cs-a5"},  # a lane stack: not a throwaway smoke stack
+    {"SMOKE_RUN_NONCE": None},  # no marker nonce: not created by live_smoke.sh in this run
+    {"SMOKE_RUN_NONCE": "stale"},
+    {"EVALS_AGENT_URL": None},  # no explicit URL: the old default was cs-demo's localhost:3000
+    {"EVALS_AGENT_URL": "http://localhost:3000"},
+])
+def test_smoke_refuses_any_stack_its_script_did_not_create(change: dict[str, str | None],
+                                                            capsys: pytest.CaptureFixture[str]) -> None:
+    """What: the smoke entry point needs a cs-smoke-* project with this run's marker and an explicit agent URL that
+    is not port 3000; otherwise exit 2 with no request and no reseed. Use when: CI. Inputs: env change.
+    Output: none. Side effects: none. Role: PR #73 review I4 (a bare `evals smoke` could reach cs-demo)."""
+    w = FakeWorld()
+    env = {k: v for k, v in {**ENV, **change}.items() if v is not None}
+    deps = _deps(w)
+    del deps["before_case"], deps["after_case"]  # the real guarded hooks
+    deps["store"] = None
+    assert cli.main(["smoke"], env, **deps) == 2
+    assert w.requests == [] and w.sessions_created == 0
+    assert "refusing" in capsys.readouterr().err
+
+
 def test_smoke_with_no_agent_behind_it_fails_every_case(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     w = FakeWorld()  # no script: every session is a 503, so every case grades error
-    assert cli.main(["smoke", "--out-dir", str(tmp_path)], ENV, **_deps(w)) == 1
+    out_dir = tmp_path / "out"
+    status = tmp_path / "status.txt"
+    assert cli.main(["smoke", "--out-dir", str(out_dir), "--status-out", str(status)], ENV, **_deps(w)) == 1
     out = capsys.readouterr().out
     assert out.count("ERROR") >= 5 and out.rstrip().endswith("RESULT: FAIL")
-    assert sorted(p.suffix for p in tmp_path.iterdir()) == [".json", ".txt"]
+    assert sorted(p.suffix for p in out_dir.iterdir()) == [".json", ".txt"]
+    assert status.read_text().startswith("FAIL 0/5 cases, 0 calls, cap 25, 0 searches; not passing: S1, S3, S3, S4, S5")
 
 
 def test_smoke_aborts_at_the_cap_with_exit_3(capsys: pytest.CaptureFixture[str]) -> None:

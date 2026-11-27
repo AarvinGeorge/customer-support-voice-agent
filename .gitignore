@@ -19,3 +19,5 @@ apps/web/AGENTS.md
 apps/web/AGENTS.md
 # Deploy state written by scripts/deploy/deploy.sh (current and previous tag)
 .deploy/
+# Local scratch: ci_local.sh logs and ci_gate.sh throwaway merge worktrees (D-068)
+.tmp/
