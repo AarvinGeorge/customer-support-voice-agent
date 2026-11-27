@@ -10,6 +10,7 @@
  * Role: config; `NEXT_PUBLIC_*` never holds a secret (doc 07 s15.2). The property accesses are
  *   literal so Next.js can inline them.
  */
+
 /**
  * What: the frozen public config object.
  * Use when: importing deploy config values in client code.

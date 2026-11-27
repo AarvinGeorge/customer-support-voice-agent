@@ -188,10 +188,29 @@ def check_ts(source: str, path: str, light: bool = False) -> list[Gap]:
     if problem:
         gaps.append(Gap(path, 1, "<module>", problem))
     for i, name in ([] if light else decl_lines):
-        problem = _labels_problem(_block_before(lines, i))
+        block = _block_before(lines, i)
+        problem = _labels_problem(block)
         if problem:
             gaps.append(Gap(path, i + 1, name, problem))
+        elif block is not None and _stacked_above(lines, i, block):
+            gaps.append(Gap(path, i + 1, name, "duplicate: two descriptor blocks stacked above one declaration"))
     return gaps
+
+
+def _stacked_above(lines: list[str], index: int, block: str) -> bool:
+    """What: is another JSDoc block stacked directly above the declaration's own block. Use when: judging a TS declaration
+    whose own block is complete. Inputs: all lines, the declaration index, its block text. Output: bool.
+    Side effects: none. Role: catches an orphaned or duplicate descriptor (review PR #70 I1); a blank line between blocks is fine."""
+    i = index - 1
+    while i >= 0 and (lines[i].lstrip().startswith("//") or lines[i].lstrip().startswith("@")):
+        i -= 1
+    start = i - (block.count("\n"))
+    if start - 1 < 0 or _block_before(lines, start) is None:
+        return False
+    upper = start - 1
+    while upper >= 0 and not lines[upper].lstrip().startswith("/**"):
+        upper -= 1
+    return any(ln.strip() and not ln.lstrip().startswith(("//", "/*", "*")) for ln in lines[:upper])  # the module block may sit directly above the first declaration's block
 
 
 def _git(root: Path, *args: str) -> str:
