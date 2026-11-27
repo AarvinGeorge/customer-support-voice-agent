@@ -275,7 +275,7 @@ describe("the wait is announced once (fix round 1, I2)", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const refuse = errorFetch(429, "SESSION_TURNS", "rate_limited", 2);
     let calls = 0;
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => (calls++ === 0 ? refuse(input, init) : new Promise<Response>(() => {}))));
+    vi.stubGlobal("fetch", vi.fn(() => (calls++ === 0 ? refuse() : new Promise<Response>(() => {}))));
     render(<ConsoleShell sessionId={SID} store={createTurnStore()} />);
     typeAndSend("hi");
     await screen.findByRole("status", { name: "Sending paused" });
