@@ -11,7 +11,7 @@
  * Role: CS-E-04.S6.T1 Done when: one test per verification result and per outcome; a double
  *   click sends one request; the DOM never holds the PIN after submit.
  */
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActionResultEvent, ConfirmationRequiredEvent, SseEvent, TurnRequest, VerificationResultEvent } from "@contracts/contracts";
 import { loadFixture, toWire } from "@/test-support/fixtures";
@@ -194,6 +194,21 @@ describe("verification card", () => {
     fireEvent.submit(form);
     fireEvent.submit(form);
     expect(sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("I don't have my PIN sends the explicit no_pin input once, never a PIN, and closes the card when the turn settles", async () => {
+    const store = storeWith(c1);
+    const sendTurn = vi.fn((_sid: string, _req: TurnRequest) => Promise.resolve({} as never));
+    store.setState({ sendTurn });
+    render(<ConsoleShell sessionId={SID} store={store} />);
+    const btn = screen.getByRole("button", { name: "I don't have my PIN" });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    expect(sendTurn).toHaveBeenCalledTimes(1);
+    const req = sendTurn.mock.calls[0]?.[1] as TurnRequest;
+    expect(Object.keys(req).sort()).toEqual(["client_turn_id", "verification"]);
+    expect(req.verification).toEqual({ no_pin: true });
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Verify your account" })).toBeNull());
   });
 
   const results: [VerificationResultEvent["status"], Partial<VerificationResultEvent>, string][] = [

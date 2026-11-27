@@ -3,8 +3,9 @@
 # Networks: edge (caddy, web, agents) | backend, internal (agents, core, knowledge, postgres, redis) | egress (agents, knowledge).
 # Each service lists only the variables doc 07 s15.2 says it reads. Secrets come from .env (keys.py), never from this file.
 
-# D-071 part 4: every service logs to json-file with rotation, so logs survive a container recreate (locally and on
-# the VM) and cannot fill the disk: at most 5 files of 10 MB per container. Defined once, merged into each service.
+# D-071 part 4: every service logs to json-file with rotation, so container logs cannot fill the disk: at most 5 files
+# of 10 MB per container. json-file logs live with the container and are removed with it; the durable debugging
+# evidence is agent.turn_events plus LangSmith traces. Defined once, merged into each service.
 x-logging: &logging
   logging:
     driver: json-file

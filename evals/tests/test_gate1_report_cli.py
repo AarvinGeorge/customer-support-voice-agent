@@ -154,8 +154,8 @@ def test_python_m_evals_run_grades_all_cases_against_the_fake_and_writes_a_repor
     files = sorted(p.name for p in tmp_path.iterdir())
     assert files == ["golden-2026-11-27-150000.json", "golden-2026-11-27-150000.md"]
     rep = json.loads((tmp_path / files[0]).read_text())
-    assert rep["cases"]["total"] == 14
-    assert rep["cases"]["verdicts"] == {"pass": 1, "fail": 0, "error": 13}  # only G-01 is scripted; the rest are error, never pass
+    assert rep["cases"]["total"] == 15
+    assert rep["cases"]["verdicts"] == {"pass": 1, "fail": 0, "error": 14}  # only G-01 is scripted; the rest are error, never pass
     assert rep["gate1"]["n"] == 25
     assert code == 1  # not every case passed
 
@@ -184,7 +184,7 @@ def test_agent_client_access_failure_is_exit_2(tmp_path: Path) -> None:
 
 
 def test_all_golden_cases_and_personas_still_load() -> None:
-    assert len(load_cases()) == 14 and "Priya Raman" in load_personas() and AgentClient and ACCESS_CODE
+    assert len(load_cases()) == 15 and "Priya Raman" in load_personas() and AgentClient and ACCESS_CODE
 
 
 def test_a_malformed_search_body_is_request_failed_and_does_not_lose_the_run() -> None:

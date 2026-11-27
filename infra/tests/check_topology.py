@@ -67,7 +67,7 @@ def main() -> int:
         check(f"{agent} stop_grace_period 1m0s", services[agent].get("stop_grace_period") == "1m0s")
     for svc in ("agent_a", "agent_b", "core", "knowledge", "postgres", "redis"):
         check(f"{svc} has a healthcheck", "healthcheck" in services[svc])
-    # D-071 part 4: logs survive a container recreate locally and on the VM, bounded by rotation
+    # D-071 part 4: container logs are rotated (bounded disk); durable evidence is turn_events plus LangSmith
     want_log = {"driver": "json-file", "options": {"max-size": "10m", "max-file": "5"}}
     for svc in sorted(services):
         check(f"{svc} logging json-file 10m x 5", services[svc].get("logging") == want_log)
