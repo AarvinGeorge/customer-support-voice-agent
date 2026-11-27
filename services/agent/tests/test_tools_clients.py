@@ -297,3 +297,7 @@ def test_the_commit_token_is_not_reachable_from_tool_modules():
     assert any(p.name == "catalog.py" for p in reached) and any(p.name == "core_agent.py" for p in reached)
     offenders = [str(p) for p in reached if "CORE_TOKEN_" + "COMMIT" in p.read_text()]
     assert offenders == []
+    confirm = ROOT / "services" / "agent" / "src" / "agent" / "structured" / "confirm.py"
+    assert "CORE_TOKEN_" + "COMMIT" in confirm.read_text() and confirm not in reached  # the check can fail
+    holders = [p for p in (ROOT / "services" / "agent" / "src").rglob("*.py") if "CORE_TOKEN_" + "COMMIT" in p.read_text()]
+    assert holders == [confirm]  # the confirm module is the one place the commit token is named

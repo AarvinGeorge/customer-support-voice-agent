@@ -67,7 +67,7 @@ class TurnPrep:
 class StructuredResult:
     """What: the step 13 decision. Either `outcome` (a deterministic reply: the turn ends, `messages` and `state`
     are written to the thread) or no outcome (continue into the agent loop with `model_text`, `verification`,
-    `pending_summary` and `state` merged into the run input).
+    `pending_summary`, `context_stale` (overrides the step 11 marker) and `state` merged into the run input).
     Use when: returned by a StructuredHandler. Inputs: see fields. Output: value. Side effects: none.
     Role: doc 07 s7.3 "produces a deterministic reply or continues into the agent loop"."""
 
@@ -77,6 +77,7 @@ class StructuredResult:
     model_text: str | None = None
     verification: str | None = None
     pending_summary: str | None = None
+    context_stale: bool | None = None
 
 
 StructuredHandler = Callable[[TurnStream, Any, TurnPrep], Awaitable[StructuredResult]]
@@ -127,7 +128,7 @@ class TurnRunner:
             return result.outcome
         merged = {**values, **result.state}
         verified = bool(merged.get("verified"))
-        stale = memory.stale and "context_snapshot" not in result.state
+        stale = result.context_stale if result.context_stale is not None else memory.stale
         ctx = TurnContext(mode="voice" if inp.mode == "voice" else "chat", verified=verified,
                           verification="just_verified" if result.verification == "just_verified" else None,
                           pending=result.pending_summary,
