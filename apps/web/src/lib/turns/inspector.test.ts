@@ -104,6 +104,49 @@ describe("retrievalView (Gate 1)", () => {
   });
 });
 
+describe("retrievalView words for every doc 07 s4.1 reason (I1)", () => {
+  const base = nth(s1, 0).gates.find((g) => g.gate === "retrieval");
+  if (!base) throw new Error("no gate");
+  const gate = (o: Partial<typeof base>) => ({ ...base, tau_low: 0.3, tau_high: 0.45, code_match: false, ...o });
+
+  it("exact_code_match: pass with a low cosine never compares the score", () => {
+    const v = retrievalView(gate({ verdict: "pass", decision: "answer", top_cosine: 0.2, code_match: true }));
+    expect(v.words).toBe("Matched the error code exactly: strong match, so the agent answered.");
+  });
+  it("unknown_error_code: none with a high cosine does not blame the band", () => {
+    const v = retrievalView(gate({ verdict: "none", decision: "escalate", top_cosine: 0.6 }));
+    expect(v.words).toBe("Unknown error code (score 0.60 did not decide this): no match, so the agent escalated.");
+  });
+  it("below_threshold: none under tau_low", () => {
+    const v = retrievalView(gate({ verdict: "none", decision: "decline", top_cosine: 0.12 }));
+    expect(v.words).toBe("Score 0.12 is below tau_low 0.30: no match, so the agent declined.");
+  });
+  it("below_threshold: none with no chunks", () => {
+    const v = retrievalView(gate({ verdict: "none", decision: "escalate", top_cosine: null }));
+    expect(v.words).toBe("No score: no match, so the agent escalated.");
+  });
+  it("weak_match", () => {
+    const v = retrievalView(gate({ verdict: "weak", decision: "clarify", top_cosine: 0.38 }));
+    expect(v.words).toBe("Score 0.38 is between tau_low 0.30 and tau_high 0.45: weak match, so the agent asked to clarify.");
+  });
+  it("above_threshold", () => {
+    const v = retrievalView(gate({ verdict: "pass", decision: "answer", top_cosine: 0.62 }));
+    expect(v.words).toBe("Score 0.62 is at or above tau_high 0.45: strong match, so the agent answered.");
+  });
+  it("embedding_unavailable: error never says the docs lack the answer or compares a score", () => {
+    const v = retrievalView(gate({ verdict: "error", decision: "escalate", top_cosine: 0.5 }));
+    expect(v.words).toBe("Search error, so no score decided this: the agent escalated.");
+  });
+  it("retrieval_unavailable: error with no score", () => {
+    const v = retrievalView(gate({ verdict: "error", decision: "escalate", top_cosine: null }));
+    expect(v.words).toBe("Search error, so no score decided this: the agent escalated.");
+  });
+  it("no_calibration: uncalibrated has no thresholds to compare", () => {
+    const v = retrievalView(gate({ verdict: "uncalibrated", decision: "clarify", top_cosine: 0.41, tau_low: null, tau_high: null }));
+    expect(v.words).toBe("Score 0.41, thresholds not calibrated: the agent asked to clarify.");
+  });
+});
+
 describe("inspectorSteps", () => {
   it("lists each step with its tool name, latency, model usage, gates and rule", () => {
     const steps = inspectorSteps(nth(s1, 1));
@@ -185,6 +228,16 @@ describe("langsmithRunUrl", () => {
     expect(langsmithRunUrl("019a-turn", "https://smith.langchain.com/o/t1/projects/p/p1/")).toBe(
       "https://smith.langchain.com/o/t1/projects/p/p1/r/019a-turn?poll=true",
     );
+  });
+
+  it("drops a query string and fragment from the project URL (I2)", () => {
+    expect(langsmithRunUrl("019a-turn", "https://smith.langchain.com/o/t/projects/p/p1?tab=0#x")).toBe(
+      "https://smith.langchain.com/o/t/projects/p/p1/r/019a-turn?poll=true",
+    );
+  });
+
+  it("returns null for an unparseable URL", () => {
+    expect(langsmithRunUrl("t", "https://")).toBeNull();
   });
 
   it("returns null without a configured https project URL", () => {
