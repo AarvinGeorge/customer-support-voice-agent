@@ -73,9 +73,9 @@ def parse_article(raw: str, filename: str) -> Article:
         edited.isoformat() if isinstance(edited, date) else str(edited)[:10])
     body = m.group(2)
     first_line = raw[:m.start(2)].count("\n") + 1
-    for i, line in enumerate(body.splitlines()):
-        if re.match(r"# \S", line):
-            raise IngestError(f"{filename}:{first_line + i}: the body must not contain an H1 (the title is in front matter)")
+    for b in parse_blocks(body, first_line):  # block based, so '# comment' inside a code fence is not an H1
+        if b.kind == "heading" and b.level == 1:
+            raise IngestError(f"{filename}:{b.line}: the body must not contain an H1 (the title is in front matter)")
     return Article(article_id=fm["article_id"], title=str(fm["title"]), source_url=str(fm["source_url"]),
                    last_updated=day, tiers=tiers, body=body, body_first_line=first_line, filename=filename)
 

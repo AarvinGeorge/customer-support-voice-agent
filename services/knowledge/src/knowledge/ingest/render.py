@@ -30,4 +30,9 @@ def render_policy(text: str, policy: PolicyConfig, filename: str, first_line: in
         keys.append(expr.split("|")[0])
         return value
 
-    return _PLACEHOLDER.sub(sub, text), keys
+    out = _PLACEHOLDER.sub(sub, text)
+    stray = re.search(r"\{\s*policy\b", out)
+    if stray:
+        line = first_line + out.count("\n", 0, stray.start())
+        raise IngestError(f"{filename}:{line}: malformed policy placeholder near {out[stray.start():stray.start() + 40]!r}")
+    return out, keys
