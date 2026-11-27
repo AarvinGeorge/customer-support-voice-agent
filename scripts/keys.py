@@ -89,13 +89,26 @@ def read_env(path: Path) -> dict[str, str]:
     return out
 
 
+def require_live_target(path: Path) -> None:
+    """What: refuse a dangling symlink, naming the missing target.
+    Use when: before reading or writing the env file. Inputs: path. Output: none.
+    Side effects: raises FileNotFoundError if path is a symlink whose target does not exist.
+    Role: stops a stale link from silently minting a fresh secrets file."""
+    if path.is_symlink() and not path.exists():
+        raise FileNotFoundError(
+            f"{path} is a symlink to a missing file: {os.path.realpath(path)} "
+            "(fix the link or restore the target; nothing was written)"
+        )
+
+
 def upsert_env(path: Path, name: str, value: str) -> None:
     """What: set NAME=value in the env file, replacing an existing line or appending one.
     Use when: storing a key. Inputs: path, name, value (no newlines). Output: none.
-    Side effects: atomic rewrite of the file with mode 0600; a symlinked path is resolved first so the
+    Side effects: raises FileNotFoundError on a dangling symlink; atomic rewrite of the file with mode 0600; a symlinked path is resolved first so the
     link stays a link and the target is the file rewritten. Role: the only writer of .env."""
     if "\n" in value or "\r" in value:
         raise ValueError("value must be a single line")
+    require_live_target(path)
     path = Path(os.path.realpath(path))
     lines = path.read_text().splitlines(keepends=True) if path.exists() else []
     new_line = f"{name}={value}\n"
@@ -171,6 +184,7 @@ def verify(spec: KeySpec, value: str) -> str:
 def cmd_status() -> int:
     """What: print each registry key as MISSING or masked. Use when: checking setup.
     Inputs: none. Output: exit 1 if any key is missing. Side effects: reads .env. Role: subcommand."""
+    require_live_target(ENV_PATH)
     env = read_env(ENV_PATH)
     missing_now = 0
     for spec in REGISTRY:
@@ -185,6 +199,7 @@ def cmd_set(names: list[str]) -> int:
     """What: prompt (hidden) for each named key, or every provider key, and save it.
     Use when: adding or rotating keys. Inputs: key names. Output: exit 0 on success.
     Side effects: writes .env. Role: subcommand."""
+    require_live_target(ENV_PATH)
     targets = names or [s.name for s in REGISTRY if s.source == "provider"]
     for name in targets:
         if name not in SPECS:
@@ -228,7 +243,8 @@ def generate_missing(path: Path) -> list[str]:
     Use when: first setup, or after adding a new generated secret. Inputs: env file path.
     Then composes the six database URLs (doc 07 s15.2) from the role passwords.
     Output: names that were created (empty if nothing was missing); never overwrites a set value.
-    Side effects: writes the env file. Role: generator for internal secrets."""
+    Side effects: writes the env file; raises FileNotFoundError on a dangling symlink. Role: generator for internal secrets."""
+    require_live_target(path)
     env = read_env(path)
     made = []
     for spec in REGISTRY:
@@ -250,6 +266,7 @@ def generate_missing(path: Path) -> list[str]:
 def cmd_gen() -> int:
     """What: generate missing internal secrets and say which. Use when: first setup.
     Inputs: none. Output: exit 0. Side effects: writes .env. Role: subcommand."""
+    require_live_target(ENV_PATH)
     made = generate_missing(ENV_PATH)
     print("Generated: " + (", ".join(made) if made else "nothing (all already set)"))
     return 0
@@ -263,6 +280,16 @@ def main(argv: list[str]) -> int:
         print("Usage: python3 scripts/keys.py status | set [NAME ...] | verify | gen")
         return 0
     cmd, rest = argv[0], argv[1:]
+    try:
+        return run_command(cmd, rest)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def run_command(cmd: str, rest: list[str]) -> int:
+    """What: route one subcommand to its handler. Use when: main dispatches. Inputs: cmd, args.
+    Output: exit code. Side effects: per subcommand. Role: dispatch table."""
     if cmd == "status":
         return cmd_status()
     if cmd == "set":

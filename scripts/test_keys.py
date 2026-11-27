@@ -192,6 +192,39 @@ class SymlinkTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(self.target).st_mode), 0o600)
         self.assertEqual(keys.generate_missing(self.link), [])
 
+    def test_dangling_symlink_fails_loudly_and_creates_nothing(self):
+        self.target.unlink()
+        with self.assertRaises(FileNotFoundError) as cm:
+            keys.upsert_env(self.link, "B", "2")
+        self.assertIn(str(self.target), str(cm.exception))
+        with self.assertRaises(FileNotFoundError):
+            keys.generate_missing(self.link)
+        self.assertFalse(self.target.exists())
+        self.assertTrue(self.link.is_symlink())
+
+    def test_cli_set_and_gen_exit_nonzero_on_dangling_symlink(self):
+        self.target.unlink()
+        old = keys.ENV_PATH
+        keys.ENV_PATH = self.link
+        try:
+            for argv in (["gen"], ["set", "OPENAI_API_KEY"], ["status"]):
+                with self.assertRaises(SystemExit) as cm:
+                    keys.main(argv)
+                self.assertNotEqual(cm.exception.code, 0)
+        finally:
+            keys.ENV_PATH = old
+        self.assertFalse(self.target.exists())
+
+    def test_symlink_chain_writes_final_target(self):
+        mid = self.target.parent / "mid.env"
+        mid.symlink_to(self.target)
+        self.link.unlink()
+        self.link.symlink_to(mid)
+        keys.upsert_env(self.link, "B", "2")
+        self.assertTrue(self.link.is_symlink())
+        self.assertTrue(mid.is_symlink())
+        self.assertEqual(self.target.read_text(), "A=1\nB=2\n")
+
     def test_no_stray_temp_files_left(self):
         keys.upsert_env(self.link, "B", "2")
         self.assertEqual(sorted(p.name for p in self.target.parent.iterdir()), [".env"])
