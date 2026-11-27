@@ -9,6 +9,7 @@ Role: Done when of CS-E-05.S1.T1."""
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from contracts.agent_api import TranscriptItemIn, VoiceAskRequest
@@ -16,8 +17,8 @@ from contracts.stubs import examples as ex
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agent.ingress import Ingress, IngressInput, IngressStream
-from agent.structured.voice_yes import REPROMPT_LINE, final_transcript, merged_has_user_item
-from agent.voice import MergedItem, TranscriptMerger, format_merged
+from agent.structured.voice_yes import REPROMPT_LINE, final_transcript, voice_gate
+from agent.voice import TranscriptMerger
 from ingress_fakes import MemoryTurnLock
 from test_structured_input import OWNER, PREPARE_CALL, SID, VISITOR, COMMIT_TOKEN, Fake, World, of
 from voice_fakes import MemoryVoiceStore
@@ -90,13 +91,13 @@ def test_final_transcript_needs_final_item_id_and_text() -> None:
     assert final_transcript(object()) is None  # a chat TurnRequest body has no transcript fields: fails closed
 
 
-def test_merged_has_user_item_reads_the_format_merged_lines() -> None:
-    assert merged_has_user_item(None) is False
-    assert merged_has_user_item(format_merged([MergedItem("assistant", ex.READBACK.voice, False)])) is False
-    assert merged_has_user_item(format_merged([MergedItem("assistant", "x", True)])) is False
-    assert merged_has_user_item(format_merged([MergedItem("assistant", "x", False),
-                                               MergedItem("user", "how much was it", False)])) is True
-    assert merged_has_user_item(format_merged([MergedItem("user", "wait", True)])) is True
+def test_voice_gate_blocks_on_a_later_user_item_and_on_an_unknown_merge() -> None:
+    req = VoiceAskRequest(client_turn_id=uuid.uuid4(), voice_session_id=VSID, realtime_call_id="c", question="yes",
+                          user_item_id="i1", user_transcript="yes", transcript_final=True,
+                          last_assistant_interrupted=False)
+    assert voice_gate(req, "yes", False, None).blocked is False
+    assert voice_gate(req, "yes", True, None).blocked is True
+    assert voice_gate(req, "yes", None, None).blocked is True  # merge failed or not wired: unknown fails closed
 
 
 # --- Done when ------------------------------------------------------------------------------------------------
@@ -199,3 +200,83 @@ async def test_confirm_press_in_voice_still_commits() -> None:
     w, _, _ = await voice_readback()
     done, _ = await w.send(mode="voice", confirm={"pending_action_id": ex.PENDING_ID, "decision": "confirm"})
     assert done.end_reason == "committed" and len(w.core_calls("/commit")) == 1
+
+
+# --- fix round 1 (review PR #56): I1 re-prompt never arms a yes, I2 merge unknown fails closed, M1, M2 ----------
+
+class RaisingMerger:
+    """What: a step 12 merger that always fails (one failed Postgres call). Use when: I2 tests. Inputs: none.
+    Output: raises. Side effects: none. Role: fault double."""
+
+    async def __call__(self, inp: Any, row: Any) -> Any:
+        """What: fail. Use when: Ingress._merge. Inputs: input, row. Output: never. Side effects: none. Role: fake."""
+        raise RuntimeError("transcript_items unavailable")
+
+
+async def reprompt_then_yes(w: VoiceWorld, **first: Any) -> tuple[Any, Any]:
+    """What: the reviewer's detour: a yes-looking question with no final transcript, then a clean final yes.
+    Use when: I1 tests. Inputs: world, extra fields for the first ask. Output: (first outcome, second outcome).
+    Side effects: as turns. Role: helper."""
+    one, _ = await w.ask("yes", transcript=None, final=False, **first)
+    two, _ = await w.ask("yes", transcript="yes")
+    return one, two
+
+
+async def test_i1_p3_reprompt_after_an_interrupted_readback_repeats_the_readback_and_the_yes_never_skips_it() -> None:
+    w, _, _ = await voice_readback()
+    one, two = await reprompt_then_yes(w, interrupted=True)
+    assert one.end_reason == "readback" and one.final.say == ex.READBACK.voice  # the full read-back, not the re-prompt
+    assert two.end_reason == "committed"  # only after the read-back was said again
+
+
+async def test_i1_p3b_reprompt_never_clears_a_marked_interrupted_flag() -> None:
+    w, _, _ = await voice_readback()
+    ref = (await w.values())["pending"]
+    await w.seed({"pending": {**ref, "readback_interrupted": True}})
+    one, _ = await w.ask("yes", transcript=None, final=False)
+    assert one.end_reason == "readback" and one.final.say == ex.READBACK.voice and w.core_calls("/commit") == []
+
+
+async def test_i1_p4b_reprompt_never_stands_in_for_an_undelivered_readback() -> None:
+    w, _, _ = await voice_readback()
+    (tid,) = list(w.store.turns)
+    w.store.turns[tid] = replace(w.store.turns[tid], status="failed")  # the read-back turn was never delivered
+    one, _ = await w.ask("yes", transcript=None, final=False)
+    assert one.end_reason == "readback" and one.final.say == ex.READBACK.voice and w.core_calls("/commit") == []
+
+
+async def test_i1_p4d_reprompt_after_model_turns_repeats_the_readback() -> None:
+    w, _, _ = await voice_readback([AIMessage("Five to ten days."), AIMessage("Visa ending 4242.")])
+    await w.ask("how long", transcript="how long do refunds take")
+    await w.ask("which card", transcript="which card is it")
+    one, _ = await w.ask("yes", transcript=None, final=False)
+    assert one.end_reason == "readback" and one.final.say == ex.READBACK.voice and w.core_calls("/commit") == []
+
+
+async def test_i2_p6_a_failed_merge_blocks_the_spoken_yes() -> None:
+    w, _, _ = await voice_readback()
+    await w.post_items(("user", "wait, which card", False))
+    w.ingress.merge_transcript = RaisingMerger()
+    again, _ = await w.ask("yes", transcript="yes")
+    assert again.end_reason == "readback" and w.core_calls("/commit") == []
+
+
+async def test_i2_p6b_no_merger_blocks_the_spoken_yes() -> None:
+    w, _, _ = await voice_readback()
+    w.ingress.merge_transcript = None
+    again, _ = await w.ask("yes", transcript="yes")
+    assert again.end_reason == "readback" and w.core_calls("/commit") == []
+
+
+async def test_m1_p5_a_user_item_beyond_the_display_window_still_blocks_the_yes() -> None:
+    w, _, _ = await voice_readback()
+    await w.post_items(("user", "wait, which card", False), ("assistant", "a" * 4000, False),
+                       ("assistant", "b" * 4000, False))
+    again, _ = await w.ask("yes", transcript="yes")
+    assert again.end_reason == "readback" and w.core_calls("/commit") == []
+
+
+async def test_m2_p8_a_transcript_without_an_item_id_never_reaches_the_thread() -> None:
+    w, _, _ = await voice_readback()
+    await w.ask("yes", transcript="yes my pin is 4821", final=True, item=None)
+    assert all("4821" not in str(m.content) for m in (await w.values())["messages"])

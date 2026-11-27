@@ -30,7 +30,7 @@ from langchain_core.utils.uuid import uuid7
 
 from agent.access import owned_session
 from agent.assembly import run_config
-from agent.ingress import Ingress, IngressInput, SessionRow, TurnRow, to_response
+from agent.ingress import Ingress, IngressInput, MergeResult, SessionRow, TurnRow, to_response
 from agent.models.config import RoleSpec
 from agent.prompt import _escape_frame  # pyright: ignore[reportPrivateUsage]  (the frame-tag escaper, M5)
 from agent.realtime import MintedSecret, MintError, SessionSummary, build_session_config, render_instructions, \
@@ -80,18 +80,37 @@ class VoiceStore(Protocol):
     """What: the voice_sessions and transcript_items operations. Use when: typing.
     Inputs: see methods. Output: see methods. Side effects: database. Role: storage port."""
 
-    async def create_voice_session(self, row: VoiceSessionRow) -> None: ...
-    async def get_voice_session(self, voice_session_id: str) -> VoiceSessionRow | None: ...
+    async def create_voice_session(self, row: VoiceSessionRow) -> None:
+        """What: insert a mint row. Use when: voice/token. Inputs: row. Output: none. Side effects: INSERT.
+        Role: port method."""
+        ...
+
+    async def get_voice_session(self, voice_session_id: str) -> VoiceSessionRow | None:
+        """What: read a mint row. Use when: step 3, transcript post. Inputs: id. Output: row or None.
+        Side effects: SELECT. Role: port method."""
+        ...
+
     async def add_transcript_items(self, session_id: str, voice_session_id: str,
-                                   items: list[TranscriptItemIn]) -> int: ...
-    async def take_unmerged(self, session_id: str, turn_id: str, covered: CoveredItem | None) -> list[MergedItem]: ...
+                                   items: list[TranscriptItemIn]) -> int:
+        """What: insert client items once each. Use when: POST /transcript. Inputs: ids, items. Output: rows
+        inserted. Side effects: INSERT. Role: port method."""
+        ...
+
+    async def take_unmerged(self, session_id: str, turn_id: str, covered: CoveredItem | None) -> list[MergedItem]:
+        """What: claim unmerged client items for a turn, leaving out the covered item. Use when: step 12.
+        Inputs: session, turn, covered item. Output: claimed items, oldest first. Side effects: UPDATE. Role: port
+        method."""
+        ...
 
 
 class Minter(Protocol):
     """What: mints a Realtime client secret. Use when: typing. Inputs: session config. Output: MintedSecret.
     Side effects: provider call. Role: port (OpenAIRealtimeMinter in production)."""
 
-    async def mint(self, session: dict[str, Any]) -> MintedSecret: ...
+    async def mint(self, session: dict[str, Any]) -> MintedSecret:
+        """What: mint one client secret. Use when: voice/token. Inputs: session config. Output: MintedSecret.
+        Side effects: provider call. Role: port method."""
+        ...
 
 
 @dataclass
@@ -138,16 +157,18 @@ class TranscriptMerger:
         Role: constructor."""
         self.store = store
 
-    async def __call__(self, inp: IngressInput, row: TurnRow) -> str | None:
+    async def __call__(self, inp: IngressInput, row: TurnRow) -> MergeResult:
         """What: claim unmerged client items, leaving out the item this voice/ask answers.
         Use when: Ingress._merge. Inputs: input (body is a VoiceAskRequest for voice), row.
-        Output: wrapped text or None. Side effects: UPDATE/INSERT. Role: merge."""
+        Output: MergeResult (wrapped text or None, and whether any claimed row is a user item, counted before the
+        display cap). Side effects: UPDATE/INSERT. Role: merge."""
         covered = None
         req = inp.body
         if isinstance(req, VoiceAskRequest) and req.user_item_id:
             text = redaction.redact(req.user_transcript or req.question, inp.redact_context or RedactContext())
             covered = CoveredItem(req.user_item_id, req.voice_session_id, text)  # redacted before storage (I1)
-        return format_merged(await self.store.take_unmerged(inp.session_id, row.turn_id, covered))
+        items = await self.store.take_unmerged(inp.session_id, row.turn_id, covered)
+        return MergeResult(format_merged(items), any(it.role == "user" for it in items))
 
 
 class RedisCallKeys:

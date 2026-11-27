@@ -22,14 +22,13 @@ from contracts.events import FinalAnswer
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agent.clients.core_agent import CoreAgentClient
-from agent.composition import voice_user_text
 from agent.prompt import TurnContext, build_turn_message
 from agent.sse import TurnOutcome, TurnStream
 from agent.structured.confirm import ActionReply, Confirmer
 from agent.structured.grammar import is_strict_no, is_strict_yes
 from agent.structured.pending import confirm_label, ingress_message_id, is_adjacent, pending_ref
 from agent.structured.verification import verify_card
-from agent.structured.voice_yes import REPROMPT_LINE, VoiceGate, voice_gate
+from agent.structured.voice_yes import REPROMPT_LINE, VoiceGate, voice_gate, voice_thread_text
 from agent.turn_body import SessionFlags, StructuredResult, TurnPrep
 
 NOT_CURRENT_LINE = "That request is no longer active. Ask me again if you still need it."
@@ -66,7 +65,7 @@ class StructuredInput:
         yes = no = False
         gate: VoiceGate | None = None
         if confirm is None and text is not None and voice:  # yes signal 3 only: the final transcript, never `question`
-            gate = voice_gate(body, text, getattr(inp, "merged_transcript", None), prep.values.get("pending"))
+            gate = voice_gate(body, text, getattr(inp, "later_user_item", None), prep.values.get("pending"))
             yes, no = gate.yes, gate.no
         elif confirm is None and text is not None:
             yes, no = is_strict_yes(text), is_strict_no(text)
@@ -83,11 +82,11 @@ class StructuredInput:
             return await self._action(stream, prep, human, pending, await self.confirmer.cancel(prep.control, pending))
         if text is None or pending is None:  # a yes or no with no current pending answers something else
             return StructuredResult()
-        said = voice_user_text(body) if voice and hasattr(body, "question") else text
+        said = voice_thread_text(body, text) if voice else text
         human_msg = build_turn_message(said, TurnContext(mode="voice" if voice else "chat",
                                                          verified=bool(prep.values.get("verified"))))
-        if gate is not None and gate.reprompt:  # s7.3: yes-looking question, no final transcript: never commits
-            return self._readback(stream, prep, human_msg, pending, line=REPROMPT_LINE)
+        if gate is not None and gate.reprompt:  # s7.3 row 2: yes-looking question, no final transcript: never commits
+            return await self._reprompt(stream, prep, human_msg, pending, gate)
         if not (yes or no):  # anything else while a pending exists: the model, told the pending awaits yes or no
             return StructuredResult(pending_summary=str(pending.get("readback_text") or ""),
                                     state=self._mark_interrupted(prep, pending, gate))
@@ -139,6 +138,18 @@ class StructuredInput:
         return self._reply(stream, prep, human, text, "readback", say=say,
                            final_extra={"pending_action": pending},
                            state={"pending": pending_ref(pending, prep.control.turn_id)})
+
+    async def _reprompt(self, stream: TurnStream, prep: TurnPrep, human: Any, pending: dict[str, Any],
+                        gate: VoiceGate) -> StructuredResult:
+        """What: the s7.3 row 2 re-prompt, said only when the turn is otherwise adjacent (a delivered, uninterrupted
+        read-back or re-prompt of the current pending is the last line) and not blocked; otherwise the full read-back
+        is repeated. Use when: a voice yes-looking question with no final transcript. Inputs: stream, prep, human
+        line, pending, gate. Output: result (end_reason readback). Side effects: one confirmation.required.
+        Role: a re-prompt never clears readback_interrupted or stands in for an undelivered read-back (PR #56 I1)."""
+        previous = await self.last_turn(prep.control.session_id, prep.control.turn_id) if self.last_turn else None
+        if gate.blocked or not is_adjacent(prep.values, pending, previous):
+            return self._readback(stream, prep, human, pending)
+        return self._readback(stream, prep, human, pending, line=REPROMPT_LINE)
 
     @staticmethod
     def _mark_interrupted(prep: TurnPrep, pending: dict[str, Any], gate: VoiceGate | None) -> dict[str, Any]:
