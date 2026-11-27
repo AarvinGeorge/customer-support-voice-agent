@@ -11,7 +11,7 @@
  */
 import { MotionConfig } from "motion/react";
 import { PanelRight, Plus, Shield, ShieldCheck } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore, type StoreApi } from "zustand";
 import type { ConfirmInput, TurnRequest, VerificationInput, VerifiedPerson } from "@contracts/contracts";
 
@@ -130,9 +130,31 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
   const person = useStore(store, (s) => s.conversation.verified);
   const busy = useStore(store, (s) => s.connection.phase === "streaming");
   const inflight = useRef<AbortController | null>(null);
+  const messageRef = useRef<HTMLTextAreaElement | null>(null);
+  const pinRef = useRef<HTMLInputElement | null>(null);
+  const [account, setAccount] = useState("");
 
   useEffect(() => () => inflight.current?.abort(), []);
   useEffect(() => () => inflight.current?.abort(), [sessionId]);
+  useEffect(() => setAccount(""), [sessionId]);
+
+  /**
+   * What: moves keyboard focus after a card press settles, so it never falls to the page body
+   *   when the pressed control goes away (WCAG 2.4.3, review PR #24 I2).
+   * Use when: a Verify, Confirm or Cancel turn has ended.
+   * Inputs: "verify" or "decide".
+   * Output: none.
+   * Side effects: on the next task, focuses the PIN field of a retry card when one is showing
+   *   (verify only), else the message field.
+   * Role: helper.
+   */
+  const refocus = useCallback((after: "verify" | "decide") => {
+    setTimeout(() => {
+      const pin = pinRef.current;
+      if (after === "verify" && pin !== null && pin.isConnected) pin.focus();
+      else messageRef.current?.focus();
+    }, 0);
+  }, []);
 
   /**
    * What: sends one turn: a chat message, or a card's verification or confirm body.
@@ -175,10 +197,13 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
   const cards: CardActions = useMemo(
     () => ({
       disabled: busy,
-      verify: (verification: VerificationInput) => run({ verification }),
-      decide: (confirm: ConfirmInput) => run({ confirm }),
+      account,
+      setAccount,
+      pinRef,
+      verify: (verification: VerificationInput) => run({ verification }).finally(() => refocus("verify")),
+      decide: (confirm: ConfirmInput) => run({ confirm }).finally(() => refocus("decide")),
     }),
-    [busy, run],
+    [busy, run, account, refocus],
   );
 
   /**
@@ -234,7 +259,7 @@ export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }
             </div>
           </div>
           <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
-            <InputBar onSend={send} busy={busy} disabled={sessionId === null} />
+            <InputBar onSend={send} busy={busy} disabled={sessionId === null} inputRef={messageRef} />
           </div>
         </main>
       </div>

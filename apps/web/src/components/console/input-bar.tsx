@@ -10,7 +10,7 @@
  *   are CS-E-04.S5.T3.
  */
 import { ArrowUp, Mic } from "lucide-react";
-import { useState, type KeyboardEvent } from "react";
+import { useState, type KeyboardEvent, type Ref } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -26,6 +26,8 @@ export interface InputBarProps {
   onSend: (text: string) => void;
   busy: boolean;
   disabled: boolean;
+  /** Ref to the message field, so the shell can return focus to it after a card press. */
+  inputRef?: Ref<HTMLTextAreaElement>;
 }
 
 /**
@@ -36,7 +38,7 @@ export interface InputBarProps {
  * Side effects: see module.
  * Role: see module. Enter sends (ignored while an IME is composing); Shift+Enter is a newline.
  */
-export function InputBar({ onSend, busy, disabled }: InputBarProps) {
+export function InputBar({ onSend, busy, disabled, inputRef }: InputBarProps) {
   const [text, setText] = useState("");
   const canSend = !busy && !disabled && text.trim() !== "";
 
@@ -72,6 +74,7 @@ export function InputBar({ onSend, busy, disabled }: InputBarProps) {
     <div className="flex w-full flex-col items-center gap-2">
       <div className="flex w-full items-center gap-2 rounded-lg border border-rule bg-raised py-2.5 pr-2.5 pl-4 transition-colors duration-150 ease-out-expo focus-within:border-ember">
         <textarea
+          ref={inputRef}
           aria-label="Message"
           rows={1}
           value={text}

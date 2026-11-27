@@ -68,6 +68,8 @@ export interface TurnView {
   verificationRequired: VerificationRequiredEvent | null;
   verificationResult: VerificationResultEvent | null;
   confirmation: ConfirmationRequiredEvent | null;
+  /** Client time (epoch ms) when confirmation.required was applied, or null when not stamped. */
+  confirmationReceivedAt: number | null;
   actionResults: ActionResultEvent[];
   escalation: EscalatedEvent | null;
   fallbacks: ModelFallbackEvent[];
@@ -185,6 +187,7 @@ function newTurn(ev: SseEvent): TurnView {
     verificationRequired: null,
     verificationResult: null,
     confirmation: null,
+    confirmationReceivedAt: null,
     actionResults: [],
     escalation: null,
     fallbacks: [],
@@ -215,12 +218,12 @@ function withStep(turn: TurnView, stepId: string, update: (s: StepView) => StepV
 /**
  * What: the per-turn effect of one event.
  * Use when: reduceEvent accepted the event.
- * Inputs: the turn (lastSeq already advanced), the event.
+ * Inputs: the turn (lastSeq already advanced), the event, the client receipt time (or null).
  * Output: the new TurnView.
  * Side effects: none.
  * Role: one case per doc 07 s6.2 event type; the switch is exhaustive over SseEvent.
  */
-function applyToTurn(turn: TurnView, ev: SseEvent): TurnView {
+function applyToTurn(turn: TurnView, ev: SseEvent, receivedAt: number | null): TurnView {
   switch (ev.type) {
     case "turn.started":
       return { ...turn, started: ev };
@@ -239,7 +242,7 @@ function applyToTurn(turn: TurnView, ev: SseEvent): TurnView {
     case "verification.result":
       return { ...turn, verificationResult: ev };
     case "confirmation.required":
-      return { ...turn, confirmation: ev };
+      return { ...turn, confirmation: ev, confirmationReceivedAt: receivedAt };
     case "action.result":
       return { ...turn, actionResults: [...turn.actionResults, ev] };
     case "escalated":
@@ -290,19 +293,21 @@ function applyToSession(state: ConversationState, ev: SseEvent): ConversationSta
 /**
  * What: applies one SSE event to the conversation.
  * Use when: every event from streamTurn, the voice relay or a replay.
- * Inputs: the previous state, the event.
+ * Inputs: the previous state, the event, and the client time it arrived (epoch ms; null for a
+ *   replay without a clock). Only confirmation.required keeps it, to anchor the card's expiry
+ *   countdown so a remount never restarts it (review PR #24 I1).
  * Output: the next state, or the same object when the event is ignored: another session's event,
  *   a seq not above the turn's last applied seq (duplicate or out of order), or any event for a
  *   turn that already accepted its one turn.completed or was failed.
  * Side effects: none.
  * Role: the reducer.
  */
-export function reduceEvent(state: ConversationState, ev: SseEvent): ConversationState {
+export function reduceEvent(state: ConversationState, ev: SseEvent, receivedAt: number | null = null): ConversationState {
   if (state.sessionId !== null && ev.session_id !== state.sessionId) return state;
   const prev = state.turns[ev.turn_id];
   if (prev !== undefined && (prev.phase !== "streaming" || ev.seq <= prev.lastSeq)) return state;
   const base = prev ?? newTurn(ev);
-  const turn = applyToTurn({ ...base, lastSeq: ev.seq }, ev);
+  const turn = applyToTurn({ ...base, lastSeq: ev.seq }, ev, receivedAt);
   const next: ConversationState = {
     ...state,
     sessionId: state.sessionId ?? ev.session_id,
@@ -321,7 +326,7 @@ export function reduceEvent(state: ConversationState, ev: SseEvent): Conversatio
  * Role: convenience over reduceEvent.
  */
 export function replayEvents(events: readonly SseEvent[], start: ConversationState = initialConversationState): ConversationState {
-  return events.reduce(reduceEvent, start);
+  return events.reduce((s, e) => reduceEvent(s, e), start);
 }
 
 /**

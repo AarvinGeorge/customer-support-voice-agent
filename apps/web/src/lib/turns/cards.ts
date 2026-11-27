@@ -205,14 +205,19 @@ export function formatCountdown(ms: number): string {
 /**
  * What: the receipt words for one action.result (every outcome in doc 07 s6.2 and s7.3).
  * Use when: a turn has action results; the confirmation card's closed footer.
- * Inputs: the event, and the pending action it answers when known (for amount and invoice).
- * Output: a Receipt. "nothing was changed" is added only when `changed === false`.
+ * Inputs: the event, and the pending action it answers when known (for amount, invoice and kind).
+ * Output: a Receipt. "nothing was changed" is added only when `changed === false`; a failed
+ *   submit for approval says "nothing was sent" instead (s7.3, review PR #24 M9).
  * Side effects: none.
  * Role: copy rule.
  */
 export function receiptFor(ev: ActionResultEvent, pending: PendingPublic | null): Receipt {
-  const words = ACTION_WORDS[ev.action_type] ?? (ACTION_WORDS.other as { done: string; notDone: string });
+  const submit = pending?.kind === "submit_for_approval";
+  const words = submit
+    ? { done: "Sent for approval", notDone: "Request was not sent" }
+    : (ACTION_WORDS[ev.action_type] ?? (ACTION_WORDS.other as { done: string; notDone: string }));
   const unchanged = ev.changed === false ? "nothing was changed" : null;
+  const unsent = ev.changed === false ? (submit ? "nothing was sent" : "nothing was changed") : null;
   const ticket = ev.ticket?.display ?? null;
   const policy = ev.policy_refs[0];
   const rule = [ev.reason_codes[0], policy ? `${policy.title} §${policy.section}` : undefined].filter(Boolean).join(" · ") || null;
@@ -236,7 +241,7 @@ export function receiptFor(ev: ActionResultEvent, pending: PendingPublic | null)
     case "expired":
       return make("muted", "Request no longer active", unchanged);
     case "failed":
-      return make("error", words.notDone, join(unchanged, ticket));
+      return make("error", words.notDone, join(unsent, ticket));
     case "unconfirmed":
       return make("error", "Outcome unconfirmed", ticket);
     case "step_up_failed":
@@ -256,7 +261,9 @@ export function receiptFor(ev: ActionResultEvent, pending: PendingPublic | null)
  * Inputs: none (type).
  * Output: none (type).
  * Side effects: none.
- * Role: view index. `verificationHost` is the newest turn with verification.required;
+ * Role: view index. `verificationHost` is the newest turn with verification.required, or a later
+ *   turn whose verification.result was "unavailable" (the card moves below that line, review
+ *   PR #24 M5);
  *   `results` maps a pending action id to its latest action.result (it arrives in a later turn
  *   than the card); `confirmationTurn` maps a pending id to the newest turn that showed its card;
  *   `latestPendingId` is the pending id of the newest confirmation.required; `pendings` maps a
@@ -287,13 +294,20 @@ export function cardIndex(state: ConversationState): CardIndex {
   for (const id of state.turnOrder) {
     const turn = state.turns[id];
     if (!turn) continue;
-    if (turn.verificationRequired) verificationHost = id;
+    if (turn.verificationRequired || turn.verificationResult?.status === "unavailable") verificationHost = id;
     if (turn.confirmation) {
       confirmationTurn[turn.confirmation.pending.pending_action_id] = id;
       pendings[turn.confirmation.pending.pending_action_id] = turn.confirmation.pending;
       latestPendingId = turn.confirmation.pending.pending_action_id;
     }
-    for (const r of turn.actionResults) if (r.pending_action_id) results[r.pending_action_id] = r;
+    for (const r of turn.actionResults) {
+      if (r.pending_action_id) results[r.pending_action_id] = r;
+      // A press answered without a pending id (doc 07 s6.2 allows null) closes the open card it
+      // came from: the newest card, when this turn was started by a confirm press (M3).
+      else if (turn.started?.input_kind === "confirm" && latestPendingId !== null && !results[latestPendingId]) {
+        results[latestPendingId] = r;
+      }
+    }
   }
   return { verificationHost, results, confirmationTurn, latestPendingId, pendings };
 }
@@ -393,6 +407,26 @@ export function ruleTitle(turn: TurnView, reasonCode: string): string | null {
   for (const id of turn.stepOrder) {
     const rule = turn.steps[id]?.completed?.rule;
     if (rule && rule.reason_code === reasonCode) return rule.policy_ref.title;
+  }
+  return null;
+}
+
+/**
+ * What: the policy title for a reason code, from the given turn or else the newest earlier turn
+ *   whose prepare step names it.
+ * Use when: the card's Rule row, including a card shown again by a code read-back with no
+ *   prepare step of its own (review PR #24 M6).
+ * Inputs: the conversation, the card's turn id, the reason code.
+ * Output: the PolicyRef title, or null.
+ * Side effects: none.
+ * Role: lookup over ruleTitle.
+ */
+export function ruleTitleIn(state: ConversationState, turnId: string, reasonCode: string): string | null {
+  const end = state.turnOrder.indexOf(turnId);
+  for (let i = end; i >= 0; i -= 1) {
+    const turn = state.turns[state.turnOrder[i] as string];
+    const title = turn ? ruleTitle(turn, reasonCode) : null;
+    if (title !== null) return title;
   }
   return null;
 }
