@@ -12,6 +12,7 @@ from contracts.policy import load_policy
 
 from core.identity import attempts_left, normalize_account_id, normalize_pin, permissions_for
 from tests.conftest import TOKENS
+from tests.pin_probe import leaks
 
 POLICY = load_policy(Path(__file__).resolve().parents[3] / "data" / "policy.yaml")
 SID = "11111111-1111-4111-8111-111111111111"
@@ -66,7 +67,7 @@ def test_verify_bad_shape_is_422_and_never_echoes_the_pin(client, body):
     Use when: pytest runs. Inputs: client, a bad body. Output: none. Side effects: none. Role: doc 07 s11."""
     r = client.post("/v1/identity/verify", headers={**AGENT, "X-Session-Id": SID}, json=body)
     assert r.status_code == 422 and r.json()["error"]["code"] == "VALIDATION_ERROR"
-    assert "4821" not in r.text and "QS-10423" not in r.text
+    assert not leaks(r.text, "4821") and "QS-10423" not in r.text
 
 
 def test_verify_without_database_is_503_tool_error(client):

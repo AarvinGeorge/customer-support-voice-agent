@@ -23,6 +23,7 @@ from agent.models.usage import token_usage
 from agent.sse import TurnMeta, TurnOutcome, TurnStream, stream_agent_turn
 from agent.trajectory import INSERT_SQL, TrajectoryWriter, event_row
 from ingress_fakes import MemoryTurnLock, MemoryTurnStore
+from pin_probe import leaks
 
 ROOT = Path(__file__).resolve().parents[3]
 SID, VISITOR = "019a7c2e-5b10-7000-8000-00000000a001", "visitor-1"
@@ -93,7 +94,27 @@ def closed_port() -> int:
         return s.getsockname()[1]
 
 
-def test_event_row_maps_columns_and_redacts_the_payload():
+def _freeze_sse_clock(monkeypatch, microsecond: int) -> None:
+    """What: pin agent.sse's datetime.now to 2026-11-27T15:22:04.<microsecond>Z. Use when: a test must not depend on
+    the wall clock. Inputs: monkeypatch, microsecond. Output: none. Side effects: patches agent.sse.datetime.
+    Role: deterministic ts (a real microsecond like .482100 contains the PIN digits by chance)."""
+    import agent.sse as sse_mod
+    from datetime import datetime as real
+
+    class Frozen(real):
+        """What: datetime with a fixed now(). Use when: _freeze_sse_clock. Inputs: tz. Output: fixed datetime.
+        Side effects: none. Role: clock stub."""
+
+        @classmethod
+        def now(cls, tz=None):
+            """What: the frozen instant. Use when: TurnStream.emit. Inputs: tz. Output: datetime. Side effects: none. Role: stub."""
+            return real(2026, 11, 27, 15, 22, 4, microsecond, tzinfo=tz)
+
+    monkeypatch.setattr(sse_mod, "datetime", Frozen)
+
+
+def test_event_row_maps_columns_and_redacts_the_payload(monkeypatch):
+    _freeze_sse_clock(monkeypatch, 482100)  # the unlucky microsecond: ts must not matter to the PIN probe
     s = TurnStream(meta())
     ev = s.emit("step.started", step_id=f"{TID}:1", kind="tool", name="get_account_summary", label="Loading",
                 args_redacted={"email": "pat.lee@acme.com", "pin": "4821"})
@@ -104,7 +125,8 @@ def test_event_row_maps_columns_and_redacts_the_payload():
     assert ts == raw["ts"]
     body = payload.obj  # psycopg Jsonb wrapper
     assert body["args_redacted"] == {"email": "p***@acme.com", "pin": "[PIN]"}
-    assert "pat.lee" not in str(body) and "4821" not in str(body)
+    assert "pat.lee" not in str(body) and not leaks(str(body["args_redacted"]), "4821")
+    assert "482100" in body["ts"]  # the frozen unlucky timestamp is in the row, and the PIN probe ignores it
 
 
 async def test_events_reach_the_writer_in_one_batch_and_tokens_never_do():

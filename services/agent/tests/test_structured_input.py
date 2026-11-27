@@ -29,6 +29,7 @@ from agent.structured.verification import VERIFIED_THREAD_LINE
 from agent.tools import build_tools
 from agent.turn_body import TurnRunner
 from ingress_fakes import MemoryTurnLock, MemoryTurnStore
+from pin_probe import leaks
 
 SID, VISITOR = ex.SESSION_ID, "visitor-1"
 AGENT_TOKEN, COMMIT_TOKEN = "agent-tok", "commit-tok"
@@ -333,8 +334,8 @@ async def test_card_success_verifies_loads_context_and_continues_with_a_value_fr
     assert '<account_context untrusted="true">' in human.content
     v = await w.values()
     dumped = " ".join(str(m.content) for m in v["messages"])
-    assert ex.STUB_PIN not in dumped and "10423" not in dumped.replace(ex.ACCOUNT_ID, "")
-    assert ex.STUB_PIN not in str(outcome.final.model_dump()) and v["verified"] is True
+    assert not leaks(dumped, ex.STUB_PIN) and "10423" not in dumped.replace(ex.ACCOUNT_ID, "")
+    assert not leaks(str(outcome.final.model_dump()), ex.STUB_PIN) and v["verified"] is True
     assert w.flags.calls == [(SID, False, ex.CLAIMS.user_id)]
     assert w.core_calls("/identity/verify")[0].token == AGENT_TOKEN
 
