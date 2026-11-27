@@ -1,0 +1,14 @@
+# Variables render-env copies when set (compose.yaml has a default for each, except the first two, which preflight
+# requires on the VM). Not secrets, except none.
+SITE_ADDRESS
+SITE_ORIGIN
+EDGE_SUBNET
+FORWARDED_ALLOW_IPS
+LANGSMITH_TRACING
+LANGSMITH_PROJECT
+LANGSMITH_ENDPOINT
+DEMO_FAULTS_ENABLED
+FEATURE_A4
+REDIS_URL
+CORE_URL
+KNOWLEDGE_URL
