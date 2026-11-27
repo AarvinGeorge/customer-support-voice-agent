@@ -33,7 +33,8 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from agent.middleware.router import RouterMiddleware
-from agent.middleware.stubs import DeadlineAndFaultMiddleware, GroundingMiddleware, retry_on_placeholder
+from agent.middleware.deadline_fault import DeadlineAndFaultMiddleware, fault_run_metadata, model_retry_on
+from agent.middleware.stubs import GroundingMiddleware
 from agent.middleware.tool_guard import ToolGuardMiddleware
 from agent.middleware.visibility import ToolVisibilityMiddleware
 from agent.prompt import SYSTEM_PROMPT
@@ -56,10 +57,11 @@ MIDDLEWARE_ORDER: tuple[str, ...] = (
 CheckpointerFactory = Callable[[], Any]  # returns an async context manager yielding a saver
 
 
-def build_middleware(fallback_model: Any) -> list[AgentMiddleware[Any, Any]]:
+def build_middleware(fallback_model: Any, deadline_kwargs: dict[str, Any] | None = None
+                     ) -> list[AgentMiddleware[Any, Any]]:
     """What: the middleware list in MIDDLEWARE_ORDER.
     Use when: build_agent; the order test.
-    Inputs: the fallback chat model (role agent_fallback).
+    Inputs: the fallback chat model (role agent_fallback); optional DeadlineAndFaultMiddleware overrides (tests).
     Output: new middleware instances (fresh per agent, no shared state).
     Side effects: none.
     Role: single source of the stack order and the built-in settings (doc 07 s2.5, s8.1).
@@ -69,9 +71,10 @@ def build_middleware(fallback_model: Any) -> list[AgentMiddleware[Any, Any]]:
         ModelCallLimitMiddleware(run_limit=limits.MODEL_CALLS_PER_TURN, exit_behavior="end"),
         ToolVisibilityMiddleware(),
         ModelFallbackMiddleware(fallback_model),
-        ModelRetryMiddleware(max_retries=limits.MODEL_PRIMARY_RETRIES, retry_on=retry_on_placeholder,
-                             initial_delay=limits.MODEL_RETRY_BACKOFF_S, on_failure="error"),
-        DeadlineAndFaultMiddleware(),
+        # jitter off: the 0.5 s backoff is exact, as the predicate's budget check assumes (doc 07 s8.2)
+        ModelRetryMiddleware(max_retries=limits.MODEL_PRIMARY_RETRIES, retry_on=model_retry_on,
+                             initial_delay=limits.MODEL_RETRY_BACKOFF_S, on_failure="error", jitter=False),
+        DeadlineAndFaultMiddleware([fallback_model], **(deadline_kwargs or {})),
         AnthropicPromptCachingMiddleware(ttl="5m", unsupported_model_behavior="ignore"),
         GroundingMiddleware(),
         ToolGuardMiddleware(),
@@ -79,16 +82,17 @@ def build_middleware(fallback_model: Any) -> list[AgentMiddleware[Any, Any]]:
 
 
 def build_agent(model: Any, *, fallback_model: Any, checkpointer: BaseCheckpointSaver,
-                tools: Sequence[Any] = ()) -> Any:
+                tools: Sequence[Any] = (), deadline_kwargs: dict[str, Any] | None = None) -> Any:
     """What: compile the support agent graph.
     Use when: at startup inside an entered checkpointer factory; tests pass InMemorySaver.
-    Inputs: primary model, fallback model, checkpointer, tools (agent.tools.build_tools in the service).
+    Inputs: primary model, fallback model, checkpointer, tools (agent.tools.build_tools in the service),
+    DeadlineAndFaultMiddleware overrides (tests only).
     Output: CompiledStateGraph over SupportState.
     Side effects: none.
     Role: create_agent call site.
     """
     return create_agent(model, tools=list(tools), system_prompt=SYSTEM_PROMPT,
-                        middleware=build_middleware(fallback_model), state_schema=SupportState,
+                        middleware=build_middleware(fallback_model, deadline_kwargs), state_schema=SupportState,
                         checkpointer=checkpointer, name="quillstack_support")
 
 
@@ -116,12 +120,14 @@ def run_config(session_id: str, **extra: Any) -> dict[str, Any]:
     return {"configurable": {"thread_id": str(session_id)}, **extra}
 
 
-def turn_run_config(session_id: str, turn_id: str, **extra: Any) -> dict[str, Any]:
-    """What: the RunnableConfig for one agent turn: thread_id = session_id and LangSmith root run id = turn_id.
-    Use when: every agent turn (stream_agent_turn). Inputs: session_id, turn_id (uuid7 string), extra keys.
-    Output: run_config(...) plus run_id (uuid.UUID of turn_id). Side effects: none.
-    Role: doc 07 s1.2 X-Trace-Id = turn_id = LangSmith root run id (spike 7 PASS)."""
-    return run_config(session_id, run_id=uuid.UUID(str(turn_id)), **extra)
+def turn_run_config(session_id: str, turn_id: str, demo_fault: str | None = None, **extra: Any) -> dict[str, Any]:
+    """What: the RunnableConfig for one agent turn: thread_id = session_id and LangSmith root run id = turn_id;
+    a faulted turn also gets tag demo_fault and metadata fault_injected=true.
+    Use when: every agent turn (stream_agent_turn). Inputs: session_id, turn_id (uuid7 string), the gated demo
+    fault (TurnControl.demo_fault), extra keys.
+    Output: run_config(...) plus run_id (uuid.UUID of turn_id) and the fault tags. Side effects: none.
+    Role: doc 07 s1.2 X-Trace-Id = turn_id = LangSmith root run id (spike 7 PASS); s10 fault tag."""
+    return run_config(session_id, run_id=uuid.UUID(str(turn_id)), **fault_run_metadata(demo_fault), **extra)
 
 
 CHECKPOINTER_POOL_MAX = 4  # concurrent checkpoint reads and writes per replica (turns run in parallel)
