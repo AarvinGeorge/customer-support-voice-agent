@@ -1,7 +1,7 @@
 """What: the D-015 descriptor gate: every module, class and function carries a native doc comment with the six labels What:, Use when:, Inputs:, Output:, Side effects:, Role: ("none" is allowed).
 Use when: CI job `descriptors` (changed files only, against the merge base with origin/main) and locally. `--all` checks every tracked file and lists the backlog; `--base REF` changes the base (default origin/main).
 Inputs: the git repo at the current directory (or --root); .py files (checked with ast: module, class, def, async def, nested too) and .ts/.tsx files (JSDoc block before the module and before every top-level declaration that starts in column 0).
-Output: exit 0 and "descriptors: N files checked, 0 gaps"; exit 1 and one `path:line: name: problem` per gap, where problem is "missing" or "labels: <the missing labels>".
+Scope split (D-056): application source needs all six labels on every module, class and function; tests (`tests/`, `test_*.py`, `*.test.ts(x)`, `conftest.py`) and `spikes/` need a module descriptor only. Output: exit 0 and "descriptors: N files checked, 0 gaps"; exit 1 and one `path:line: name: problem` per gap, where problem is "missing" or "labels: <the missing labels>".
 Side effects: runs `git` (read-only) and reads files; prints. Role: the code-descriptor CI gate of CS-E-01.S2.T1 (D-015). Generated files are skipped by the explicit EXCLUDED lists below."""
 import argparse
 import ast
@@ -29,8 +29,13 @@ TS_DECL = re.compile(
     r"^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?"
     r"(function\*?|class|const|let|var|type|interface|enum)\b\s*([A-Za-z_$][\w$]*)?"
 )
-# The value of a const is itself a function: `= (..) =>`, `= x =>`, `= async ..`, `= function`.
-TS_FUNC_VALUE = re.compile(r"=\s*(?:async\s+)?(?:function\b|\([^()]*(?:\([^()]*\)[^()]*)*\)\s*(?::[^=]+)?=>|[\w$]+\s*=>|\($)")
+# The value after the `=` of a const is itself a function: `(..) =>` (params may span lines, have a generic list, a return
+# type or `async`), `x =>`, `function`, or a `memo(` / `forwardRef(` wrapper. A call such as `list.filter((e) => ..)` is a value.
+TS_FUNC_VALUE = re.compile(
+    r"^\s*(?:async\s+)?(?:<[^()]*?>\s*)?(?:\((?:[^()]|\([^()]*\))*\)\s*(?::[^=]*?)?=>|[\w$]+\s*=>|function\b"
+    r"|(?:React\.)?(?:memo|forwardRef)\b\s*(?:<[^()]*?>)?\s*\()"
+)
+TS_BARE_EQUALS = re.compile(r"(?<![=!<>])=(?![=>])")
 TS_DEFAULT_ANON = re.compile(r"^export\s+default\b")
 
 
@@ -51,7 +56,9 @@ def _labels_problem(text: str | None) -> str | None:
     Side effects: none. Role: the single rule of the gate."""
     if text is None:
         return "missing"
-    missing = [label for label in LABELS if not re.search(r"(?<![\w])" + re.escape(label), text)]
+    any_label = "|".join(re.escape(label) for label in LABELS)
+    missing = [label for label in LABELS
+               if not re.search(r"(?<![\w])" + re.escape(label) + rf"\s*(?!(?:{any_label}))[^\s*/]", text)]
     if len(missing) == len(LABELS):
         return "missing"
     return f"labels: {', '.join(missing)}" if missing else None
@@ -63,10 +70,22 @@ def is_excluded(path: str) -> bool:
     return path in EXCLUDED_PATHS or Path(path).name in EXCLUDED_NAMES
 
 
-def check_python(source: str, path: str) -> list[Gap]:
+def is_light(path: str) -> bool:
+    """What: is this a test or spike file (module descriptor only, D-056). Use when: choosing the rule for a file.
+    Inputs: a repo-relative posix path. Output: bool. Side effects: none.
+    Role: tests are `tests` or `test` directories, `test_*.py`, `*_test.py`, `conftest.py`, `*.test.ts(x)`; spikes are
+    under `spikes/`."""
+    p = Path(path)
+    name = p.name
+    return (bool({"tests", "test", "spikes"} & set(p.parts[:-1])) or name == "conftest.py"
+            or re.match(r"^(test_.*|.*_test)\.py$", name) is not None or re.match(r".*\.test\.tsx?$", name) is not None)
+
+
+def check_python(source: str, path: str, light: bool = False) -> list[Gap]:
     """What: check one Python source. Use when: a .py file is in scope. Inputs: source text, path for reports.
     Output: the gaps (module, every class, every def and async def at any depth). Side effects: none.
-    Role: the Python half of the gate. An empty file has nothing to document."""
+    Role: the Python half of the gate. An empty file has nothing to document. light=True (tests, spikes) reports only
+    the module gap."""
     if not source.strip():
         return []
     tree = ast.parse(source)
@@ -74,7 +93,7 @@ def check_python(source: str, path: str) -> list[Gap]:
     problem = _labels_problem(ast.get_docstring(tree, clean=False))
     if problem:
         gaps.append(Gap(path, 1, "<module>", problem))
-    for node in ast.walk(tree):
+    for node in [] if light else ast.walk(tree):
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             problem = _labels_problem(ast.get_docstring(node, clean=False))
             if problem:
@@ -92,18 +111,30 @@ def _block_before(lines: list[str], index: int) -> str | None:
     if i < 0 or not lines[i].rstrip().endswith("*/"):
         return None
     end = i
-    while i >= 0 and "/**" not in lines[i]:
+    while i >= 0 and not lines[i].lstrip().startswith("/*"):
         if i != end and "*/" in lines[i]:
             return None
         i -= 1
-    return "\n".join(lines[i : end + 1]) if i >= 0 else None
+    if i < 0 or not lines[i].lstrip().startswith("/**"):
+        return None  # a plain /* */ comment is not a descriptor and does not borrow an older block
+    return "\n".join(lines[i : end + 1])
 
 
-def check_ts(source: str, path: str) -> list[Gap]:
+def _is_function_value(lines: list[str], index: int) -> bool:
+    """What: is the const declared at this line a function. Use when: judging an unexported const. Inputs: all lines,
+    the declaration's index. Output: bool. Side effects: none.
+    Role: looks at up to 12 lines (to the first `;` line) so Prettier-style multi-line parameters are seen."""
+    head = " ".join(ln.strip() for ln in lines[index : index + 12])
+    eq = TS_BARE_EQUALS.search(head)
+    return bool(eq and TS_FUNC_VALUE.match(head[eq.end():]))
+
+
+def check_ts(source: str, path: str, light: bool = False) -> list[Gap]:
     """What: check one TypeScript source. Use when: a .ts or .tsx file is in scope. Inputs: source text, path.
     Output: the gaps: the module block (the first JSDoc block before any code, not attached to a declaration) and a
     JSDoc block above every column-0 declaration (function, class, const, let, var, type, interface, enum); an unexported const, let or var whose value is not an arrow function or function expression is a fixture value and is skipped.
-    Side effects: none. Role: the TypeScript half of the gate; class members and nested code are not checked."""
+    Side effects: none. Role: the TypeScript half of the gate; class members and nested code are not checked.
+    light=True (tests) reports only the module gap."""
     lines = source.splitlines()
     if not any(line.strip() for line in lines):
         return []
@@ -126,8 +157,7 @@ def check_ts(source: str, path: str) -> list[Gap]:
         match = TS_DECL.match(line)
         if match:
             exported = line.startswith("export")
-            ahead = line + (" " + lines[i + 1] if line.rstrip().endswith(("=", "(", "=>")) and i + 1 < len(lines) else "")
-            if match.group(1) in ("const", "let", "var") and not exported and not TS_FUNC_VALUE.search(ahead):
+            if match.group(1) in ("const", "let", "var") and not exported and not _is_function_value(lines, i):
                 continue  # a plain unexported value (a fixture constant), not behaviour
             decl_lines.append((i, match.group(2) or "default"))
         elif TS_DEFAULT_ANON.match(line):
@@ -154,7 +184,7 @@ def check_ts(source: str, path: str) -> list[Gap]:
     problem = _labels_problem(module_text)
     if problem:
         gaps.append(Gap(path, 1, "<module>", problem))
-    for i, name in decl_lines:
+    for i, name in ([] if light else decl_lines):
         problem = _labels_problem(_block_before(lines, i))
         if problem:
             gaps.append(Gap(path, i + 1, name, problem))
@@ -171,28 +201,36 @@ def _git(root: Path, *args: str) -> str:
 
 
 def collect_files(root: Path, all_files: bool, base: str) -> list[str]:
-    """What: the files to check. Use when: starting a run. Inputs: repo root, --all flag, base ref.
-    Output: repo-relative paths of .py/.ts/.tsx files that exist, minus the generated files; in changed mode the files
-    added, copied, modified or renamed between the merge base with `base` and HEAD (plus uncommitted edits).
-    Side effects: runs git. Role: scopes the gate."""
+    """What: the files to check. Use when: starting a run. Inputs: any directory inside the repo, --all flag, base ref.
+    Output: repo-relative paths (from the repo top level) of .py/.ts/.tsx files, minus the generated files; in changed
+    mode the files added, copied, modified or renamed between the merge base with `base` and HEAD (plus uncommitted
+    edits). Side effects: runs git; exits with a message when git lists a code file that is not on disk (a changed file
+    must never be skipped silently). Role: scopes the gate."""
+    top = Path(_git(root, "rev-parse", "--show-toplevel").strip())
     if all_files:
-        names = _git(root, "ls-files").splitlines()
+        raw = _git(top, "-c", "core.quotepath=off", "ls-files", "-z")
     else:
-        merge_base = _git(root, "merge-base", base, "HEAD").strip()
+        merge_base = _git(top, "merge-base", base, "HEAD").strip()
         if not merge_base:
             sys.exit(f"descriptors: no merge base between {base} and HEAD")
-        names = _git(root, "diff", "--name-only", "--diff-filter=ACMR", merge_base).splitlines()
-    return sorted(n for n in set(names) if n.endswith(CODE_SUFFIXES) and not is_excluded(n) and (root / n).is_file())
+        raw = _git(top, "-c", "core.quotepath=off", "diff", "-z", "--name-only", "--diff-filter=ACMR", merge_base)
+    listed = sorted(n for n in set(raw.split("\0")) if n.endswith(CODE_SUFFIXES) and not is_excluded(n))
+    missing = [n for n in listed if not (top / n).is_file()]
+    if missing:
+        sys.exit(f"descriptors: git lists changed files that are not on disk, refusing to skip them: {', '.join(missing)}")
+    return listed
 
 
 def run(root: Path, all_files: bool, base: str) -> int:
     """What: check the scoped files and print the gaps. Use when: from main() and tests. Inputs: repo root, --all, base.
     Output: exit code 0 (no gaps) or 1. Side effects: reads files, runs git, prints. Role: the gate's entry point."""
+    top = Path(_git(root, "rev-parse", "--show-toplevel").strip())
     files = collect_files(root, all_files, base)
     gaps: list[Gap] = []
     for name in files:
-        text = (root / name).read_text(encoding="utf-8")
-        gaps.extend(check_python(text, name) if name.endswith(".py") else check_ts(text, name))
+        text = (top / name).read_text(encoding="utf-8")
+        light = is_light(name)
+        gaps.extend(check_python(text, name, light) if name.endswith(".py") else check_ts(text, name, light))
     for gap in gaps:
         print(f"{gap.path}:{gap.line}: {gap.name}: {gap.problem}")
     mode = "all files" if all_files else f"changed vs {base}"

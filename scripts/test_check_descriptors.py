@@ -186,3 +186,146 @@ def test_ts_unexported_plain_constants_are_not_declarations() -> None:
     )
     got = {g.name for g in cd.check_ts(src, "a.ts")}
     assert got == {"helper", "E", "g"}
+
+
+# ---------------------------------------------------------------- fix round 1 (review PR #39, D-056)
+
+def test_light_paths_need_only_a_module_descriptor() -> None:
+    """What: tests and spikes are classified light, application source strict (D-056). Use when: pytest. Inputs: none.
+    Output: assert. Side effects: none. Role: the scope split."""
+    for p in ("services/core/tests/test_x.py", "services/core/tests/pg/conftest.py", "scripts/test_keys.py",
+              "spikes/agent/spike_01.py", "apps/web/src/lib/utils.test.ts", "apps/web/src/components/a.test.tsx"):
+        assert cd.is_light(p), p
+    for p in ("services/core/src/core/app.py", "packages/contracts/src/contracts/x.py", "apps/web/src/lib/utils.ts",
+              "scripts/check_descriptors.py", "infra/migrate.py"):
+        assert not cd.is_light(p), p
+
+
+def test_light_python_file_reports_only_the_module_gap(tmp_path: Path) -> None:
+    """What: a test file with a module descriptor and an undocumented function passes; without the module descriptor
+    it fails on the module only. Use when: pytest. Inputs: tmp_path. Output: assert. Side effects: git in tmp_path.
+    Role: D-056 for Python, through run()."""
+    _git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / "keep.txt").write_text("x")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "base")
+    _git(tmp_path, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(tmp_path, "switch", "-qc", "feature")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text(f'"""{GOOD}"""\n\n\ndef test_a() -> None:\n    return None\n')
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "feature")
+    assert cd.run(tmp_path, all_files=False, base="origin/main") == 0
+    (tmp_path / "tests" / "test_a.py").write_text("def test_a() -> None:\n    return None\n")
+    assert cd.run(tmp_path, all_files=False, base="origin/main") == 1
+
+
+def test_light_ts_file_reports_only_the_module_gap() -> None:
+    """What: check_ts with light=True ignores declarations. Use when: pytest. Inputs: none. Output: assert.
+    Side effects: none. Role: D-056 for TypeScript."""
+    src = 'import { a } from "a";\n\nexport function f(): void {}\n'
+    assert [g.name for g in cd.check_ts(src, "a.test.ts", light=True)] == ["<module>"]
+    assert cd.check_ts(_ts_block() + src, "a.test.ts", light=True) == []
+    assert cd.check_python("def f():\n    return 1\n", "tests/test_a.py", light=True)[0].name == "<module>"
+    assert len(cd.check_python("def f():\n    return 1\n", "tests/test_a.py", light=True)) == 1
+
+
+def _repo_with_change(tmp_path: Path, rel: str, text: str) -> None:
+    """What: a repo whose feature branch adds one file. Use when: root and path tests. Inputs: tmp_path, relative path,
+    text. Output: none. Side effects: git in tmp_path. Role: test helper."""
+    _git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / "keep.txt").write_text("x")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "base")
+    _git(tmp_path, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(tmp_path, "switch", "-qc", "feature")
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel).write_text(text)
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "feature")
+
+
+def test_running_from_a_subdirectory_still_checks_the_changed_files(tmp_path: Path) -> None:
+    """What: --root pointing at a subdirectory resolves the repo top level and checks the changed file (it used to
+    check 0 files and exit 0). Use when: pytest. Inputs: tmp_path. Output: assert. Side effects: git in tmp_path.
+    Role: review PR #39 I2."""
+    _repo_with_change(tmp_path, "services/x/src/x.py", "def f() -> None:\n    return None\n")
+    assert cd.run(tmp_path / "services" / "x", all_files=False, base="origin/main") == 1
+    assert cd.collect_files(tmp_path / "services" / "x", all_files=False, base="origin/main") == ["services/x/src/x.py"]
+
+
+def test_a_changed_file_that_cannot_be_read_is_an_error(monkeypatch, tmp_path: Path) -> None:
+    """What: git lists a code file that is not on disk: exit with a message, never skip it. Use when: pytest.
+    Inputs: monkeypatch, tmp_path. Output: assert. Side effects: none. Role: review PR #39 I2 (no vacuous green)."""
+    _repo_with_change(tmp_path, "a.py", f'"""{GOOD}"""\n')
+    real = cd._git
+
+    def fake(root: Path, *args: str) -> str:
+        """What: pretend the diff names a ghost file. Use when: collect_files calls git diff. Inputs: root, args.
+        Output: git output with one extra path. Side effects: none. Role: test double."""
+        out = real(root, *args)
+        return out + "ghost.py\0" if args and args[-1:] != ("--show-toplevel",) and "diff" in args else out
+
+    monkeypatch.setattr(cd, "_git", fake)
+    try:
+        cd.collect_files(tmp_path, all_files=False, base="origin/main")
+    except SystemExit as exc:
+        assert "ghost.py" in str(exc)
+    else:
+        raise AssertionError("a missing changed file must fail loudly")
+
+
+def test_non_ascii_path_is_checked(tmp_path: Path) -> None:
+    """What: a changed file with a non-ASCII name is listed and checked (git quotes such names by default).
+    Use when: pytest. Inputs: tmp_path. Output: assert. Side effects: git in tmp_path. Role: review PR #39 M4."""
+    _repo_with_change(tmp_path, "services/x/src/naïve.py", "def f() -> None:\n    return None\n")
+    assert cd.run(tmp_path, all_files=False, base="origin/main") == 1
+
+
+def test_ts_unexported_function_shapes_are_declarations() -> None:
+    """What: multi-line parameters, generic and async generic arrows, memo and forwardRef wrappers, and a typed const
+    are functions and need a block; value constants (a filter call, vi.hoisted) do not. Use when: pytest. Inputs: none.
+    Output: assert. Side effects: none. Role: review PR #39 I3."""
+    cases = {
+        "const h = (\n  a: string,\n  b: number,\n): void => {\n};\n": "h",
+        "const h = <T,>(a: T): T => a;\n": "h",
+        "const h = async <T,>(a: T): Promise<T> => a;\n": "h",
+        "const Card = memo(function Card() {\n  return null;\n});\n": "Card",
+        "const Btn = forwardRef((p, r) => null);\n": "Btn",
+        "const Btn = React.forwardRef<HTMLDivElement, P>((p, r) => null);\n": "Btn",
+        "const h: Handler = (a) => a;\n": "h",
+        "const h = function () {};\n": "h",
+    }
+    for code, name in cases.items():
+        src = _ts_block() + 'import { a } from "a";\n\n' + code
+        assert [g.name for g in cd.check_ts(src, "a.ts")] == [name], code
+    for code in ('const c1 = s1.filter((e) => e.ok);\n', 'const nav = vi.hoisted(() => ({ a: 1 }));\n',
+                 'const x: Record<string, () => void> = {};\n'):
+        src = _ts_block() + 'import { a } from "a";\n\n' + code
+        assert cd.check_ts(src, "a.ts") == [], code
+
+
+def test_ts_exported_constants_always_need_a_block() -> None:
+    """What: an exported const of any value needs a block. Use when: pytest. Inputs: none. Output: assert.
+    Side effects: none. Role: review PR #39 I3 (exported consts)."""
+    src = _ts_block() + 'import { a } from "a";\n\nexport const LIMITS = { a: 1 };\nexport const f = (\n  a: string,\n): void => {};\n'
+    assert [g.name for g in cd.check_ts(src, "a.ts")] == ["LIMITS", "f"]
+
+
+def test_empty_labels_and_stale_block_are_gaps() -> None:
+    """What: a docstring with the six labels but no text is a gap; a plain one-line comment does not borrow an older
+    JSDoc above it. Use when: pytest. Inputs: none. Output: assert. Side effects: none. Role: review PR #39 M1, M3."""
+    empty = '"""What: Use when: Inputs: Output: Side effects: Role:"""\n'
+    assert cd.check_python(empty, "a.py")[0].name == "<module>"
+    one = "/** What: x. Use when: y. Inputs: n. Output: n. Side effects: n. Role: z. */\n"
+    src = _ts_block() + 'import { a } from "a";\n\n' + one + "export function a1(): void {}\n\n/* plain */\nexport function b1(): void {}\n"
+    assert [g.name for g in cd.check_ts(src, "a.ts")] == ["b1"]
+
+
+def test_a_block_that_mentions_a_glob_inside_its_text_is_still_one_block() -> None:
+    """What: a descriptor whose text contains "/api/*" is read as one block (a line holding the characters /* mid-line
+    is not a comment start). Use when: pytest. Inputs: none. Output: assert. Side effects: none.
+    Role: regression found by running the fixed checker on apps/web/src/lib/api/client.ts."""
+    block = _ts_block().replace(" * Use when: y.", " * Use when: any fetch to `/api/*` fails.")
+    src = _ts_block() + 'import { a } from "a";\n\n' + block + "export function f(): void {}\n"
+    assert cd.check_ts(src, "a.ts") == []
