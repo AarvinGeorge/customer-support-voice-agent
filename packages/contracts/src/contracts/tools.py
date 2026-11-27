@@ -90,12 +90,16 @@ TOOL_ARGS: dict[str, type[StrictModel]] = {
 }
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
-    "search_kb": "Search Quillstack help articles. Use for any product, policy or billing-rule question.",
+    "search_kb": ("Search Quillstack help articles. Call it first for every question except pure small talk and "
+                  "lookups of the customer's own account data, including questions that seem off-topic or not covered; "
+                  "the result decides whether to answer, clarify, decline or hand over."),
     "request_verification": "Ask the customer to verify identity before account data or an action.",
     "get_account_summary": "Read the verified customer's account and profile summary.",
     "list_charges": "List the verified account's recent charges, optionally by last four digits or date.",
     "list_tickets": "List the customer's support tickets, optionally by last four digits.",
-    "prepare_refund": "Prepare a refund for one charge. Changes nothing; the rules decide and the customer confirms later.",
+    "prepare_refund": ("Prepare a refund for one charge. Call it for every refund request from a verified customer; do "
+                       "not judge eligibility yourself. The rules decide eligibility and the result gives the decision, "
+                       "the reason and the policy reference to quote. Changes nothing; the customer confirms later."),
     "create_ticket": "Open a ticket for the support team when the customer asks for a human or needs a commitment.",
 }
 

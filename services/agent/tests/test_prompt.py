@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+from pathlib import Path
+
+import yaml
 
 from agent.prompt import SYSTEM_PROMPT, SYSTEM_PROMPT_SHA256, TurnContext, build_turn_message
 
@@ -71,3 +74,34 @@ def test_system_prompt_forbids_advice_the_article_does_not_state():
     # the best place to check", which no article says, and Gate 2 replaced the whole answer with the clarify line.
     assert "Do not add tips, advice or next steps of your own" in SYSTEM_PROMPT
 
+
+
+# CS-E-03.F8 and F7 (golden G-04, G-06): the model decided what core's rule engine and the retrieval gates own.
+# Eligibility is keyed by policy.yaml's roles, tiers and blocked statuses plus numeric windows and caps, so the
+# prompt naming any of them, or any number, means a business rule moved into the prompt.
+POLICY = yaml.safe_load((Path(__file__).resolve().parents[3] / "data" / "policy.yaml").read_text())
+
+
+def policy_terms(text: str) -> list[str]:
+    """What: the policy.yaml role, tier and blocked-status names (and their spaced forms) found in text.
+    Use when: prompt and tool-description rule checks. Inputs: text. Output: sorted matches.
+    Side effects: none. Role: test helper; the vocabulary comes from the policy file, not a hand list."""
+    words = [*POLICY["roles"]["all_roles"], *POLICY["tiers"], *POLICY["actions"]["refund"]["blocked_statuses"]]
+    forms = {f for w in words for f in (w, w.replace("_", " "))}
+    return sorted(f for f in forms if re.search(rf"\b{re.escape(f)}s?\b", text, re.IGNORECASE))
+
+
+def test_policy_terms_can_fail():
+    # Positive control: the helper finds a planted rule, so an empty result below means something.
+    assert policy_terms("Only owners and billing admins can refund a Pro plan unless past due") == [
+        "billing admin", "owner", "past due", "pro"]
+
+
+def test_system_prompt_states_no_eligibility_rule():
+    assert policy_terms(SYSTEM_PROMPT) == []
+    assert not re.search(r"\d", SYSTEM_PROMPT)  # no windows, caps or amounts
+
+
+def test_system_prompt_sends_refunds_and_questions_to_the_deciding_tools():
+    assert "prepare_refund" in SYSTEM_PROMPT  # every refund request goes to the rule engine
+    assert "search_kb" in SYSTEM_PROMPT  # every question that is not small talk or an account lookup is searched
