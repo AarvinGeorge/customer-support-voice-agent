@@ -148,3 +148,18 @@ def test_main_exit_codes(tmp_path: Path) -> None:
     assert guard.main([str(tmp_path)]) == 0
     _tool(tmp_path, "bad.py", "from agent.clients.core_commit import CoreCommitClient\n")
     assert guard.main([str(tmp_path)]) == 1
+
+
+def test_structured_confirm_module_fails(tmp_path: Path) -> None:
+    """What: the confirm module at its built path `agent.structured.confirm` is forbidden to tools, in the absolute,
+    package-then-name and relative forms. Use when: pytest. Inputs: tmp_path. Output: assert. Side effects: none.
+    Role: CS-E-03.S7.T8 (the confirm module is never importable from tool modules)."""
+    assert len(_bad(tmp_path, "from agent.structured.confirm import Confirmer\n", "a.py")) == 1
+    assert len(_bad(tmp_path, "from agent.structured import confirm\n", "b.py")) == 2
+    assert len(_bad(tmp_path, "from ..structured.confirm import Confirmer\n", "c.py")) == 3
+
+
+def test_structured_pending_helpers_are_allowed(tmp_path: Path) -> None:
+    """What: the token-free helpers next to confirm stay importable from tools. Use when: pytest. Inputs: tmp_path.
+    Output: assert. Side effects: none. Role: no false positive for agent.structured.pending."""
+    assert _bad(tmp_path, "from agent.structured.pending import card_from_prepare\n") == []

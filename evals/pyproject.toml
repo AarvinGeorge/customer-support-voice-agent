@@ -1,0 +1,32 @@
+[project]
+name = "quillstack-evals"
+version = "0.1.0"
+description = "Quillstack golden runner: drives the agent HTTP API, grades with code graders, prints Gate 1 counts (CS-E-06.S1)"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "psycopg[binary]>=3.2",
+    "quillstack-contracts",
+    "pyyaml>=6.0",
+    "jsonschema>=4.23",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3", "fastapi>=0.115"]
+
+[tool.uv]
+# The package is this directory itself (`python -m evals run` from the repo root), so nothing is installed.
+package = false
+
+[tool.uv.sources]
+# Non-editable: macOS hides .pth files in .venv and Python 3.13 skips them (BRIEF known trap).
+quillstack-contracts = { path = "../packages/contracts", editable = false }
+
+[tool.pytest.ini_options]
+# the repo root must be importable so `evals` is the package in this directory
+pythonpath = [".."]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.pyright]
+extraPaths = [".."]

@@ -1,6 +1,7 @@
 /**
  * What: the Zustand store for the console conversation: reducer state, the unified thread (user
- *   items and turns, chat and voice), connection state, the one-shot demo fault, and sendTurn
+ *   items and turns, chat and voice), connection state, the one-shot demo fault, the 429 and 503
+ *   limit notice, and sendTurn
  *   (streamTurn wired into the reducer; a turn that ends without turn.completed is failed).
  * Use when: React components read conversation state (useTurnStore) or send a turn.
  * Inputs: SseEvents via apply, TurnRequests via sendTurn, the fault toggle via armFault.
@@ -68,6 +69,54 @@ function preTurnError(err: unknown): { message: string; retryable: boolean } {
 }
 
 /**
+ * What: a request the agent refused before any stream opened with 429 (rate limit) or 503 (busy
+ *   or a dependency down): what to show in the console's banner, how long to wait, and the
+ *   customer's text so the input bar can keep the draft.
+ * Use when: the console renders its limit banner (CS-E-07.S1.T4, doc 07 s9).
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: `untilMs` is when sending unlocks (null when the server gave no wait); `id` changes per
+ *   notice so the input bar restores the draft once.
+ */
+export interface LimitNotice {
+  id: number;
+  status: 429 | 503;
+  code: string;
+  message: string;
+  retryAfterS: number | null;
+  untilMs: number | null;
+  limit: string | null;
+  scope: string | null;
+  draft: string | null;
+}
+
+/**
+ * What: the limit notice for an error, when it is a pre-stream 429 or 503.
+ * Use when: sendTurn fails before its first event.
+ * Inputs: the error, the request text, a notice id, now in ms.
+ * Output: LimitNotice or null.
+ * Side effects: none.
+ * Role: helper; details.limit and details.scope come from the doc 07 s9 429 body.
+ */
+function limitNotice(err: unknown, draft: string | null, id: number, now: number): LimitNotice | null {
+  if (!(err instanceof ApiError) || (err.status !== 429 && err.status !== 503)) return null;
+  const details = (err.body.details ?? {}) as Record<string, unknown>;
+  const text = (v: unknown) => (typeof v === "string" && v !== "" ? v : null);
+  return {
+    id,
+    status: err.status,
+    code: err.body.code,
+    message: err.body.message,
+    retryAfterS: err.retryAfterS,
+    untilMs: err.retryAfterS !== null && err.retryAfterS > 0 ? now + err.retryAfterS * 1000 : null,
+    limit: text(details.limit),
+    scope: text(details.scope),
+    draft,
+  };
+}
+
+/**
  * What: per-call options for sendTurn.
  * Use when: aborting a turn, or tests injecting fetch and watchdog windows.
  * Inputs: none (type).
@@ -97,6 +146,11 @@ export interface TurnStoreState {
   connection: { phase: "idle" | "streaming"; error: TurnError | null };
   /** The fault the drawer toggle armed for the next turn request, or null (doc 07 s10). */
   armedFault: DemoFault | null;
+  /** The fault the most recent turn request carried (null when it carried none). */
+  lastFault: DemoFault | null;
+  /** The current 429 or 503 notice, or null. */
+  limit: LimitNotice | null;
+  clearLimit: () => void;
   apply: (event: SseEvent) => void;
   addUserMessage: (text: string, mode: "chat" | "voice") => void;
   reset: () => void;
@@ -141,6 +195,9 @@ export function createTurnStore(): StoreApi<TurnStoreState> {
     thread: [],
     connection: { phase: "idle", error: null },
     armedFault: null,
+    lastFault: null,
+    limit: null,
+    clearLimit: () => set({ limit: null }),
     apply: (event) => {
       const prev = get().conversation;
       const next = reduceEvent(prev, event, Date.now());
@@ -153,7 +210,7 @@ export function createTurnStore(): StoreApi<TurnStoreState> {
       epoch += 1;
       for (const ctrl of inflight) ctrl.abort();
       inflight.clear();
-      set({ conversation: initialConversationState, thread: [], connection: { phase: "idle", error: null }, armedFault: null });
+      set({ conversation: initialConversationState, thread: [], connection: { phase: "idle", error: null }, armedFault: null, lastFault: null, limit: null });
     },
     retry: async (errorId, sessionId, opts = {}) => {
       const item = get().thread.find((i) => i.id === errorId);
@@ -176,7 +233,7 @@ export function createTurnStore(): StoreApi<TurnStoreState> {
       else outer?.addEventListener("abort", () => ctrl.abort(), { once: true });
       inflight.add(ctrl);
       const user = request.text ? userItem(request.text, "chat") : null;
-      set({ thread: user ? [...get().thread, user] : get().thread, connection: { phase: "streaming", error: null } });
+      set({ thread: user ? [...get().thread, user] : get().thread, connection: { phase: "streaming", error: null }, lastFault: fault, limit: null });
       const seen = new Set<string>();
       try {
         const result = await streamTurn(sessionId, request, {
@@ -198,12 +255,15 @@ export function createTurnStore(): StoreApi<TurnStoreState> {
         let conversation = get().conversation;
         for (const turnId of seen) conversation = failTurn(conversation, turnId, reason);
         let thread = get().thread;
-        if (seen.size === 0 && reason !== "aborted") {
+        userSeq += 1;
+        const limit = seen.size === 0 ? limitNotice(err, request.text ?? null, userSeq, Date.now()) : null;
+        if (limit !== null) {
+          thread = thread.filter((i) => i.id !== user?.id);
+        } else if (seen.size === 0 && reason !== "aborted") {
           const { message, retryable } = preTurnError(err);
-          userSeq += 1;
           thread = [...thread, { kind: "error", id: `error-${userSeq}`, text: request.text ?? null, userItemId: user?.id ?? null, message, retryable }];
         }
-        set({ conversation, thread, connection: { phase: "idle", error: err as TurnError } });
+        set({ conversation, thread, limit, connection: { phase: "idle", error: err as TurnError } });
         throw err;
       } finally {
         inflight.delete(ctrl);
