@@ -1,0 +1,49 @@
+# What: the single public edge for Quillstack (doc 06 s9, s10; doc 07 s15.1).
+# Use when: Compose mounts it at /etc/caddy/Caddyfile in the `caddy` service.
+# Inputs: env SITE_ADDRESS. Unset or ":80" serves plain http (local, published on 127.0.0.1:EDGE_PORT).
+#   Set to a domain on the VM (for example "demo.example.com") and Caddy gets a certificate and serves https.
+# Output: /api/* round robin to agent_a and agent_b (active health checks on /api/readyz), everything else to web.
+# Side effects: terminates TLS on the VM; sets X-Forwarded-For for the agent (doc 07 s9); adds security headers.
+# Role: only public service; core, knowledge, postgres and redis are never routed here.
+
+{
+	admin off
+}
+
+{$SITE_ADDRESS::80} {
+	# 64 KB request body cap (doc 07 s15.1 row 5): the largest legitimate body is a turn or transcript post.
+	request_body {
+		max_size 64KB
+	}
+
+	header {
+		# 'unsafe-inline' for script and style is required by the Next.js inline bootstrap without per-request nonces.
+		# connect-src names the OpenAI Realtime SDP exchange (WebRTC media is not governed by CSP).
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; connect-src 'self' https://api.openai.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		Permissions-Policy "microphone=(self)"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Agent API. Round robin over both replicas; a replica that fails /api/readyz is taken out until it recovers.
+	# flush_interval -1 sends every SSE chunk immediately (no buffering). The turn deadline is 45 s, so no read timeout shorter than that.
+	handle /api/* {
+		reverse_proxy agent_a:8000 agent_b:8000 {
+			lb_policy round_robin
+			lb_try_duration 3s
+			health_uri /api/readyz
+			health_interval 5s
+			health_timeout 3s
+			health_status 2xx
+			flush_interval -1
+		}
+	}
+
+	# Everything else is the Next.js app.
+	handle {
+		reverse_proxy web:3000 {
+			flush_interval -1
+		}
+	}
+}
