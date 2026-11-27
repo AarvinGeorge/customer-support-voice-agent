@@ -26,6 +26,7 @@ from contracts.policy import PolicyConfig, Priority, Queue
 from core.audit import AuditEvent, write_audit
 from core.clock import Clock
 from core.errors import CoreError
+from core.identity import load_claims, read_unverified
 
 Stage = Literal["open", "pending_approval", "resolved", "closed"]
 Actor = Literal["customer", "agent", "operator", "system"]
@@ -124,17 +125,19 @@ def _event(conn: Any, ticket_id: str, kind: str, *, actor: str, actor_id: str | 
                  "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", (ticket_id, kind, from_stage, to_stage, actor, actor_id, body, at))
 
 
-def load_requester(conn: Any, session_id: uuid.UUID | str, now: datetime) -> Requester:
+def load_requester(conn: Any, session_id: uuid.UUID | str, now: datetime, policy: PolicyConfig) -> Requester:
     """What: the session claim's user, account and tier, or the typed refusal. Use when: create_ticket starts.
-    Inputs: connection, session id, now. Output: Requester when the claims name a user and have not expired.
-    Side effects: one SELECT. Raises CoreError REQUESTER_UNKNOWN (details reason requester_unknown, verify_locked) for
-    no claims, failed, locked or expired claims. Role: D-070; verify_locked lets the agent pick the no-ticket line."""
-    row = conn.execute("SELECT c.user_id, c.account_id, c.expires_at, a.tier, c.verify_locked FROM session_claims c "
-                       "LEFT JOIN accounts a ON a.id = c.account_id WHERE c.session_id = %s", (session_id,)).fetchone()
-    if row and row[0] and row[1] and row[2] and row[2] > now and row[3]:
-        return Requester(row[0], row[1], row[3])
+    Inputs: connection, session id, now, policy. Output: Requester when identity.load_claims finds an unexpired
+    verification. Side effects: one SELECT (two on a refusal). Raises CoreError REQUESTER_UNKNOWN (details reason
+    requester_unknown, verify_locked) for no claims, failed, locked or expired claims.
+    Role: D-070; one definition of "verified" (identity.load_claims, review M-4); verify_locked lets the agent pick
+    the no-ticket line."""
+    claims = load_claims(conn, session_id, now, policy)
+    if claims is not None:
+        return Requester(claims.user_id, claims.account_id, claims.tier)
+    locked = read_unverified(conn, session_id, policy).verify_locked
     raise CoreError("REQUESTER_UNKNOWN", "A ticket needs a verified customer, so our team knows who to follow up with.",
-                    details={"reason": "requester_unknown", "verify_locked": bool(row and row[4])})
+                    details={"reason": "requester_unknown", "verify_locked": locked})
 
 
 def insert_ticket(conn: Any, *, policy: PolicyConfig, clock: Clock, session_id: uuid.UUID | str,
@@ -206,7 +209,7 @@ def create_ticket(conn: Any, *, policy: PolicyConfig, clock: Clock, session_id: 
     (details.existing) at the per-account daily limit. Role: doc 07 s3.4 and D-070: requester check first, then merge
     (a merge makes no ticket, so it is never limited), then the daily limit counts every ticket of the account
     created on the business date, then insert."""
-    who = load_requester(conn, session_id, clock.now())
+    who = load_requester(conn, session_id, clock.now(), policy)
     conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"tickets:{who.account_id}",))
     open_row = conn.execute(
         "SELECT id FROM tickets WHERE account_id = %s AND category = %s AND stage = 'open' "

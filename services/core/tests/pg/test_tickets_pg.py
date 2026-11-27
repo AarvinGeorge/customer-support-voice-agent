@@ -408,17 +408,22 @@ def test_http_idempotency_replay_and_key_reuse(http, owner_url):
     assert clash.status_code == 422 and clash.json()["error"]["details"]["reason"] == "idempotency_key_reused"
 
 
-def test_http_unverified_session_gets_403_requester_unknown(http):
+def test_http_unverified_session_gets_403_requester_unknown(http, owner_url):
     """What: over the wire an anonymous session gets 403 REQUESTER_UNKNOWN (class access_denied, changed false) and
-    nothing is stored for the key, so the same key works after the session verifies. Use when: always.
+    nothing is stored for the key; one refusal audit row is written. Use when: always.
     Inputs: http fixture. Output: assertions. Side effects: committed rows, removed. Role: D-070 typed refusal."""
     _c, _w, post, _ = http
-    r = post(payload("bug"), key="u1", session=uuid.uuid4())
+    anon = uuid.uuid4()
+    r = post(payload("bug"), key="u1", session=anon)
     assert r.status_code == 403, r.text
     err = r.json()["error"]
     assert (err["code"], err["class"], err["changed"], err["retryable"]) == ("REQUESTER_UNKNOWN", "access_denied",
                                                                               False, False)
     assert err["details"] == {"reason": "requester_unknown", "verify_locked": False}
+    with psycopg.connect(owner_url) as o:  # the refusal is audited in its own transaction (review M-6)
+        (row,) = o.execute("SELECT event, decision, result_status, args_redacted->>'code' FROM audit_events "
+                           "WHERE session_id = %s", (anon,)).fetchall()
+    assert row == ("ticket_create_refused", "error", 403, "REQUESTER_UNKNOWN")
 
 
 def test_http_concurrent_creates_respect_the_daily_limit(http, owner_url):
