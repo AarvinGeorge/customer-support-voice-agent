@@ -42,6 +42,7 @@ VISITOR = "visitor-1"
 SID = "019a7c2e-5b10-7000-8000-00000000b001"
 OTHER_SID = "019a7c2e-5b10-7000-8000-00000000b002"
 ORIGIN = "https://test"
+COMMIT_FROM_ENV = "commit-from-env-" + "x" * 27  # 43 characters, the keys.py gen shape
 MODELS = Path(__file__).resolve().parents[3] / "data" / "models.yaml"
 ANSWER = "Refunds on Pro are allowed within 30 days of the charge, per our refund policy."
 
@@ -487,7 +488,7 @@ def fake_rt() -> Any:
 
 
 def test_wire_app_attaches_one_ingress_to_turns_and_voice(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CORE_TOKEN_COMMIT", "commit-from-env")
+    monkeypatch.setenv("CORE_TOKEN_COMMIT", COMMIT_FROM_ENV)
     built: dict[str, Any] = {}
 
     def fake_runtime(cfg: Settings, *, http: Any, checkpointer: Any, registry: Any = None) -> Any:
@@ -508,7 +509,7 @@ def test_wire_app_attaches_one_ingress_to_turns_and_voice(monkeypatch: pytest.Mo
     body = ingress.run_agent
     assert isinstance(body, TurnRunner) and isinstance(body.structured, StructuredInput)
     assert body.structured.last_turn == ingress.store.last_turn  # typed yes can commit (rereview PR #47 N1)
-    assert body.structured.confirmer.client._token == "commit-from-env"
+    assert body.structured.confirmer.client._token == COMMIT_FROM_ENV
     assert body.cost_of is not None
 
 
@@ -569,7 +570,7 @@ async def test_body_reuses_a_turn_control_that_ingress_already_bound() -> None:
 
 
 def test_wire_app_passes_the_trajectory_writer_when_the_app_has_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CORE_TOKEN_COMMIT", "commit-from-env")
+    monkeypatch.setenv("CORE_TOKEN_COMMIT", COMMIT_FROM_ENV)
     got: dict[str, Any] = {}
     monkeypatch.setattr(composition, "build_agent_runtime", lambda cfg, **kw: fake_rt())
     monkeypatch.setattr(composition, "Ingress", lambda *a, **kw: got.update(kw) or SimpleNamespace())
@@ -635,16 +636,20 @@ def wired_state(**over: Any) -> Any:
     w = World()
     w.ingress.trajectory = object()
     w.voice.ingress = w.ingress
-    state = SimpleNamespace(ingress=w.ingress, voice=w.voice, trajectory=w.ingress.trajectory)
+    state = SimpleNamespace(ingress=w.ingress, voice=w.voice, trajectory=w.ingress.trajectory,
+                            settings=settings(core_token_agent=STRONG_A, knowledge_token_agent=STRONG_K))
     for k, v in over.items():
         setattr(state, k, v)
     return SimpleNamespace(state=state)
 
 
+STRONG_A, STRONG_K, STRONG_C = "a" * 43, "b" * 43, "c" * 43  # the shape keys.py gen writes (43 characters)
+
+
 def test_wiring_gaps_is_empty_for_the_production_shape_apart_from_the_named_pending_pieces() -> None:
     gaps, pending = composition.wiring_gaps(wired_state())
     assert gaps == []
-    assert set(pending) == set(composition.PENDING_HOOKS)
+    assert all(p.startswith(("Gate 2 verifier", "PIN scanner")) for p in pending), pending
 
 
 @pytest.mark.parametrize("over,gap", [
@@ -680,10 +685,205 @@ def test_assert_wired_raises_naming_the_gap() -> None:
         composition.assert_wired(app)
 
 
-def test_pending_list_is_current_so_part_2_must_remove_entries() -> None:
+def test_gate_2_is_named_pending_exactly_while_the_grounding_stub_is_in_the_stack() -> None:
     from agent.middleware.stubs import STUB_NAMES
-    # Every pending hook must still be a placeholder; once its PR lands this fails until the entry is removed.
-    assert set(composition.PENDING_HOOKS) == set(STUB_NAMES)
+    _, pending = composition.wiring_gaps(wired_state())
+    named = any(p.startswith("Gate 2 verifier") for p in pending)
+    assert named == ("GroundingMiddleware" in STUB_NAMES), pending
+
+
+def test_the_pin_scanner_is_named_pending_when_its_module_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+    real = importlib.import_module
+
+    def no_pin_guard(name: str, *a: Any) -> Any:
+        """What: import_module without agent.pin_guard. Use when: this test. Inputs: module name. Output: module.
+        Side effects: none. Role: fake."""
+        if name == "agent.pin_guard":
+            raise ModuleNotFoundError(name)
+        return real(name, *a)
+
+    monkeypatch.setattr(composition.importlib, "import_module", no_pin_guard)
+    _, pending = composition.wiring_gaps(wired_state())
+    assert any(p.startswith("PIN scanner") and "absent" in p for p in pending), pending
+
+
+def test_the_pin_scanner_is_named_pending_when_it_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    import agent.ingress as ingress_module
+    fake = types.ModuleType("agent.pin_guard")
+
+    def scan_input(inp: Any, ctx: Any) -> Any:
+        """What: a scanner that changes nothing. Use when: this test. Inputs: input, context. Output: same input.
+        Side effects: none. Role: fake no-op."""
+        return SimpleNamespace(inp=inp, refuse=False, redacted=0)
+
+    fake.scan_input = scan_input  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "agent.pin_guard", fake)
+    monkeypatch.setattr(ingress_module, "scan_input", scan_input, raising=False)
+    _, pending = composition.wiring_gaps(wired_state())
+    assert any(p.startswith("PIN scanner") and "no-op" in p for p in pending), pending
+
+
+def test_the_pin_scanner_is_not_pending_when_ingress_runs_a_real_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    import agent.ingress as ingress_module
+    fake = types.ModuleType("agent.pin_guard")
+
+    def scan_input(inp: Any, ctx: Any) -> Any:
+        """What: a scanner that redacts the probe PIN. Use when: this test. Inputs: input, context.
+        Output: Scanned-like. Side effects: none. Role: fake real scanner."""
+        from dataclasses import replace
+        return SimpleNamespace(inp=replace(inp, text=(inp.text or "").replace("4821", "[PIN]")), refuse=True,
+                               redacted=1)
+
+    fake.scan_input = scan_input  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "agent.pin_guard", fake)
+    monkeypatch.setattr(ingress_module, "scan_input", scan_input, raising=False)
+    _, pending = composition.wiring_gaps(wired_state())
+    assert not any(p.startswith("PIN scanner") for p in pending), pending
+
+
+@pytest.mark.parametrize("field,name", [("core_token_agent", "CORE_TOKEN_AGENT"),
+                                        ("knowledge_token_agent", "KNOWLEDGE_TOKEN_AGENT"),
+                                        ("session_signing_key", "SESSION_SIGNING_KEY")])
+@pytest.mark.parametrize("value", ["", "   ", "changeme", "replace-me-with-a-real-token-please", "short-token"])
+def test_wiring_gaps_rejects_an_empty_or_placeholder_secret(field: str, name: str, value: str) -> None:
+    app = wired_state()
+    app.state.settings = settings(**{"core_token_agent": STRONG_A, "knowledge_token_agent": STRONG_K, field: value})
+    gaps, _ = composition.wiring_gaps(app)
+    assert any(g.startswith(f"secret {name}") for g in gaps), gaps
+    assert all(value.strip() == "" or value not in g for g in gaps)  # the value itself is never echoed
+
+
+@pytest.mark.parametrize("value", [None, "", "  ", "changeme", "short-token"])
+def test_commit_client_from_env_refuses_an_absent_empty_or_placeholder_token(monkeypatch: pytest.MonkeyPatch,
+                                                                             value: str | None) -> None:
+    if value is None:
+        monkeypatch.delenv("CORE_TOKEN_COMMIT", raising=False)
+    else:
+        monkeypatch.setenv("CORE_TOKEN_COMMIT", value)
+    with pytest.raises(ValueError, match="CORE_TOKEN_COMMIT") as exc:
+        CoreCommitClient.from_env("http://core", http=httpx.AsyncClient())
+    assert value is None or value.strip() == "" or value not in str(exc.value)
+
+
+def test_wire_app_keeps_the_cause_so_the_startup_error_names_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CORE_TOKEN_COMMIT", "")
+    monkeypatch.setattr(composition, "build_agent_runtime", lambda cfg, **kw: fake_rt())
+    state = SimpleNamespace(checkpointer=object(), pg_pool=object(), redis=object(), http=object(), voice=None,
+                            settings=settings(core_token_agent=STRONG_A, knowledge_token_agent=STRONG_K))
+    app = SimpleNamespace(state=state)
+    assert composition.wire_app(app, state.settings) is None  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="ingress.*CORE_TOKEN_COMMIT"):
+        composition.assert_wired(app)
+
+
+def test_wiring_gaps_flags_a_turn_runner_without_flags_or_cost_of() -> None:
+    app = wired_state()
+    app.state.ingress.run_agent.flags = None
+    gaps, _ = composition.wiring_gaps(app)
+    assert any(g.startswith("session flags") for g in gaps), gaps
+    app = wired_state()
+    app.state.ingress.run_agent.cost_of = None
+    gaps, _ = composition.wiring_gaps(app)
+    assert any(g.startswith("cost_of") for g in gaps), gaps
+
+
+PENDING = ["Gate 2 verifier: test", "PIN scanner: test"]
+
+
+def test_assert_wired_fails_on_pending_safety_pieces_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = wired_state()
+    app.state.settings = settings(site_address="demo.example.com")
+    monkeypatch.setattr(composition, "wiring_gaps", lambda a: ([], PENDING))
+    with pytest.raises(RuntimeError, match="Gate 2 verifier.*PIN scanner"):
+        composition.assert_wired(app)
+
+
+def test_assert_wired_only_warns_on_pending_safety_pieces_in_local_dev(monkeypatch: pytest.MonkeyPatch,
+                                                                      caplog: pytest.LogCaptureFixture) -> None:
+    app = wired_state()
+    app.state.settings = settings(site_address=":80")
+    monkeypatch.setattr(composition, "wiring_gaps", lambda a: ([], PENDING))
+    composition.assert_wired(app)
+    assert "wiring pending: Gate 2 verifier" in caplog.text and "wiring pending: PIN scanner" in caplog.text
+
+
+@pytest.mark.parametrize("site,env,prod", [
+    ("", "", False), (":80", "", False), (":3084", "", False), ("localhost", "", False),
+    ("localhost:8080", "", False), ("127.0.0.1", "", False), ("http://localhost", "", False),
+    ("demo.example.com", "", True), ("https://demo.example.com", "", True), ("203.0.113.7.sslip.io", "", True),
+    (":80", "production", True), ("", "PRODUCTION", True), ("", "dev", False)])
+def test_settings_production_is_a_public_site_address_or_agent_env_production(site: str, env: str,
+                                                                              prod: bool) -> None:
+    assert settings(site_address=site, agent_env=env).production is prod
+
+
+def test_settings_read_site_address_and_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SITE_ADDRESS", "demo.example.com")
+    monkeypatch.setenv("AGENT_ENV", "production")
+    s = Settings.from_env()
+    assert (s.site_address, s.agent_env, s.production) == ("demo.example.com", "production", True)
+
+
+# ---- the lifespan must call assert_wired (review PR #58 I3) ----
+
+class _NoTrajectory:
+    """What: a TrajectoryWriter stand-in with no database. Use when: lifespan tests. Inputs: any.
+    Output: start and aclose. Side effects: none. Role: fake."""
+
+    def __init__(self, *a: Any, **kw: Any) -> None:
+        """What: ignore arguments. Use when: the lifespan. Inputs: any. Output: none. Side effects: none.
+        Role: fake."""
+
+    async def start(self) -> None:
+        """What: nothing. Use when: the lifespan. Inputs: none. Output: none. Side effects: none. Role: fake."""
+
+    async def aclose(self) -> None:
+        """What: nothing. Use when: shutdown. Inputs: none. Output: none. Side effects: none. Role: fake."""
+
+
+def _none_checkpointer() -> Any:
+    """What: a checkpointer factory that yields None (as if the database never came up). Use when: lifespan tests.
+    Inputs: none. Output: async context manager. Side effects: none. Role: fake."""
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def cm() -> AsyncIterator[None]:
+        """What: yield None. Use when: the lifespan. Inputs: none. Output: None. Side effects: none. Role: fake."""
+        yield None
+
+    return cm()
+
+
+async def test_app_lifespan_fails_startup_when_the_turn_path_is_not_wired(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agent.main as main_module
+    monkeypatch.setattr(main_module, "TrajectoryWriter", _NoTrajectory)
+    app = create_app(settings(agent_db_url="postgresql://nobody@127.0.0.1:1/none", redis_url="redis://127.0.0.1:1/0",
+                              models_path="/nonexistent/models.yaml", core_token_agent=STRONG_A,
+                              knowledge_token_agent=STRONG_K),
+                     checkpointer_factory=_none_checkpointer)
+    with pytest.raises(RuntimeError, match=r"turn path not wired: ingress: .*\(cause: no checkpointer"):
+        async with app.router.lifespan_context(app):
+            pass
+
+
+async def test_app_lifespan_fails_startup_on_pending_safety_pieces_in_production(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    import agent.main as main_module
+    monkeypatch.setattr(main_module, "TrajectoryWriter", _NoTrajectory)
+    monkeypatch.setattr(main_module, "wire_app", lambda app, cfg: None)
+    monkeypatch.setattr(composition, "wiring_gaps", lambda a: ([], PENDING))
+    app = create_app(settings(agent_db_url="postgresql://nobody@127.0.0.1:1/none", redis_url="redis://127.0.0.1:1/0",
+                              models_path="/nonexistent/models.yaml", site_address="demo.example.com"),
+                     checkpointer_factory=_none_checkpointer)
+    with pytest.raises(RuntimeError, match="production.*Gate 2 verifier"):
+        async with app.router.lifespan_context(app):
+            pass
 
 
 def test_wiring_gaps_flags_a_body_without_structured_input_or_without_last_turn() -> None:

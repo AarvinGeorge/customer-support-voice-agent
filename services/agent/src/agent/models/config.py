@@ -76,7 +76,7 @@ class ModelsConfig(BaseModel):
     @model_validator(mode="after")
     def _check_roles(self) -> "ModelsConfig":
         """What: require every role and the chat roles' timeouts. Use when: pydantic validation of models.yaml.
-        Inputs: self. Output: self; ValueError on a missing role or timeout. Side effects: none. Role: validator."""
+        Inputs: self. Output: self; ValueError on a missing role or timeout, or effort none off OpenAI. Side effects: none. Role: validator."""
         missing = [r for r in REQUIRED_ROLES if r not in self.roles]
         if missing:
             raise ValueError(f"missing roles: {', '.join(missing)}")
@@ -92,6 +92,8 @@ class ModelsConfig(BaseModel):
         for name, r in self.roles.items():
             if r.price is None:
                 raise ValueError(f"role {name}: price block is required")
+            if r.effort == "none" and r.provider != "openai":
+                raise ValueError(f"role {name}: effort none is OpenAI only (tools on chat completions)")
         return self
 
 
