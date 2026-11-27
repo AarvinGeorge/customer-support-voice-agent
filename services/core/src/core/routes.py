@@ -2,7 +2,7 @@
 Use when: the app is assembled. Inputs: none. Output: SLICE_ROUTES, register_routes.
 Side effects: registers the scopes in auth.ROUTE_SCOPES.
 Role: the route table. Handlers are 501 stubs; the task that owns a route replaces its stub here
-(identity S1.T1, reads S13.T3, prepare/commit S2; tickets S3.T1 is built). Designed-only routes (operator, step-up,
+(prepare/commit S2; tickets S3.T1, identity S1.T1 and reads S13.T3 are built). Designed-only routes (operator, step-up,
 billing email, grace extension, preferences, profile; doc 09 s1.2) are deliberately absent."""
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from fastapi.responses import JSONResponse
 
 from core.auth import scoped_route
 from core.errors import STUB_NOT_IMPLEMENTED, envelope_response
+from core.identity_routes import identity_verify, session_claims
+from core.reads_routes import me_charges, me_context, me_tickets
 from core.tickets_routes import tickets_create
 
 
@@ -56,7 +58,9 @@ def register_routes(app: FastAPI, overrides: dict[str, Callable[..., Any]] | Non
     """What: register every slice route on the app. Use when: create_app. Inputs: the app, optional handlers by
     route name (how later tasks plug in). Output: none. Side effects: adds routes, fills auth.ROUTE_SCOPES.
     Role: single place the route set is defined (routes go on the app itself so tests can list them)."""
-    built: dict[str, Callable[..., Any]] = {"tickets_create": tickets_create, **(overrides or {})}
+    built: dict[str, Callable[..., Any]] = {"tickets_create": tickets_create, "identity_verify": identity_verify,
+                                            "session_claims": session_claims, "me_context": me_context, "me_charges": me_charges,
+                                            "me_tickets": me_tickets, **(overrides or {})}
     for method, path, scope, name in SLICE_ROUTES:
         handler = built.get(name) or _stub(name)
         scoped_route(app, method, path, scope, handler, name=name, response_model=None)
