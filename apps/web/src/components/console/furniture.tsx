@@ -24,7 +24,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { Streamdown } from "streamdown";
+import { defaultRehypePlugins, Streamdown } from "streamdown";
 
 import { Button } from "@/components/ui/button";
 import { safeHref, type AnswerState, type CitationView, type DeclineNote, type ErrorRow, type FallbackNotice, type TicketChipView } from "@/lib/turns/furniture";
@@ -173,7 +173,7 @@ const CHIP = `inline-flex max-w-full items-center gap-1.5 rounded-full border bg
  *   noreferrer); other links render as their text; images never render.
  * Side effects: none (no element can fetch a remote resource).
  * Role: markdown renderer (doc 07 s6.2 FinalAnswer.text "markdown allowed"). Model text is
- *   untrusted: Streamdown keeps its sanitize and harden plugins, every other element is unwrapped
+ *   untrusted: raw HTML stays text (ANSWER_REHYPE drops the raw plugin), every other element is unwrapped
  *   to its text (MARKDOWN_ELEMENTS), and img maps to nothing, so a prompt-injected answer cannot
  *   load a tracking image or link to mailto, tel, same-origin or other schemes.
  */
@@ -186,6 +186,22 @@ const CHIP = `inline-flex max-w-full items-center gap-1.5 rounded-full border bg
  * Role: allow list (review PR #29 I1 and M6: no images, media, headings, tables or raw HTML
  *   widgets in a support answer).
  */
+/**
+ * What: the rehype plugins for model markdown: Streamdown's sanitize and harden, without its raw
+ *   HTML plugin, so raw HTML in the text stays literal text and never becomes DOM.
+ * Use when: AnswerMarkdown.
+ * Inputs: none.
+ * Output: a plugin list.
+ * Side effects: throws at load if Streamdown stops exporting either plugin (fail loudly, never
+ *   render without the sanitizer).
+ * Role: guard (doc 07 s5.3 model output is untrusted; review PR #29 R1).
+ */
+const ANSWER_REHYPE = (["sanitize", "harden"] as const).map((name) => {
+  const plugin = defaultRehypePlugins[name];
+  if (plugin === undefined) throw new Error(`streamdown has no default rehype plugin "${name}"`);
+  return plugin;
+});
+
 const MARKDOWN_ELEMENTS = ["p", "br", "ul", "ol", "li", "strong", "em", "del", "code", "a", "span"] as const;
 
 export function AnswerMarkdown({ text, streaming }: { text: string; streaming: boolean }) {
@@ -196,6 +212,7 @@ export function AnswerMarkdown({ text, streaming }: { text: string; streaming: b
         parseIncompleteMarkdown={streaming}
         controls={false}
         linkSafety={{ enabled: false }}
+        rehypePlugins={ANSWER_REHYPE}
         allowedElements={MARKDOWN_ELEMENTS}
         unwrapDisallowed
         components={{
