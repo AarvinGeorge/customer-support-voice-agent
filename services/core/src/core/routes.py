@@ -18,6 +18,7 @@ from core.actions_routes import (grace_prepare, pending_cancel, pending_commit, 
                                  refund_prepare)
 from core.auth import scoped_route
 from core.errors import STUB_NOT_IMPLEMENTED, envelope_response
+from core.faults import tool_error_fault
 from core.identity_routes import identity_verify, session_claims
 from core.reads_routes import me_charges, me_context, me_tickets
 from core.tickets_routes import tickets_create
@@ -58,6 +59,10 @@ SLICE_ROUTES: list[tuple[str, str, str, str]] = [
 ]
 
 
+# Routes that honour the demo tool_error fault (doc 07 s10): every prepare and the commit. Nothing else is faultable.
+FAULTABLE = frozenset({"refund_prepare", "grace_prepare", "pending_commit"})
+
+
 def register_routes(app: FastAPI, overrides: dict[str, Callable[..., Any]] | None = None) -> None:
     """What: register every slice route on the app. Use when: create_app. Inputs: the app, optional handlers by
     route name (how later tasks plug in). Output: none. Side effects: adds routes, fills auth.ROUTE_SCOPES.
@@ -70,4 +75,5 @@ def register_routes(app: FastAPI, overrides: dict[str, Callable[..., Any]] | Non
                                             "pending_cancel": pending_cancel, **(overrides or {})}
     for method, path, scope, name in SLICE_ROUTES:
         handler = built.get(name) or _stub(name)
-        scoped_route(app, method, path, scope, handler, name=name, response_model=None)
+        scoped_route(app, method, path, scope, handler, [tool_error_fault] if name in FAULTABLE else None, name=name,
+                     response_model=None)

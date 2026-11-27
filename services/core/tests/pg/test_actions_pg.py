@@ -80,18 +80,19 @@ def build_world(c: psycopg.Connection) -> SimpleNamespace:
 
 
 @pytest.fixture
-def world(app_url, owner_url, migrated):
+def world(request, app_url, owner_url, migrated):
     """What: a TestClient on the real pool with a shared FixedClock, the data set and call helpers; removes every row
-    at teardown. Use when: action tests. Inputs: urls. Output: namespace with client, clock, prepare, act, status.
+    at teardown. Use when: action tests (DEMO_FAULTS_ENABLED false; a test turns it on with
+    `@pytest.mark.parametrize("world", [True], indirect=True)`). Inputs: urls. Output: namespace with client, clock, prepare, act, status.
     Side effects: committed rows, removed at teardown. Role: end-to-end harness."""
     settings = Settings(token_agent=TOKENS["agent_tools"], token_commit=TOKENS["agent_commit"], token_ops=TOKENS["ops"],
-                        db_url=app_url, demo_faults=False, policy_path=str(POLICY_PATH))
+                        db_url=app_url, demo_faults=bool(getattr(request, "param", False)), policy_path=str(POLICY_PATH))
     with psycopg.connect(app_url, autocommit=True) as c:
         w = build_world(c)
     w.clock = FixedClock(START)
     w.app_url = app_url
     with TestClient(create_app(settings, clock=w.clock)) as client:
-        def headers(token: str, session, turn: str | None, key: str | None) -> dict[str, str]:
+        def headers(token: str, session, turn: str | None, key: str | None, fault: str | None = None) -> dict[str, str]:
             """What: request headers for one call. Use when: any call. Inputs: token name, session, turn id,
             idempotency key. Output: dict. Side effects: none. Role: helper."""
             h = {"Authorization": f"Bearer {TOKENS[token]}", "X-Session-Id": str(session), "X-Mode": "chat"}
@@ -99,20 +100,22 @@ def world(app_url, owner_url, migrated):
                 h["X-Turn-Id"] = turn
             if key:
                 h["Idempotency-Key"] = key
+            if fault:
+                h["X-Demo-Fault"] = fault
             return h
 
-        def prepare(session, charge_ref, *, turn="turn-1", key=None, reason="duplicate"):
+        def prepare(session, charge_ref, *, turn="turn-1", key=None, reason="duplicate", fault=None):
             """What: POST refund prepare as agent_tools. Use when: prepare tests. Inputs: session, charge_ref, turn,
             key, reason. Output: response. Side effects: the prepare. Role: helper."""
             return client.post("/v1/actions/refund/prepare",
-                               headers=headers("agent_tools", session, turn, key or f"{session}:{uuid.uuid4()}"),
+                               headers=headers("agent_tools", session, turn, key or f"{session}:{uuid.uuid4()}", fault),
                                json={"charge_ref": charge_ref, "reason": reason, "note": "charged twice"})
 
-        def act(verb, pid, session, *, turn="turn-2", token="agent_commit"):
+        def act(verb, pid, session, *, turn="turn-2", token="agent_commit", fault=None):
             """What: POST commit, submit or cancel as agent_commit. Use when: T5 tests. Inputs: verb, pending id,
             session, turn, token. Output: response. Side effects: the action. Role: helper."""
             key = pid if verb == "commit" else f"{pid}:{verb}"
-            return client.post(f"/v1/actions/pending/{pid}/{verb}", headers=headers(token, session, turn, key), json={})
+            return client.post(f"/v1/actions/pending/{pid}/{verb}", headers=headers(token, session, turn, key, fault), json={})
 
         def status(pid, session, token="agent_tools"):
             """What: GET pending status. Use when: status checks. Inputs: pending id, session, token.
@@ -492,6 +495,61 @@ def test_pending_rows_are_private_to_their_session(world):
     assert world.act("cancel", pid, world.s_owner2).status_code == 404
     assert world.status("PA-00000000", world.s_owner).status_code == 404
     assert q(world, "SELECT state FROM pending_actions WHERE id = %s", pid)[0][0] == "prepared"
+
+
+# ---------------------------------------------------------------- CS-E-07.S1.T1 demo tool_error fault
+
+def _fault_audit(w, session) -> int:
+    """What: count fault_injected audit rows of a session. Use when: fault tests. Inputs: world, session id.
+    Output: count. Side effects: none. Role: assertion helper (audit rows are append-only and stay)."""
+    return q(w, "SELECT count(*) FROM audit_events WHERE session_id = %s AND event = 'fault_injected'", session)[0][0]
+
+
+@pytest.mark.parametrize("world", [True], indirect=True)
+def test_faulted_commit_leaves_the_row_prepared(world):
+    """What: flag on: a commit with X-Demo-Fault tool_error is 503 TOOL_ERROR (fault_injected, changed false) before any
+    transaction; the row stays `prepared`, no action_history row, the charge is untouched, one fault_injected audit row
+    exists; the same commit without the header then succeeds. Use when: always. Inputs: world (flag on).
+    Output: assertions. Side effects: rows. Role: CS-E-07.S1.T1 Done-when, doc 07 s10 (S5 script: fault on the yes turn)."""
+    pid = world.prepare(world.s_owner, {"id": world.c1}, turn="turn-1").json()["pending_action_id"]
+    r = world.act("commit", pid, world.s_owner, turn="turn-2", fault="tool_error")
+    assert r.status_code == 503, r.text
+    e = r.json()["error"]
+    assert (e["code"], e["retryable"], e["changed"], e["fault_injected"]) == ("TOOL_ERROR", True, False, True)
+    assert q(world, "SELECT state FROM pending_actions WHERE id = %s", pid)[0][0] == "prepared"
+    assert q(world, "SELECT count(*) FROM action_history WHERE pending_action_id = %s", pid)[0][0] == 0
+    assert q(world, "SELECT status FROM charges WHERE id = %s", world.c1)[0][0] == "paid"
+    assert _fault_audit(world, world.s_owner) == 1
+    assert world.status(pid, world.s_owner).json()["state"] == "prepared"  # reads ignore the fault
+    ok = world.act("commit", pid, world.s_owner, turn="turn-2", fault="tool_error")  # the retry is faulted too
+    assert ok.status_code == 503 and _fault_audit(world, world.s_owner) == 2
+    done = world.act("commit", pid, world.s_owner, turn="turn-2")
+    assert done.status_code == 200 and done.json()["status"] == "committed"
+
+
+@pytest.mark.parametrize("world", [True], indirect=True)
+def test_faulted_prepare_creates_no_pending_row(world):
+    """What: flag on: a faulted prepare is 503 TOOL_ERROR, creates no pending row and no stored idempotency result, and
+    writes one fault_injected audit row; the same key without the header then prepares normally. Use when: always.
+    Inputs: world (flag on). Output: assertions. Side effects: rows. Role: doc 07 s10 (S5 script: fault on the prepare turn)."""
+    before = q(world, "SELECT count(*) FROM pending_actions WHERE account_id = %s", world.pro)[0][0]
+    r = world.prepare(world.s_owner, {"id": world.c1}, key="fault-key-1", fault="tool_error")
+    assert r.status_code == 503 and r.json()["error"]["fault_injected"] is True
+    assert q(world, "SELECT count(*) FROM pending_actions WHERE account_id = %s", world.pro)[0][0] == before
+    assert q(world, "SELECT count(*) FROM idempotency WHERE key = %s", "fault-key-1")[0][0] == 0
+    assert _fault_audit(world, world.s_owner) == 1
+    ok = world.prepare(world.s_owner, {"id": world.c1}, key="fault-key-1")
+    assert ok.status_code == 200 and ok.json()["state"] == "prepared"
+
+
+def test_flag_off_ignores_the_header_on_commit(world):
+    """What: flag off: the same faulted commit succeeds and writes no fault_injected audit row. Use when: always.
+    Inputs: world (flag off, the default). Output: assertions. Side effects: rows.
+    Role: CS-E-07.S1.T1 Done-when second half (the logging half is in tests/test_faults.py)."""
+    pid = world.prepare(world.s_owner, {"id": world.c1}, turn="turn-1", fault="tool_error").json()["pending_action_id"]
+    r = world.act("commit", pid, world.s_owner, turn="turn-2", fault="tool_error")
+    assert r.status_code == 200 and r.json()["status"] == "committed"
+    assert _fault_audit(world, world.s_owner) == 0
 
 
 # ---------------------------------------------------------------- fix round 1 (review PR #37, D-055)
