@@ -34,8 +34,17 @@ UNKNOWN_NOTE = ("No result is available, so the answer is unknown. Do not treat 
 def _strip_format_chars(text: str) -> str:
     """What: remove Unicode format characters (category Cf: zero-width space and joiners, BOM, bidi controls).
     Use when: inside harden. Inputs: text. Output: text without them. Side effects: none.
+    Also removes the non-Cf default-ignorable marks (U+034F, U+115F, U+1160, U+180B to U+180D, U+3164,
+    U+FE00 to U+FE0F, U+E0100 to U+E01EF).
     Role: a zero-width character between "<" and "/tool_result" must not hide the tag."""
-    return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    return "".join(ch for ch in text if unicodedata.category(ch) != "Cf" and not _is_ignorable_mark(ord(ch)))
+
+
+def _is_ignorable_mark(cp: int) -> bool:
+    """What: true for a default-ignorable code point that is not category Cf. Use when: _strip_format_chars.
+    Inputs: code point. Output: bool. Side effects: none. Role: review of PR #35, M3."""
+    return (cp in (0x034F, 0x115F, 0x1160, 0x3164) or 0x180B <= cp <= 0x180D or 0xFE00 <= cp <= 0xFE0F
+            or 0xE0100 <= cp <= 0xE01EF)
 
 
 def harden(text: str) -> str:
