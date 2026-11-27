@@ -165,4 +165,16 @@ describe("Inspector drawer", () => {
     expect(within(drawer).getByText(/Numbers arrive when the turn finishes/)).toBeTruthy();
     expect(within(drawer).getByText("Thought it through")).toBeTruthy();
   });
+
+  it("a turn picked with Inspect is forgotten when the session changes (back to the latest turn)", () => {
+    const store = replayed(s1);
+    const view = render(<ConsoleShell sessionId="s" store={store} />);
+    fireEvent.click(screen.getAllByRole("button", { name: /Inspect turn 1/ })[0] as HTMLElement);
+    const drawer = screen.getByRole("complementary", { name: "Inspector" });
+    expect(within(drawer).getByText("Turn 1 of 4")).toBeTruthy();
+    view.rerender(<ConsoleShell sessionId="s" store={store} />);
+    expect(within(drawer).getByText("Turn 1 of 4")).toBeTruthy();
+    view.rerender(<ConsoleShell sessionId="s2" store={store} />);
+    expect(within(screen.getByRole("complementary", { name: "Inspector" })).getByText("Turn 4 of 4")).toBeTruthy();
+  });
 });

@@ -359,3 +359,14 @@ def test_truly_empty_labels_are_still_gaps_in_jsdoc() -> None:
     assert cd.check_ts(one + IMP, "a.ts")[0].problem == "labels: Role:"
     py = '"""What: Use when: y. Inputs: n. Output: n. Side effects: n. Role: z."""\n'
     assert cd.check_python(py, "a.py")[0].problem == "labels: What:"
+
+
+def test_ts_two_descriptors_on_one_declaration_is_a_gap() -> None:
+    """What: a declaration with two stacked descriptor blocks is reported as a duplicate, while a module block directly above
+    the first declaration's block is fine. Use when: pytest. Inputs: none. Output: assert. Side effects: none.
+    Role: catches an orphaned descriptor left behind by a reorder (review PR #70 I1)."""
+    ok = _ts_block() + _ts_block() + "export const a = 1;\n"
+    assert cd.check_ts(ok, "a.ts") == []
+    bad = _ts_block() + "\n" + _ts_block() + "export const a = 1;\n\n" + _ts_block() + _ts_block() + "export const b = 2;\n"
+    got = [(g.name, g.problem.split(":")[0]) for g in cd.check_ts(bad, "a.ts")]
+    assert got == [("b", "duplicate")]

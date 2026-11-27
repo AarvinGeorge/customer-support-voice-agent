@@ -15,6 +15,8 @@ from contracts.core_api import PendingPublic
 from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
+from agent.line_ids import INGRESS, ROUTE, line_id
+
 CONFIRM_LABELS = {"refund": "Confirm refund", "billing_email": "Confirm email change"}
 SUBMIT_LABEL = "Send for approval"
 
@@ -22,13 +24,13 @@ SUBMIT_LABEL = "Send for approval"
 def ingress_message_id(turn_id: str) -> str:
     """What: the id of a deterministic ingress line. Use when: appending a reply. Inputs: turn id. Output: id.
     Side effects: none. Role: lets adjacency find "a code re-prompt about it"."""
-    return f"ingress-{turn_id}"
+    return line_id(INGRESS, turn_id)
 
 
 def route_message_id(turn_id: str) -> str:
     """What: the id RouterMiddleware gives its line. Use when: adjacency. Inputs: turn id. Output: id.
     Side effects: none. Role: matches agent.middleware.router (route-{turn_id})."""
-    return f"route-{turn_id}"
+    return line_id(ROUTE, turn_id)
 
 
 def is_adjacent(values: dict[str, Any], pending: dict[str, Any], previous: tuple[str, str] | None) -> bool:

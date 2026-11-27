@@ -13,7 +13,7 @@
  */
 import { CircleAlert, Clock, Ellipsis, Keyboard, Mic, MicOff, Pause, PhoneOff, Square, Volume2, type LucideIcon } from "lucide-react";
 import { useReducedMotion } from "motion/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { VoiceSnapshot } from "@/lib/voice/client";
@@ -137,24 +137,26 @@ export interface VoiceBarsProps {
 export function VoiceBars({ levels, reducedMotion, schedule, cancel }: VoiceBarsProps) {
   const agentRef = useRef<HTMLDivElement | null>(null);
   const youRef = useRef<HTMLDivElement | null>(null);
-  const levelsRef = useRef(levels);
-  levelsRef.current = levels;
+  // The loops read the latest levels without restarting: an Effect Event (react.dev,
+  // "Separating Events from Effects").
+  const readLevels = useEffectEvent(() => levels());
+  const scheduleFrame = useEffectEvent((cb: () => void) => (schedule ?? requestAnimationFrame)(cb));
+  const cancelFrame = useEffectEvent((id: number) => (cancel ?? cancelAnimationFrame)(id));
   const [meter, setMeter] = useState({ mic: 0, agent: 0 });
 
   useEffect(() => {
     if (!reducedMotion) return;
-    const id = setInterval(() => setMeter(levelsRef.current()), 100);
+    const id = setInterval(() => setMeter(readLevels()), 100);
     return () => clearInterval(id);
   }, [reducedMotion]);
 
   useEffect(() => {
     if (reducedMotion) return;
-    const sched = schedule ?? ((cb: () => void) => requestAnimationFrame(cb));
-    const stop = cancel ?? ((id: number) => cancelAnimationFrame(id));
     let agent: number[] = [];
     let you: number[] = [];
     let frame = 0;
     let id = 0;
+    let stopped = false;
     /**
      * What: writes one row's history into its bars (oldest left, newest right).
      * Use when: each sampled frame.
@@ -180,19 +182,23 @@ export function VoiceBars({ levels, reducedMotion, schedule, cancel }: VoiceBars
      * Role: loop body.
      */
     const tick = () => {
+      if (stopped) return; // a frame already queued when cleanup ran must not keep the loop alive
       frame += 1;
       if (frame % 2 === 0) {
-        const lv = levelsRef.current();
+        const lv = readLevels();
         agent = pushLevel(agent, lv.agent);
         you = pushLevel(you, lv.mic);
         paint(agentRef.current, agent);
         paint(youRef.current, you);
       }
-      id = sched(tick);
+      id = scheduleFrame(tick);
     };
-    id = sched(tick);
-    return () => stop(id);
-  }, [reducedMotion, schedule, cancel]);
+    id = scheduleFrame(tick);
+    return () => {
+      stopped = true;
+      cancelFrame(id);
+    };
+  }, [reducedMotion]);
 
   const rows: Array<{ key: "agent" | "you"; name: string; color: string; ref: typeof agentRef; value: number }> = [
     { key: "agent", name: "Agent", color: "bg-ember", ref: agentRef, value: meter.agent },

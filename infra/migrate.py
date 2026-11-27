@@ -14,7 +14,16 @@ import importlib.util
 import inspect
 import os
 import sys
+from collections.abc import Awaitable
 from pathlib import Path
+from typing import Any
+
+
+async def _await(awaitable: Awaitable[Any]) -> Any:
+    """What: await any awaitable so asyncio.run can drive it (asyncio.run accepts only coroutines).
+    Use when: a hook's run(url) returns an awaitable. Inputs: the awaitable. Output: its result.
+    Side effects: whatever the awaitable does. Role: adapter between the hook contract and asyncio.run."""
+    return await awaitable
 
 
 def run_hooks(url: str, directory: Path) -> list[str]:
@@ -34,7 +43,7 @@ def run_hooks(url: str, directory: Path) -> list[str]:
             raise RuntimeError(f"hook {path.name} has no run(url) function")
         result = run(url)
         if inspect.isawaitable(result):
-            asyncio.run(result)
+            asyncio.run(_await(result))
         print(f"hook {path.name}")
         ran.append(path.name)
     return ran
@@ -46,21 +55,25 @@ def apply_migrations(url: str, schema: str, directory: Path) -> list[str]:
     Output: names of SQL files applied this run. Side effects: DDL as the owner role; the ledger table.
     Role: idempotent migration runner (a SQL file never runs twice; hooks must be idempotent)."""
     import psycopg  # imported here so run_hooks can be unit tested without the driver
+    from psycopg import sql
 
     applied: list[str] = []
     with psycopg.connect(url, autocommit=True) as conn:
-        conn.execute(f"CREATE TABLE IF NOT EXISTS {schema}.schema_migrations "
-                     "(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())")
+        # Names go through sql.Identifier (quoted by the driver), never into the query text.
+        ledger = sql.Identifier(schema, "schema_migrations")
+        conn.execute(sql.SQL("CREATE TABLE IF NOT EXISTS {} "
+                             "(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())").format(ledger))
         # default privileges would hand the ledger to the app role; it must not be able to rewrite history
-        conn.execute(f"REVOKE ALL ON {schema}.schema_migrations FROM {schema}_app")
-        done = {r[0] for r in conn.execute(f"SELECT name FROM {schema}.schema_migrations")}
+        conn.execute(sql.SQL("REVOKE ALL ON {} FROM {}").format(ledger, sql.Identifier(f"{schema}_app")))
+        done = {r[0] for r in conn.execute(sql.SQL("SELECT name FROM {}").format(ledger))}
         for path in sorted(directory.glob("*.sql")):
             if path.name in done:
                 print(f"skip {path.name}")
                 continue
             with conn.transaction():
-                conn.execute(path.read_text())
-                conn.execute(f"INSERT INTO {schema}.schema_migrations (name) VALUES (%s)", (path.name,))
+                # A migration file is trusted repo text, not a literal; the driver accepts bytes for such queries.
+                conn.execute(path.read_text().encode())
+                conn.execute(sql.SQL("INSERT INTO {} (name) VALUES (%s)").format(ledger), (path.name,))
             print(f"applied {path.name}")
             applied.append(path.name)
     run_hooks(url, directory)

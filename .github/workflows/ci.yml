@@ -24,17 +24,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # pyright_target: what pyright checks (empty = the whole project). packages/contracts: `src` is the frozen wire
-        # contract and is HARD; its tests are checked in a separate soft step (26 known errors, see that step).
-        # pyright "skip": infra/migrate.py imports psycopg, which only exists in the service image (lane A owns it).
+        # pyright_target: what pyright checks (empty = the whole project, tests included, all hard).
         include:
-          - {project: packages/contracts, pyright_target: src}
+          - {project: packages/contracts, pyright_target: ""}
           - {project: services/agent, pyright_target: ""}
           - {project: services/core, pyright_target: ""}
           - {project: services/knowledge, pyright_target: ""}
           - {project: scripts, pyright_target: ""}
           - {project: evals, pyright_target: ""}
-          - {project: infra, pyright_target: skip}
+          - {project: infra, pyright_target: ""}
     env:
       REQUIRE_ARTICLES: "1"  # the policy article tests fail instead of skipping (packages/contracts tests, PR #7)
     defaults:
@@ -54,36 +52,33 @@ jobs:
         run: |
           set -euo pipefail
           uvx ruff@0.9.10 check .
+          if [ "${{ matrix.project }}" = "scripts" ]; then uvx ruff@0.9.10 check ../tests; fi  # root tests/ has no project of its own
       - name: pyright
-        if: matrix.pyright_target != 'skip'
         run: |
           set -euo pipefail
           if [ -f pyproject.toml ]; then
             uv run --frozen --with pyright==1.1.405 pyright ${{ matrix.pyright_target }}
           else
-            uvx pyright@1.1.405 .
-          fi
-      - name: pyright on contract tests (SOFT, recorded reason)
-        if: matrix.project == 'packages/contracts'
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          # Reason: 26 known errors in tests/ (attribute access on the Envelope union in test_fixtures.py and test_events.py).
-          # They predate CI and the tests run green; lane B tracks the fix. Remove this step's continue-on-error then.
-          if ! uv run --frozen --with pyright==1.1.405 pyright tests; then
-            echo "::warning title=pyright on packages/contracts/tests::known type errors in tests (soft, tracked for lane B); src is hard"
-            exit 1
+            # infra/migrate.py imports psycopg (the service images carry it), so pyright gets the same version the services lock.
+            uv run --no-project --with "psycopg[binary]==3.3.9" --with pyright==1.1.405 pyright .
           fi
       - name: pytest
         run: |
           set -euo pipefail
+          # No quiet branches: a project without tests fails, and so does any skipped test (a skip is a green run
+          # that tested nothing; same rule as scripts/pg_tests.sh). Deselected markers (pg, real, e2e) are not skips.
+          # No -q here: some projects already set -q in addopts and two -q drop the summary line the checks below read.
+          out="$(mktemp)"
           if [ ! -f pyproject.toml ]; then
-            uv run --no-project --with pytest==8.3.5 --with pyyaml pytest -q .
+            uv run --no-project --with pytest==8.3.5 --with pyyaml pytest -rs . 2>&1 | tee "$out"
           elif [ -d tests ]; then
-            uv run --frozen --with pytest pytest -q
+            uv run --frozen --with pytest pytest -rs 2>&1 | tee "$out"
           else
-            echo "::warning title=${{ matrix.project }}::no tests/ directory yet, pytest skipped on purpose (the owning lane adds tests; remove this branch then)"
+            echo "::error title=${{ matrix.project }}::no tests/ directory: every project in this matrix must have tests"
+            exit 1
           fi
+          if grep -qE '[0-9]+ (skipped|xfailed|xpassed)' "$out"; then echo "::error title=${{ matrix.project }}::pytest skipped tests (or xfail) tests: they must run or be deselected by marker"; exit 1; fi
+          if ! grep -qE '[0-9]+ passed' "$out"; then echo "::error title=${{ matrix.project }}::pytest passed nothing"; exit 1; fi
 
   repo-tests:
     name: repo tests (tests/ and keys)
@@ -98,7 +93,10 @@ jobs:
       - name: Root tests (need the contracts package) and scripts/test_keys.py
         run: |
           set -euo pipefail
-          uv run --no-project --with pytest==8.3.5 --with pyyaml --with ./packages/contracts pytest -q tests scripts/test_keys.py
+          out="$(mktemp)"
+          uv run --no-project --with pytest==8.3.5 --with pyyaml --with ./packages/contracts pytest -q -rs tests scripts/test_keys.py 2>&1 | tee "$out"
+          if grep -qE '[0-9]+ (skipped|xfailed|xpassed)' "$out"; then echo "::error::pytest skipped (or xfail) tests: they must run"; exit 1; fi
+          if ! grep -qE '[0-9]+ passed' "$out"; then echo "::error::pytest passed nothing"; exit 1; fi
 
   web:
     runs-on: ubuntu-latest
@@ -123,11 +121,7 @@ jobs:
       - name: Lint
         run: |
           set -euo pipefail
-          if node -e "process.exit(require('./package.json').scripts?.lint ? 0 : 1)"; then
-            pnpm lint
-          else
-            echo "::warning title=web lint::apps/web has no lint script yet; lint skipped on purpose (eslint is not set up)"
-          fi
+          pnpm lint
       - name: Unit tests (vitest)
         run: |
           set -euo pipefail
@@ -143,11 +137,7 @@ jobs:
       - name: Bundle test
         run: |
           set -euo pipefail
-          if node -e "process.exit(require('./package.json').scripts?.['test:bundle'] ? 0 : 1)"; then
-            pnpm test:bundle
-          else
-            echo "::warning title=web bundle test::no test:bundle script on this branch; skipped"
-          fi
+          pnpm test:bundle
 
   gitleaks:
     runs-on: ubuntu-latest
@@ -205,16 +195,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # the check needs the merge base with origin/main
-      - name: Every module, class and function in changed .py/.ts/.tsx files has the six D-015 labels
+      - name: Every module, class and function in every tracked .py/.ts/.tsx file has the six D-015 labels (tests and spikes need the module descriptor only)
         run: |
           set -euo pipefail
           # Changed files only (D-015). On a pull request the base is origin/main; on a push to main it is the previous
-          # commit (a merge commit's first parent, so the whole PR). Backlog of older files: `python3 scripts/check_descriptors.py --all`.
+          # commit (a merge commit's first parent, so the whole PR). Full-repo check below.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             python3 scripts/check_descriptors.py --base origin/main
           else
             python3 scripts/check_descriptors.py --base HEAD^
           fi
+          # Full repo is at 0 gaps (backfill), so keep it strict: any gap anywhere fails the job.
+          python3 scripts/check_descriptors.py --all
 
   compose:
     name: compose config

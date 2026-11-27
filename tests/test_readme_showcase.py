@@ -4,6 +4,8 @@ Output: pass or fail. Side effects: none. Role: proves every showcase id has a s
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("check_readme_showcase", ROOT / "scripts" / "check_readme_showcase.py")
 chk = importlib.util.module_from_spec(_spec)
@@ -22,14 +24,14 @@ def test_check_can_fail():
     assert chk.missing_slots(text, chk.SHOWCASE_IDS) == ["2.3"]
 
 
+@pytest.mark.planning_docs
 def test_builtin_ids_match_doc_04_when_present():
     """What: built-in ids equal the ids in planning-docs/04 when that file is reachable. Use when: run inside the project checkout.
-    Inputs: none. Output: assert or skip. Side effects: none. Role: keeps the built-in list honest."""
-    import pytest
+    Inputs: none. Output: assert or fail (a missing doc is a failure: this test runs only when selected). Side effects: none. Role: keeps the built-in list honest. CI deselects it (planning-docs is outside the repo); run it in the checkout with `pytest -m planning_docs`."""
     doc = next((p / "planning-docs" / "04_showcase_list_2026-11-26.md" for p in ROOT.parents
                 if (p / "planning-docs" / "04_showcase_list_2026-11-26.md").exists()), None)
     if doc is None:
-        pytest.skip("planning-docs not reachable")
+        pytest.fail("planning-docs not reachable: run this test only in the project checkout (-m planning_docs)")
     assert chk.ids_in_list(doc.read_text()) == chk.SHOWCASE_IDS
 
 

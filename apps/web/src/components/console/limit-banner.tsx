@@ -9,7 +9,7 @@
  * Role: CS-E-07.S1.T4, from the Figma "Rate limit banner (our 429)" frame.
  */
 import { Clock } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 
 import { formatClock, limitWords } from "@/lib/turns/limits";
 import type { LimitNotice } from "@/lib/turns/store";
@@ -19,28 +19,31 @@ import type { LimitNotice } from "@/lib/turns/store";
  * Use when: the banner countdown and the input bar lock.
  * Inputs: the deadline in ms (null for none) and a callback for when it passes.
  * Output: seconds left (0 when none).
- * Side effects: an interval while time is left; calls onDone once at zero.
+ * Side effects: a one-second interval while a deadline is set (the owner clears it at zero); calls onDone once when it reaches zero.
  * Role: hook.
  */
 export function useSecondsLeft(untilMs: number | null, onDone: () => void): number {
-  const left = (now: number) => (untilMs === null ? 0 : Math.max(0, Math.ceil((untilMs - now) / 1000)));
-  const [, setTick] = useState(0);
+  // The clock is an external store: subscribe once per deadline and read whole seconds left
+  // (react.dev, "You Might Not Need an Effect": Subscribing to an external store).
+  const subscribe = useCallback(
+    (notify: () => void) => {
+      if (untilMs === null) return () => {};
+      const id = setInterval(notify, 1000);
+      return () => clearInterval(id);
+    },
+    [untilMs],
+  );
+  const read = () => (untilMs === null ? 0 : Math.max(0, Math.ceil((untilMs - Date.now()) / 1000)));
+  const left = useSyncExternalStore(subscribe, read, () => 0);
   const doneRef = useRef(onDone);
-  doneRef.current = onDone;
   useEffect(() => {
-    if (untilMs === null) return;
-    const tick = () => {
-      setTick((t) => t + 1);
-      if (left(Date.now()) === 0) {
-        clearInterval(id);
-        doneRef.current();
-      }
-    };
-    const id = setInterval(tick, 1000);
-    tick();
-    return () => clearInterval(id);
-  }, [untilMs]);
-  return left(Date.now());
+    doneRef.current = onDone;
+  });
+  // Reaching zero is an effect of the clock having run out: tell the owner once.
+  useEffect(() => {
+    if (untilMs !== null && left === 0) doneRef.current();
+  }, [untilMs, left]);
+  return left;
 }
 
 /**

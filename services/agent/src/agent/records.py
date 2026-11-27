@@ -16,9 +16,10 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
+from agent import line_ids
 from agent.turn_control import TurnControl
 
-RECORD_ID_PREFIX = "record-"
+RECORD_ID_PREFIX = line_ids.RECORD
 RECORD_LEAD = "[System record]"
 
 

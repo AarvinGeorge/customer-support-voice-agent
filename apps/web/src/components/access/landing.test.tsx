@@ -162,6 +162,7 @@ describe("Landing", () => {
 
     expect(await screen.findByText(/Try again in 3 s/)).toBeTruthy();
     expect((screen.getByRole("button", { name: /continue/i }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => {}); // let the countdown's interval subscribe before the clock moves
     await act(async () => {
       vi.advanceTimersByTime(1000);
     });
@@ -253,6 +254,7 @@ describe("Landing", () => {
     fireEvent.click(within(screen.getByRole("listitem", { name: /Dana Okafor/ })).getByRole("button", { name: /start/i }));
     expect(await screen.findByText(/Too many new sessions\. Try again in 2 s/)).toBeTruthy();
     expect(push).not.toHaveBeenCalled();
+    await act(async () => {}); // let the countdown's interval subscribe before the clock moves (the text now shows before its effect runs)
     await act(async () => {
       vi.advanceTimersByTime(2000);
     });

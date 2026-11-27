@@ -25,6 +25,7 @@ from contracts.events import KEEPALIVE, Citation, Envelope, FinalAnswer, FinalCo
 from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 
 from agent.gates import answered_with_support
+from agent.line_ids import LIMIT, line_id
 from agent.middleware.router import route_reply
 from agent.models.usage import add_usage, normalize_usage, token_usage
 from agent.say import speak
@@ -459,5 +460,5 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
     outcome.fallback_used = outcome.usage.fallback_used
     if outcome.end_reason == "limit_reached" and messages:
         # doc 07 s2.4 step 15 / spike 17a: replace the framework line in the thread with ours.
-        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=messages[-1].id), AIMessage(LIMIT_LINE, id=f"limit-{control.turn_id}")]})
+        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=messages[-1].id), AIMessage(LIMIT_LINE, id=line_id(LIMIT, control.turn_id))]})
     return outcome

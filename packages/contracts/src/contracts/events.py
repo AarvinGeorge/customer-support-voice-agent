@@ -293,18 +293,18 @@ class TurnCompletedEvent(Envelope):
     replayed: bool
 
 
-_EVENT_CLASSES = (TurnStartedEvent, StepStartedEvent, StepCompletedEvent, GateEvent, StatusEvent,
-                  TokenEvent, VerificationRequiredEvent, VerificationResultEvent,
-                  ConfirmationRequiredEvent, ActionResultEvent, EscalatedEvent, ModelFallbackEvent,
-                  ErrorEvent, TurnCompletedEvent)
-
-SseEvent = Annotated[Union[_EVENT_CLASSES], Field(discriminator="type")]  # type: ignore[valid-type]
+AnyEvent = Union[TurnStartedEvent, StepStartedEvent, StepCompletedEvent, GateEvent, StatusEvent,
+                 TokenEvent, VerificationRequiredEvent, VerificationResultEvent,
+                 ConfirmationRequiredEvent, ActionResultEvent, EscalatedEvent, ModelFallbackEvent,
+                 ErrorEvent, TurnCompletedEvent]
+SseEvent = Annotated[AnyEvent, Field(discriminator="type")]
+_EVENT_CLASSES = get_args(AnyEvent)
 EVENT_TYPES: tuple[str, ...] = tuple(get_args(c.model_fields["type"].annotation)[0] for c in _EVENT_CLASSES)
 
-_ADAPTER: TypeAdapter[Any] = TypeAdapter(SseEvent)  # pyright: ignore[reportArgumentType]  # runtime Union of the event classes, not expressible as a static TypeForm
+_ADAPTER: TypeAdapter[AnyEvent] = TypeAdapter(SseEvent)  # pyright: ignore[reportArgumentType]  # pyright cannot read Annotated[Union, Field] as a TypeForm; TypeAdapter[AnyEvent] is the checked type
 
 
-def parse_event(data: dict[str, Any] | str) -> Envelope:
+def parse_event(data: dict[str, Any] | str) -> AnyEvent:
     """What: validate one event (dict or JSON string) into its typed class.
     Use when: reading fixtures, turn_events rows or a captured stream.
     Inputs: event dict or JSON text. Output: the event model; raises ValidationError if invalid.

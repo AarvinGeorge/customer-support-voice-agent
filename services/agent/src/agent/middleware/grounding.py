@@ -11,8 +11,8 @@ open_ticket hook (the escalation module, CS-E-03.S4.T1; until then the line give
 Output: GroundingMiddleware.
 The code rules (agent.gates.enforce_code_rules) run on every verifier reply: a claim backed only by an
 injection_suspect chunk or by no known source is unsupported; zero claims passes (D-059: the verifier prompt
-decides what a claim is) unless needs_grounding fired, which fails closed (the D-064 floor, agent.gates.apply_floor,
-reason no_claims_floor); a verifier error, timeout, reply cut at max_tokens or unreadable reply fails closed, and
+decides what a claim is) only when the verifier states why (D-069: every empty list needs a no_claims_reason, else
+fail closed with reason no_claims_unexplained; no regex); a verifier error, timeout, reply cut at max_tokens or unreadable reply fails closed, and
 the step detail and summary.reason say which, so the drawer never shows it as an unsupported claim.
 Side effects: one verifier call per model draft; events; thread updates (RemoveMessage, fixed line,
 grounding_failures); TurnControl.grounding, citations, gate_message_id, route.
@@ -26,22 +26,20 @@ from typing import Any
 
 from contracts import limits
 from langchain.agents.middleware import AgentMiddleware, hook_config
-from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, RemoveMessage
 
+from agent.line_ids import GATE2, line_id
 from agent.gates import (
     CHECKING_POLICY_LINE,
     CLARIFY_LINE,
     ERROR_DETAILS,
-    FLOOR_DETAIL,
+    NO_CLAIMS_DETAIL,
     GroundingVerifier,
-    apply_floor,
     citations_for,
     enforce_code_rules,
     is_code_line,
-    needs_grounding,
     session_evidence,
     start_gate_step,
-    turn_messages,
 )
 from agent.middleware.router import OpenTicket, route_message
 from agent.turn_control import Route, current_control
@@ -74,14 +72,12 @@ class GroundingMiddleware(AgentMiddleware):
         if not isinstance(draft, AIMessage) or draft.tool_calls or is_code_line(draft):
             return None
         text = draft.text if isinstance(draft.text, str) else str(draft.content)
-        turn = turn_messages(messages[:-1])
-        floor = needs_grounding(text, any(isinstance(m, ToolMessage) for m in turn))
         if control.events is not None:
             control.events.emit("status", kind="checking_policy", message=CHECKING_POLICY_LINE)
         step = start_gate_step(control, "grounding_gate", "Checking the answer against policy")
         evidence = session_evidence(state, messages[:-1], control)  # D-065, D-071: session-scoped, with provenance
         result = await self.verifier.verify(control, text, evidence)
-        result = apply_floor(enforce_code_rules(result, text, evidence.chunks, tool_names=evidence.ids), floor)
+        result = enforce_code_rules(result, text, evidence.chunks, tool_names=evidence.ids)
         failures = int(state.get("grounding_failures") or 0)
         claims = result.claims
         counts: dict[str, Any] = {"claims_total": len(claims), "claims_supported": sum(c["supported"] for c in claims),
@@ -107,12 +103,12 @@ class GroundingMiddleware(AgentMiddleware):
         verdict = "fail" if result.verdict == "pass" else result.verdict  # a commitment is never a pass (M7)
         error = result.verdict == "error"
         detail = ERROR_DETAILS.get(result.reason or "") if error else (
-            FLOOR_DETAIL if result.reason == "no_claims_floor" else None)
+            NO_CLAIMS_DETAIL if result.reason == "no_claims_unexplained" else None)
         step.finish(gate="grounding", verdict=verdict, decision=decision, title=_TITLES[decision],
                     status="error" if error else "ok", reason=result.reason, detail=detail, sources=sources, **counts)
         removal = RemoveMessage(id=str(draft.id))
         if reason is None:
-            line = AIMessage(CLARIFY_LINE, id=f"gate2-{control.turn_id}")
+            line = AIMessage(CLARIFY_LINE, id=line_id(GATE2, control.turn_id))
             control.gate_message_id = line.id
             return {"messages": [removal, line], "grounding_failures": failures + 1, "jump_to": "end"}
         control.route = None  # no route can be pending here: one would have ended the turn before this model call

@@ -37,6 +37,7 @@ from contracts.errors import ErrorBody
 from contracts.events import FinalAnswer
 from langchain_core.messages import AIMessage, HumanMessage
 
+from agent import line_ids
 from agent.clients.core_agent import CoreAgentClient
 from agent.clients.http import ToolCallError
 from agent.records import ticket_record
@@ -57,7 +58,7 @@ TICKET_OFFER_OPENED = "I've opened ticket ending {short} for our team."
 NOTHING_TO_OFFER_LINE = "There's nothing waiting for a ticket right now. What can I help you with?"
 DEADLINE_LEAD = ESCALATION_LEADS["deadline"]
 DEADLINE_TICKET_LINE = "I couldn't finish that in time, so I've opened a ticket for our team: {display}."
-UNAVAILABLE_ID_PREFIX = "unavailable-"
+UNAVAILABLE_ID_PREFIX = line_ids.UNAVAILABLE
 
 REASON_CATEGORY: dict[str, str] = {
     "not_in_docs": "other", "retrieval_unavailable": "other", "grounding_failed": "other",
@@ -273,7 +274,7 @@ class Escalator:
                 if ticket else fallback_clause(control))
             self.emit(control, "limit_reached", ticket)
             await self._thread(agent, config, control, {"messages": [AIMessage(self._line(control, text),
-                                                                               id=f"limit-{control.turn_id}"),
+                                                                               id=line_ids.line_id(line_ids.LIMIT, control.turn_id)),
                                                                      *self.records(control, ticket, "limit_reached")]})
             outcome.final = _final(text, escalated=True, ticket=ticket)
             return outcome
@@ -299,7 +300,7 @@ class Escalator:
         self.emit(control, "deadline", ticket)
         repair = [not_run_tool_message(c) for c in dangling_calls(messages)]
         await self._thread(agent, config, control, {"messages": [*repair, AIMessage(self._line(control, text),
-                                                                                     id=f"deadline-{control.turn_id}"),
+                                                                                     id=line_ids.line_id(line_ids.DEADLINE, control.turn_id)),
                                                                  *self.records(control, ticket, "deadline")]})
         return TurnOutcome(final=_final(text, escalated=True, ticket=ticket), end_reason="deadline", status="failed",
                            error=err)
@@ -312,7 +313,7 @@ class Escalator:
         Output: TurnOutcome. Side effects: one event, one thread write (id unavailable-{turn_id}). Role: s6.7."""
         self.emit(control, "model_unavailable", None, offer=True)
         await self._thread(agent, config, control, {"messages": [
-            AIMessage(self._line(control, MODEL_UNAVAILABLE_LINE), id=f"{UNAVAILABLE_ID_PREFIX}{control.turn_id}")]})
+            AIMessage(self._line(control, MODEL_UNAVAILABLE_LINE), id=line_ids.line_id(line_ids.UNAVAILABLE, control.turn_id))]})
         return TurnOutcome(final=_final(MODEL_UNAVAILABLE_LINE, escalated=True, ticket=None), end_reason="escalated")
 
     async def ticket_offer(self, control: TurnControl, messages: list[Any]) -> tuple[str, str, dict[str, Any] | None]:

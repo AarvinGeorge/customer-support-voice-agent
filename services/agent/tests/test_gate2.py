@@ -26,8 +26,6 @@ from agent.gates import (
     GroundingVerifier,
     SessionEvidence,
     enforce_code_rules,
-    matches_policy,
-    needs_grounding,
     VERIFIER_PROMPT,
     verifier_input,
 )
@@ -144,57 +142,6 @@ def texts(values: dict[str, Any]) -> list[str]:
     """What: the text of every message in the checkpoint. Use when: asserting a draft is gone. Inputs: state
     values. Output: list of texts. Side effects: none. Role: helper."""
     return [str(m.content) for m in values["messages"]]
-
-
-# --- needs_grounding (doc 07 s6.4 bullet 2), recall first: when in doubt, ground -------------------------------
-POLICY_DRAFTS = [
-    "You can get a refund.", "It costs $96.00 a month.", "That takes 5 days.", "A 20% discount applies.",
-    "Our policy says so.", "You are eligible.", "Do it within a week.", "Upgrade to Business.",
-    "The Pro plan has SSO.",
-    # review PR #52 I1, reproduced misses
-    "Quillstack offers a 30-day money-back guarantee.", "You have a 14-day trial.",
-    "You are ineligible for that on your plan.", "That is included on the pro plan.", "It costs USD 96 per seat.",
-    "You get thirty days to cancel", "Charges are reversed after two weeks.",
-    # number words and hyphenated durations
-    "Refunds are possible for fourteen days.", "You have a thirty-day window.", "It takes twenty-one days.",
-    "That usually takes a few business days.", "Expect it in an hour.", "The trial lasts one month.",
-    # money in any form
-    "That is 96 euros per seat.", "It is EUR 40.", "\u00a330 a month per seat.", "It is ninety-six dollars.",
-    "You will not be billed again.", "There is no fee for that.", "We prorate the difference.",
-    "That is free of charge.",
-    # plan and tier names, any case
-    "enterprise customers get a dedicated manager.", "BUSINESS includes audit logs.", "On the free plan you get it.",
-    "Your tier does not include that.",
-    # eligibility and rule words
-    "That is not allowed.", "You cannot do that.", "You can't change that yourself.", "Only owners can do that.",
-    "You must be an account owner.", "That requires approval.", "We are unable to offer that.",
-    "Refunds are always approved.", "That request was declined.",
-    # reason-code language
-    "The rule PRO_PAST_LATE_BAND applies.", "Your account is past due.", "That charge was already refunded.",
-]
-CHAT_DRAFTS = [
-    "Hello! How can I help you today?", "Thanks for reaching out. What can I do for you?",
-    "Could you tell me which workspace you mean?", "Sure, let me look into that for you.",
-    "Is there anything else I can help with?", "Have a great day!", "Feel free to ask me anything.",
-    "I'm sorry to hear that. Can you describe what you see on screen?", "Got it, thanks.",
-    "Which email address do you sign in with?",
-]
-
-
-@pytest.mark.parametrize("draft", POLICY_DRAFTS)
-def test_needs_grounding_catches_every_policy_phrasing(draft: str):
-    assert needs_grounding(draft, False) is True
-    assert matches_policy(draft) is True
-
-
-@pytest.mark.parametrize("draft", CHAT_DRAFTS)
-def test_needs_grounding_skips_plain_conversation_unless_a_tool_ran(draft: str):
-    assert needs_grounding(draft, False) is False
-    assert needs_grounding(draft, True) is True
-
-
-def test_the_phrasing_table_is_large_enough():
-    assert len(POLICY_DRAFTS) + len(CHAT_DRAFTS) >= 30 and len(CHAT_DRAFTS) >= 8
 
 
 # --- no skip for a model draft (D-064): see tests/test_gate2_every_draft.py -----------------------------------
@@ -395,11 +342,13 @@ def test_a_supported_claim_needs_a_known_clean_source():
         assert enforce_code_rules(r, DRAFT, SUSPECT, tool_names=set()).verdict == "fail", src
 
 
-def test_zero_claims_pass_because_the_model_owns_meaning_and_an_error_stays_an_error():
-    # D-059: the verifier decides what the claims are; code does not second-guess zero claims with regexes.
-    empty = GroundingResult("pass", [])
+def test_zero_claims_pass_only_with_the_models_stated_reason_and_an_error_stays_an_error():
+    # D-059 and D-069: the verifier decides what the claims are and why there are none; code reads no draft text.
+    empty = GroundingResult("pass", [], no_claims_reason="clarifying_question")
     assert enforce_code_rules(empty, DRAFT, SUSPECT, tool_names=set()).verdict == "pass"
     assert enforce_code_rules(empty, "Which workspace do you mean?", SUSPECT, tool_names=set()).verdict == "pass"
+    bare = GroundingResult("pass", [])
+    assert enforce_code_rules(bare, "Which workspace do you mean?", SUSPECT, tool_names=set()).verdict == "fail"
     err = GroundingResult("error")
     assert enforce_code_rules(err, DRAFT, SUSPECT, tool_names=set()).verdict == "error"
 
@@ -417,15 +366,15 @@ async def test_x14_draft_cited_from_the_suspect_chunk_is_not_flushed_or_cited():
 
 
 async def test_zero_claims_after_a_search_pass_and_flush_the_draft_without_citations():
-    # D-059: zero extracted claims is the model's judgement that the draft states nothing to check; under the
-    # D-064 floor (a tool ran) that judgement must be explicit (no_claims_reason).
+    # D-059 and D-069: zero extracted claims is the model's judgement that the draft states nothing to check, and
+    # that judgement must be explicit (no_claims_reason) on every empty list.
     h = Harness(verifier(claims_json(no_claims_reason="conversation")))
     outcome, events, values = await h.run()
     assert (grounding_gate(events).verdict, outcome.end_reason) == ("pass", "answered")
     assert outcome.final.text == DRAFT and outcome.final.citations == []
 
 
-async def test_zero_claims_without_a_reason_after_a_search_fails_closed_under_the_floor():
+async def test_zero_claims_without_a_reason_after_a_search_fails_closed():
     h = Harness(verifier(claims_json()))
     outcome, events, values = await h.run()
     assert (grounding_gate(events).verdict, outcome.end_reason) == ("fail", "clarify")
@@ -452,34 +401,14 @@ async def test_the_verifier_receives_the_escaped_input():
 
 # --- D-059: the trigger decides WHEN, the verifier decides WHAT, code keeps the floor ---------------------------
 POLICY_IN_QUESTION = POLICY_IN_QUESTION_R2 + POLICY_IN_QUESTION_R3
-ASSERTIVE_DRAFTS = [
-    DRAFT, "You have a 14-day trial.", "It costs USD 96 per seat.", "You are ineligible for that on your plan.",
-    "That is not allowed.", "You cannot do that.", "Your tier does not include that.", "Refunds are always approved.",
-    "The Business plan includes audit logs.", "We can waive that fee.", "The rule PRO_PAST_LATE_BAND applies.",
-    "Which plan are you on? The Pro plan refunds within 30 days.", "Pro refunds are capped at $150.",
-    "You qualify for a full refund.", "Owners cannot transfer a workspace.", "Which plan are you on? Pro is $12 a seat.",
-]
-
-
-@pytest.mark.parametrize("draft", POLICY_IN_QUESTION + ASSERTIVE_DRAFTS)
-def test_every_adversarial_policy_draft_triggers_the_verifier_with_no_tool_in_the_turn(draft: str):
-    # Recall first: the broad trigger must fire, so the model gets to judge every one of these.
-    assert needs_grounding(draft, False) is True
-
-
-@pytest.mark.parametrize("draft", [
-    "You're covered for the first fortnight.", "Yes, we can waive that for you.", "Students get half off.",
-    "There is a cooling-off period.", "You have until Friday to dispute it.", "Exports are unlimited on your account.",
-    "Storage is capped at ten gigabytes.",
-])
-def test_reviewer_r1_phrasings_now_run_gate2(draft: str):
-    assert needs_grounding(draft, False) is True
-
-
 @pytest.mark.parametrize("draft", CLARIFYING_R3 + CLARIFYING_R2)
-def test_a_clarifying_reply_with_zero_claims_passes(draft: str):
-    out = enforce_code_rules(GroundingResult("pass", []), draft, SUSPECT, tool_names=set())
+def test_a_clarifying_reply_with_zero_claims_passes_only_with_its_stated_reason(draft: str):
+    # D-069: the verifier says why there is no claim; a bare empty list fails closed whatever the draft is.
+    out = enforce_code_rules(GroundingResult("pass", [], no_claims_reason="clarifying_question"), draft, SUSPECT,
+                             tool_names=set())
     assert out.verdict == "pass" and out.passed
+    bare = enforce_code_rules(GroundingResult("pass", []), draft, SUSPECT, tool_names=set())
+    assert (bare.verdict, bare.reason) == ("fail", "no_claims_unexplained")
 
 
 @pytest.mark.parametrize("draft", POLICY_IN_QUESTION)

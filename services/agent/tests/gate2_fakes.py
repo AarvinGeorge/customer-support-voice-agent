@@ -26,7 +26,8 @@ def evidence_ids(human: str) -> set[str]:
 
 
 class CitingVerifierModel:
-    """What: ainvoke returns the scripted claims, each supported iff its source_id is in the evidence.
+    """What: ainvoke returns the scripted claims, each supported iff its source_id is in the evidence; with no
+    scripted claims, an empty list with no_claims_reason "conversation" (D-069).
     Use when: GroundingVerifier(CitingVerifierModel(...)). Inputs: claims, commitment.
     Output: AIMessage JSON with usage_metadata and model_name. Side effects: appends to `seen` and `ids`.
     Role: fake."""
@@ -50,6 +51,7 @@ class CitingVerifierModel:
         self.seen.append(human)
         self.ids.append(ids)
         body = {"claims": [{"text": t, "supported": s in ids, "source_id": s} for t, s in self.claims],
-                "commitment": self.commitment, "no_claims_reason": None if self.claims else self.no_claims_reason}
+                "commitment": self.commitment,
+                "no_claims_reason": None if self.claims else (self.no_claims_reason or "conversation")}  # D-069
         return AIMessage(json.dumps(body), response_metadata={"model_name": VERIFIER_MODEL},
                          usage_metadata={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120})
