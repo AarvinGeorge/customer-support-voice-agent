@@ -25,6 +25,7 @@ from typing import Any, Awaitable, Callable, Protocol
 from contracts import limits
 from contracts.agent_api import TurnRequest
 from contracts.errors import ErrorBody, ErrorEnvelope
+from contracts.redact import RedactContext
 from contracts.events import FinalAnswer, Usage
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -131,7 +132,8 @@ class IngressInput:
     """What: one turn request after auth and body parsing. Use when: Ingress.handle.
     Inputs: session, visitor, client turn id, mode, input kind, redacted text, realtime call id, raw body
     (TurnRequest or VoiceAskRequest); merged_transcript is set by ingress at step 12 (the wrapped
-    <voice_transcript> user message for the agent body to place before this turn's message, or None).
+    <voice_transcript> user message for the agent body to place before this turn's message, or None);
+    redact_context is the session's scanner context (doc 07 s11.1 conditions) for text that ingress hooks store.
     Output: value. Side effects: none. Role: the shared entry shape for chat and voice."""
 
     session_id: str
@@ -143,6 +145,7 @@ class IngressInput:
     realtime_call_id: str | None = None
     body: Any = None
     merged_transcript: str | None = None
+    redact_context: RedactContext | None = None
 
 
 @dataclass(frozen=True)
