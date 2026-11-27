@@ -1,0 +1,212 @@
+# What: the CI gate for every pull request and every push to main (CS-E-01.S5.T1; doc 06 s10; doc 07 s1.4, s15.1 row 5).
+# Use when: GitHub runs it automatically. Make the jobs below required checks in branch protection (owner gap G1).
+# Inputs: the repo. Needs no secrets (tests use fakes; nothing here calls a provider).
+# Output: one green or red check per job: python (ruff, pyright, pytest per project incl. infra), repo tests, web, gitleaks, contracts-sync, import-guard, compose.
+# Side effects: none beyond the run itself. Role: the merge gate. Every run step starts with `set -euo pipefail`.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}  # never cancel a run on main
+
+jobs:
+  python:
+    name: python (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyright_target: what pyright checks (empty = the whole project). packages/contracts: `src` is the frozen wire
+        # contract and is HARD; its tests are checked in a separate soft step (26 known errors, see that step).
+        # pyright "skip": infra/migrate.py imports psycopg, which only exists in the service image (lane A owns it).
+        include:
+          - {project: packages/contracts, pyright_target: src}
+          - {project: services/agent, pyright_target: ""}
+          - {project: services/core, pyright_target: ""}
+          - {project: services/knowledge, pyright_target: ""}
+          - {project: scripts, pyright_target: ""}
+          - {project: infra, pyright_target: skip}
+    env:
+      REQUIRE_ARTICLES: "1"  # the policy article tests fail instead of skipping (packages/contracts tests, PR #7)
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.project }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.22"
+      - name: Sync dependencies
+        run: |
+          set -euo pipefail
+          if [ -f pyproject.toml ]; then uv sync --frozen; else echo "no pyproject.toml here (stdlib scripts), nothing to sync"; fi
+      - name: ruff
+        run: |
+          set -euo pipefail
+          uvx ruff@0.9.10 check .
+      - name: pyright
+        if: matrix.pyright_target != 'skip'
+        run: |
+          set -euo pipefail
+          if [ -f pyproject.toml ]; then
+            uv run --frozen --with pyright==1.1.405 pyright ${{ matrix.pyright_target }}
+          else
+            uvx pyright@1.1.405 .
+          fi
+      - name: pyright on contract tests (SOFT, recorded reason)
+        if: matrix.project == 'packages/contracts'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # Reason: 26 known errors in tests/ (attribute access on the Envelope union in test_fixtures.py and test_events.py).
+          # They predate CI and the tests run green; lane B tracks the fix. Remove this step's continue-on-error then.
+          if ! uv run --frozen --with pyright==1.1.405 pyright tests; then
+            echo "::warning title=pyright on packages/contracts/tests::known type errors in tests (soft, tracked for lane B); src is hard"
+            exit 1
+          fi
+      - name: pytest
+        run: |
+          set -euo pipefail
+          if [ ! -f pyproject.toml ]; then
+            uv run --no-project --with pytest==8.3.5 pytest -q .
+          elif [ -d tests ]; then
+            uv run --frozen --with pytest pytest -q
+          else
+            echo "::warning title=${{ matrix.project }}::no tests/ directory yet, pytest skipped on purpose (the owning lane adds tests; remove this branch then)"
+          fi
+
+  repo-tests:
+    name: repo tests (tests/ and keys)
+    runs-on: ubuntu-latest
+    env:
+      REQUIRE_ARTICLES: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.22"
+      - name: Root tests (need the contracts package) and scripts/test_keys.py
+        run: |
+          set -euo pipefail
+          uv run --no-project --with pytest==8.3.5 --with pyyaml --with ./packages/contracts pytest -q tests scripts/test_keys.py
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Enable pnpm via corepack
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm --version
+      - name: Install
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+      - name: Lint
+        run: |
+          set -euo pipefail
+          if node -e "process.exit(require('./package.json').scripts?.lint ? 0 : 1)"; then
+            pnpm lint
+          else
+            echo "::warning title=web lint::apps/web has no lint script yet; lint skipped on purpose (eslint is not set up)"
+          fi
+      - name: Unit tests (vitest)
+        run: |
+          set -euo pipefail
+          pnpm test
+      - name: Build
+        run: |
+          set -euo pipefail
+          pnpm build
+      - name: Typecheck
+        run: |
+          set -euo pipefail
+          pnpm typecheck
+      - name: Bundle test
+        run: |
+          set -euo pipefail
+          if node -e "process.exit(require('./package.json').scripts?.['test:bundle'] ? 0 : 1)"; then
+            pnpm test:bundle
+          else
+            echo "::warning title=web bundle test::no test:bundle script on this branch; skipped"
+          fi
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan history and tree
+        run: |
+          set -euo pipefail
+          curl -sSfL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz
+          echo "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks detect --source . --redact --verbose --exit-code 1
+
+  contracts-sync:
+    name: contracts sync
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.22"
+      - name: Regenerate fixtures and TypeScript, then require no diff
+        run: |
+          set -euo pipefail
+          uv sync --frozen
+          uv run --frozen python scripts/build_fixtures.py
+          uv run --frozen python scripts/gen_ts.py
+          git diff --exit-code -- . || { echo "Generated contract files are stale: run build_fixtures.py and gen_ts.py and commit the result"; exit 1; }
+          if [ -n "$(git status --porcelain -- .)" ]; then git status --short -- .; echo "Untracked generated files"; exit 1; fi
+
+  import-guard:
+    name: import guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.22"
+      - name: No commit or ops client import in agent tool modules
+        run: |
+          set -euo pipefail
+          uv run --no-project --with pytest==8.3.5 pytest -q scripts/test_import_guard.py
+          python3 scripts/check_import_guard.py
+
+  compose:
+    name: compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate both stack forms
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env.example config -q
+          docker compose --env-file .env.example -f compose.yaml config -q
+          # Static topology proof (core and knowledge off the edge network, env scoping, grace period); reads .env.
+          cp .env.example .env
+          python3 infra/tests/check_topology.py
