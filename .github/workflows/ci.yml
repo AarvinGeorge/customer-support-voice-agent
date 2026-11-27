@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         # Must equal PYTHON_PROJECTS in scripts/ci_local.sh (scripts/test_ci_local.py checks it). Per-project rules
-        # (the infra pyright skip) live in ci_local.sh.
+        # (pyright with psycopg for infra, ruff on the root tests/ in the scripts job) live in ci_local.sh.
         project: [packages/contracts, services/agent, services/core, services/knowledge, scripts, evals, infra]
     steps:
       - uses: actions/checkout@v4

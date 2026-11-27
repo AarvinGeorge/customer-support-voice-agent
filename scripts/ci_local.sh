@@ -6,9 +6,9 @@
 # Inputs: job names (none = all). Env: CI_DESCRIPTORS_BASE (default origin/main; ci.yml sets HEAD^ on a push to main,
 #   ci_gate.sh sets the main sha), CI_LOG_DIR (default .tmp/ci-local/<stamp>), CI_PG_PROJECT, CI_PG_SUBNET, CI_PG_PORT
 #   (the pg test stack; defaults cs-localci, 172.31.79.0/24, 55479; the project must start with cs-localci).
-# Output: one PASS, FAIL or SKIP row per step, a summary table, and the last line
-#   `ci_local: N passed, N failed, N skipped`. Exit 0 only when no step failed; 1 on any failure; 2 on bad usage.
-#   The only SKIP is the matrix rule ci.yml always had (no pyright on infra); every other step is hard.
+# Output: one PASS or FAIL row per step, a summary table, and the last line
+#   `ci_local: N passed, N failed, N skipped` (skipped is always 0: every step is hard, no skip rule remains).
+#   Exit 0 only when no step failed; 1 on any failure; 2 on bad usage.
 # Side effects: uv syncs, pnpm install and build in the checkout; the compose job writes .env from .env.example only
 #   when no other .env exists and removes it after; pg tests start and remove a throwaway Compose project; logs under
 #   CI_LOG_DIR; pinned tools (uv 0.8.22 shims, gitleaks 8.28.0) cached under ~/.cache/quillstack-ci.
@@ -22,14 +22,14 @@ cd "$ROOT"
 UV_VERSION="0.8.22"
 RUFF="ruff@0.9.10"
 PYRIGHT="pyright==1.1.405"
-PYRIGHT_UVX="pyright@1.1.405"
+PSYCOPG="psycopg[binary]==3.3.9"
 PYTEST="pytest==8.3.5"
 NODE_MAJOR="22"
 GITLEAKS_VERSION="8.28.0"
 CACHE="${HOME}/.cache/quillstack-ci"
 
-# Appended to every pytest step: fail on any skipped test or on a run that passed nothing.
-SKIP_GATE='if grep -qE "[0-9]+ skipped" "$out"; then echo "FAIL: pytest skipped tests (must run or be deselected by marker)"; exit 1; fi
+# Appended to every pytest step: fail on any skipped, xfailed or xpassed test, or on a run that passed nothing.
+SKIP_GATE='if grep -qE "[0-9]+ (skipped|xfailed|xpassed)" "$out"; then echo "FAIL: pytest skipped (or xfail) tests: they must run or be deselected by marker"; exit 1; fi
     if ! grep -qE "[0-9]+ passed" "$out"; then echo "FAIL: pytest passed nothing"; exit 1; fi'
 PYTHON_PROJECTS=(packages/contracts services/agent services/core services/knowledge scripts evals infra)
 OTHER_JOBS=(repo-tests web gitleaks contracts-sync import-guard descriptors compose pg-tests)
@@ -65,12 +65,6 @@ run_step() {
   fi
   NAMES+=("$name"); STATUSES+=("$status"); SECS+=("$((SECONDS - start))")
   echo "    $status in $((SECONDS - start))s"
-}
-
-# What: record a step that ci.yml does not run for this job (for example pyright on infra). Use when: matrix rule.
-# Inputs: name, reason. Output: a SKIP row. Side effects: none. Role: makes a rule-based skip visible, not silent.
-skip_step() {
-  NAMES+=("$1"); STATUSES+=("SKIP"); SECS+=(0); echo "--- $1: SKIP ($2)"
 }
 
 # What: put uv 0.8.22 (the ci.yml version) first on PATH, via shims to the uv package binary when the local uv differs.
@@ -125,17 +119,16 @@ ensure_gitleaks() {
 # Use when: job `python:<project>`. Inputs: project dir. Output: step rows. Side effects: uv sync in the project.
 # Role: per-service lint, types and unit tests. REQUIRE_ARTICLES=1 makes the article tests fail instead of skip.
 job_python() {
-  local p="$1" target=""
-  case "$p" in infra) target=skip ;; esac
+  local p="$1"
   export REQUIRE_ARTICLES=1
   run_step "python:$p sync" "$p" 'if [ -f pyproject.toml ]; then uv sync --frozen; else echo "no pyproject.toml here (stdlib scripts), nothing to sync"; fi'
-  run_step "python:$p ruff" "$p" "uvx $RUFF check ."
-  if [ "$target" = skip ]; then
-    # infra/migrate.py imports psycopg, which only exists in the service image (lane A owns it).
-    skip_step "python:$p pyright" "ci.yml rule: infra pyright skipped (psycopg only in the image)"
-  else
-    run_step "python:$p pyright" "$p" "if [ -f pyproject.toml ]; then uv run --frozen --with $PYRIGHT pyright $target; else uvx $PYRIGHT_UVX .; fi"
-  fi
+  # The root tests/ has no project of its own, so the scripts job lints it too.
+  run_step "python:$p ruff" "$p" "uvx $RUFF check .
+    if [ '$p' = scripts ]; then uvx $RUFF check ../tests; fi"
+  # No pyproject (scripts, infra): infra/migrate.py imports psycopg (the service images carry it), so pyright gets the
+  # same psycopg version the services lock.
+  run_step "python:$p pyright" "$p" "if [ -f pyproject.toml ]; then uv run --frozen --with $PYRIGHT pyright;
+    else uv run --no-project --with '$PSYCOPG' --with $PYRIGHT pyright .; fi"
   # No quiet branches: a project without tests fails, and so does any skipped test (a skip is a green run that tested
   # nothing; same rule as scripts/pg_tests.sh). Deselected markers (pg, real, e2e) are not skips. No -q: some projects
   # set -q in addopts and two -q drop the summary line the checks read.
@@ -158,7 +151,7 @@ run_job() {
     repo-tests)
       ensure_uv; export REQUIRE_ARTICLES=1
       run_step "repo-tests" . "out=\$(mktemp)
-        uv run --no-project --with $PYTEST --with pyyaml --with ./packages/contracts pytest -q -rs -m 'not planning_docs' tests scripts/test_keys.py 2>&1 | tee \"\$out\"
+        uv run --no-project --with $PYTEST --with pyyaml --with ./packages/contracts pytest -q -rs tests scripts/test_keys.py 2>&1 | tee \"\$out\"
         $SKIP_GATE" ;;
     web)
       ensure_node; export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
