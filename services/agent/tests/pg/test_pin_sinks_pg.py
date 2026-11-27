@@ -9,8 +9,7 @@ in memory (no network); no provider is called (an echo fake model).
 Role: proves the raw secret is in the fixture and each sink holds the message text (positive control: the kept
 account id "QS-10423"), then that no sink holds the PIN. Core audit rows: services/core/tests/pg/
 test_audit_idempotency_pg.py::test_free_text_pin_in_audit_args_is_absent_from_the_stored_row (same CI job).
-agent.turn_events: no writer is merged on this branch (PR #43 adds TurnStream's sink), so this test stores the
-streamed non-token events the way that writer does; swap in the real writer when it merges."""
+agent.turn_events is written by the real TrajectoryWriter (the TurnStream sink, as in production)."""
 from __future__ import annotations
 
 import json
@@ -41,6 +40,7 @@ from agent.realtime import SessionSummary
 from agent.sessions import PgSessionStore
 from agent.settings import Settings
 from agent.tracing import build_langsmith_client
+from agent.trajectory import TrajectoryWriter
 from agent.turn_body import PgSessionFlags
 from agent.voice import PgVoiceStore, TranscriptMerger, VoiceDeps, VoiceSessionRow
 
@@ -235,20 +235,6 @@ async def rows_text(pool: Any, sid: str) -> dict[str, str]:
     return out
 
 
-async def store_events(pool: Any, sid: str, events: list[Any]) -> None:
-    """What: insert a turn's non-token events into agent.turn_events as the PR #43 TurnStream sink does.
-    Use when: after each turn. Inputs: pool, session id, parsed events. Output: none. Side effects: INSERTs.
-    Role: stand-in writer until the trajectory writer merges."""
-    async with pool.connection() as conn:
-        for ev in events:
-            if ev.type == "token":
-                continue
-            await conn.execute("INSERT INTO agent.turn_events (turn_id, seq, session_id, ts, type, step_id, payload) "
-                               "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                               (ev.turn_id, ev.seq, sid, ev.ts, ev.type, getattr(ev, "step_id", None),
-                                ev.model_dump_json()))
-
-
 async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixture) -> None:
     sid = str(uuid.uuid4())
     vs_id = f"vs-{sid}"
@@ -278,13 +264,14 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
     registry = Registry()
     bodies: list[dict[str, Any]] = []
     try:
+        trajectory = TrajectoryWriter(pool=pool)
         async with postgres_checkpointer_factory(os.environ["AGENT_PG_TEST_URL"])() as saver:
             async with httpx.AsyncClient(transport=httpx.MockTransport(services)) as http:
                 runtime = composition.build_agent_runtime(cfg, http=http, checkpointer=saver, registry=registry)
                 ingress = composition.build_ingress(
                     runtime.agent, store=PgTurnStore(pool), lock=Lock(), served_by="agent_pg",
                     call_keys=Keys(), merge_transcript=TranscriptMerger(PgVoiceStore(pool)),
-                    flags=PgSessionFlags(pool))
+                    flags=PgSessionFlags(pool), trajectory=trajectory)
 
                 async def summary(_: str, ctx: Any = None) -> SessionSummary:
                     """What: empty summary. Use when: never (no token mint here). Inputs: sid, ctx.
@@ -316,7 +303,6 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                     assert e1[-1].final.text == TYPED_PIN_LINE and e1[-1].end_reason == "verification_requested"
                     assert [e.reason for e in e1 if e.type == "verification.required"] == ["typed_pin_rejected"]
                     assert registry.model.seen == []  # no model call
-                    await store_events(pool, sid, e1)
                     # 2. Voice: the PIN in the question and spoken in the final transcript; goes to the model.
                     r2 = await post("/voice/ask", {
                         "client_turn_id": str(uuid.uuid4()), "voice_session_id": vs_id,
@@ -325,7 +311,6 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                         "last_assistant_interrupted": False})
                     e2 = events_of(r2)
                     assert e2[-1].type == "turn.completed" and e2[-1].final.text.startswith("You said:")
-                    await store_events(pool, sid, e2)
                     # 3. Voice chatter posted outside ask_support_agent, then merged by the next chat turn.
                     t = await post("/transcript", {"voice_session_id": vs_id, "items": [
                         {"realtime_item_id": "item_pg2", "role": "user", "text": f"again {SPOKEN}",
@@ -336,8 +321,9 @@ async def test_raw_pin_reaches_no_sink(pool: Any, caplog: pytest.LogCaptureFixtu
                     r3 = await post("/turns", {"client_turn_id": str(uuid.uuid4()), "text": "thanks, any update?"})
                     e3 = events_of(r3)
                     assert e3[-1].type == "turn.completed"
-                    await store_events(pool, sid, e3)
         tracer_client.flush()
+        await trajectory.flush()
+        assert trajectory.pending() == 0
 
         # Proof that a zero is possible: the secret is in the fixture, and the search finds it in raw form.
         fixture = json.dumps(bodies)
