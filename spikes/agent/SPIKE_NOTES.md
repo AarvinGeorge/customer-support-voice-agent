@@ -32,4 +32,4 @@ Run: `cd spikes/agent && uv sync && uv run pytest -m "not real"` (fakes only) or
 
 ## Real provider calls
 
-8 in total: spike 15 real test run twice (2 calls per run, one per provider; the second run re-captured evidence lines), spike 17 duplicate-tool-result probe (2 calls, both answered 400). Model list reads (`models.list`, not model calls) were used once to pick `gpt-5.4-mini`.
+6 in total: spike 15 real test run twice (2 calls per run, one per provider; the second run re-captured evidence lines) = 4, spike 17 duplicate-tool-result probe (2 calls, both answered 400). Model list reads (`models.list`, not model calls) were used once to pick `gpt-5.4-mini`.
