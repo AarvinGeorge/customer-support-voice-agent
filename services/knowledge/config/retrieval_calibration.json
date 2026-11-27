@@ -1,0 +1,20 @@
+{
+  "calibration_id": "cal-2026-11-27-01",
+  "status": "provisional",
+  "embedding_model": "text-embedding-3-small",
+  "corpus_version": "0f33e26742593867bea6d51ca93b2fe9ae5895a73d1ef1590520988d3d476232",
+  "tau_low": 0.329,
+  "tau_high": 0.488,
+  "k_default": 5,
+  "recall_at_k": {},
+  "train": {
+    "n": 0,
+    "confusion": {}
+  },
+  "test": {
+    "n": 0,
+    "confusion": {}
+  },
+  "created_at": "2026-11-27T06:44:23Z",
+  "notes": "Provisional (doc 07 s4.1 steps 1 to 4, spike 14). Method: 20 probe queries through POST /v1/search with calibration=true against the real 74-chunk corpus (10 articles, public tier, k=5, text-embedding-3-small); script scripts/probe_retrieval.py. Top cosine per probe. answerable (10): How do I request a refund for a duplicate charge? = 0.5015; How long does a refund take to reach my card? = 0.4832; How do I change the billing email on my account? = 0.6634; Who can update billing contact details? = 0.6821; What can a member do compared with an admin? = 0.5065; How do I make someone an admin on my team? = 0.4534; Single sign-on login fails with an invalid assertion, what should I check? = 0.5289; My SSO login says the identity provider certificate has expired = 0.6329; How do I escalate my problem to a human support agent? = 0.4715; What are the support response times for my plan? = 0.6804. off_topic (5): what's the weather = 0.1382; write me a poem = 0.0898; who won the match = 0.0969; recommend a laptop = 0.1334; translate hello = 0.2039. not_in_docs (5, recorded only, not used in the formula): Do you have an Android mobile app? = 0.2186; Can I host Quillstack on my own servers? = 0.4208; How do I set up a custom domain for my workspace? = 0.3995; Which data centre regions do you operate in? = 0.2427; Is there a Zapier integration? = 0.3730. Ranges do not overlap: highest off_topic 0.2039, lowest answerable 0.4534. tau_low = midpoint(0.2039, 0.4534) = 0.329. tau_high = lower quartile (inclusive) of the 10 answerable top cosines = 0.488. Reading: not_in_docs cosines (0.219 to 0.421) straddle tau_low, so cosine alone cannot separate not_in_docs from answerable; that is the scope_classifier's job after a none or weak verdict. Small probe set: replace with the golden-set calibration (status calibrated). Provenance (fix round 1): corpus_version is the ingest run's value (re-checked on a second ingest and through /readyz, identical), not a cached search response. top_cosine is the best cosine among the k=5 returned chunks (production k). The two SSO probes name no error code, so they exercise cosine, not the code-match path. Weak in-scope probes (0.4834, 0.4715, 0.4534) are structural to the lower-quartile rule; their gold chunks rank first or second, see the fix-round report."
+}

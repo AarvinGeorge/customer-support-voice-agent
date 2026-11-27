@@ -1,0 +1,27 @@
+[project]
+name = "quillstack-knowledge"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "psycopg[binary]>=3.2",
+  "quillstack-contracts",
+  "tiktoken>=0.14.0",
+  "httpx>=0.29.0",
+  "pyyaml>=6.0.4",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3", "httpx>=0.27"]
+
+# Non-editable: macOS hides .pth files inside .venv and Python 3.13 skips them (editable installs would not import).
+[tool.uv.sources]
+quillstack-contracts = { path = "../../packages/contracts", editable = false }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+# `pg` tests need a Compose Postgres: run them with ../../scripts/knowledge_pg_test.sh (CI skips them).
+addopts = "-m 'not pg'"
+markers = ["pg: needs a real Postgres with pgvector (scripts/knowledge_pg_test.sh); no network, fixture vectors"]

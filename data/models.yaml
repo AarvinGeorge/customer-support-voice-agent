@@ -1,14 +1,66 @@
-# Model registry (doc 07 s13.2). Read by agent, knowledge and evals.
-# This first cut holds only the voice role, verified by lane C on 2026-11-27
-# (CS-E-05.S3.T1, evidence in spikes/realtime/SPIKE_NOTE.md).
-# Lane B merges its roles (agent, agent_fallback, grounding_verifier,
-# scope_classifier, judge, embeddings) and all prices into this file.
+# Model registry (doc 07 s13.2, D-024). Read by agent, knowledge and evals.
+# Loaded and validated by services/agent/src/agent/models/config.py (unknown key fails).
+# Ids verified 2026-11-27: Anthropic GET /v1/models and OpenAI GET /v1/models listed every id below.
+# Prices per 1M tokens, USD, read 2026-11-27 from:
+#   Anthropic: platform.claude.com/docs/en/about-claude/pricing
+#   OpenAI:    developers.openai.com/api/docs/models/<model id>
+# Provider adapters (effort kwarg, cache fields) live in agent/models/, never in callers.
 roles:
+  agent:
+    provider: anthropic
+    model: claude-sonnet-5-5
+    effort: medium
+    attempt_timeout_s: 10
+    first_token_timeout_s: 6
+    max_tokens: 2048
+    price: {input_per_mtok: 2.00, output_per_mtok: 10.00, cache_read_per_mtok: 0.10, cache_write_per_mtok: 2.50, as_of: 2026-11-27}
+  agent_fallback:
+    # Other provider (doc 07 s8.1). gpt-5.4-mini is the id exercised by the day-1 spikes
+    # (tool calls, streaming, 400/429 paths). Upgrade path if the golden set needs it: gpt-5.5
+    # (listed by GET /v1/models; $5 in, $0.50 cached, $30 out).
+    provider: openai
+    model: gpt-5.4-mini
+    effort: low
+    attempt_timeout_s: 10
+    first_token_timeout_s: 6
+    max_tokens: 2048
+    price: {input_per_mtok: 0.75, output_per_mtok: 4.50, cache_read_per_mtok: 0.075, as_of: 2026-11-27}
+  grounding_verifier:
+    # Gate 2 (doc 07 s7): 3 s, 0 retries, fail closed. Prices are the prompts-up-to-100K tier
+    # (a Gate 2 prompt is far below that).
+    provider: anthropic
+    model: claude-haiku-5-5
+    effort: low
+    attempt_timeout_s: 3
+    max_tokens: 512
+    price: {input_per_mtok: 0.10, output_per_mtok: 0.50, cache_read_per_mtok: 0.01, cache_write_per_mtok: 0.125, as_of: 2026-11-27}
+  scope_classifier:
+    # On a Gate 1 `none` verdict (doc 07 s7): 2 s, 0 retries, failure counts as on-topic.
+    provider: anthropic
+    model: claude-haiku-5-5
+    effort: low
+    attempt_timeout_s: 2
+    max_tokens: 64
+    price: {input_per_mtok: 0.10, output_per_mtok: 0.50, cache_read_per_mtok: 0.01, cache_write_per_mtok: 0.125, as_of: 2026-11-27}
+  judge:
+    # Offline only (golden runner, evals). OpenAI family per doc 07 s13.2.
+    provider: openai
+    model: gpt-5.5
+    attempt_timeout_s: 60
+    max_tokens: 1024
+    price: {input_per_mtok: 5.00, output_per_mtok: 30.00, cache_read_per_mtok: 0.50, as_of: 2026-11-27}
+  embeddings:
+    # A change of model or dimensions requires re-ingest and recalibration (doc 07 s13.2).
+    provider: openai
+    model: text-embedding-3-small
+    dimensions: 1536
+    attempt_timeout_s: 1.2
+    price: {input_per_mtok: 0.02, output_per_mtok: 0.0, as_of: 2026-11-27}
   voice:
+    # Written by lane C (CS-E-05.S3.T1, evidence in spikes/realtime/SPIKE_NOTE.md); price added by lane B.
     provider: openai
     model: gpt-realtime-2.1          # GET /v1/models lists it; session.created echoed it
     voice: marin                     # accepted by client_secrets; echoed in session.created
     transcription_model: gpt-transcribe  # accepted with semantic_vad in a realtime session
-    # Price (lane B to copy into `price` with as_of): per 1M tokens, text in 4.00,
-    # cached in 0.40, text out 24.00, audio in 32.00, audio out 64.00
-    # (developers.openai.com/api/docs/models/gpt-realtime-2.1, read 2026-11-27).
+    # Text and audio rates (developers.openai.com/api/docs/models/gpt-realtime-2.1, read 2026-11-27).
+    price: {input_per_mtok: 4.00, output_per_mtok: 24.00, cache_read_per_mtok: 0.40, audio_per_mtok: 32.00, audio_out_per_mtok: 64.00, as_of: 2026-11-27}

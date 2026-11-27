@@ -12,3 +12,8 @@ __pycache__/
 # Node
 node_modules/
 .next/
+next-env.d.ts
+# Written by `next dev` (Next 16 agent rules); not project docs
+apps/web/AGENTS.md
+*.tsbuildinfo
+apps/web/AGENTS.md

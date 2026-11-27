@@ -1,0 +1,274 @@
+# Quillstack stack (doc 06 s10, doc 07 s15). Same images, networks and service names locally and on the VM (D-029).
+# Local: `docker compose up -d` (compose.override.yaml is picked up automatically). VM: `docker compose -f compose.yaml up -d`.
+# Networks: edge (caddy, web, agents) | backend, internal (agents, core, knowledge, postgres, redis) | egress (agents, knowledge).
+# Each service lists only the variables doc 07 s15.2 says it reads. Secrets come from .env (keys.py), never from this file.
+
+x-python: &python
+  build:
+    context: .
+    dockerfile: infra/python.Dockerfile
+  restart: unless-stopped
+
+x-agent: &agent
+  <<: *python
+  build:
+    context: .
+    dockerfile: infra/python.Dockerfile
+    args: {SERVICE: agent}
+  stop_grace_period: 60s   # above the 45 s turn deadline
+  networks: [edge, backend, egress]
+  volumes: ["./data:/data:ro"]   # data/seeds/personas.yaml for GET /api/demo/personas
+  depends_on:
+    migrate_agent: {condition: service_completed_successfully}
+    redis: {condition: service_healthy}
+  healthcheck: &py-health
+    test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/readyz', timeout=3).status == 200 else 1)"]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 5s
+  environment: &agent-env
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    OPENAI_API_KEY: ${OPENAI_API_KEY}
+    LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}
+    LANGSMITH_TRACING: ${LANGSMITH_TRACING:-true}
+    LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-cs-voice-agent}
+    LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-}
+    CORE_TOKEN_AGENT: ${CORE_TOKEN_AGENT}
+    CORE_TOKEN_COMMIT: ${CORE_TOKEN_COMMIT}
+    CORE_TOKEN_OPS: ${CORE_TOKEN_OPS}
+    KNOWLEDGE_TOKEN_AGENT: ${KNOWLEDGE_TOKEN_AGENT}
+    SESSION_SIGNING_KEY: ${SESSION_SIGNING_KEY}
+    DEMO_ACCESS_CODE: ${DEMO_ACCESS_CODE}
+    OPERATOR_ACCESS_CODE: ${OPERATOR_ACCESS_CODE}
+    AGENT_DB_URL: ${AGENT_DB_URL}
+    REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    CORE_URL: ${CORE_URL:-http://core:8000}
+    KNOWLEDGE_URL: ${KNOWLEDGE_URL:-http://knowledge:8000}
+    SITE_ORIGIN: ${SITE_ORIGIN:-http://localhost:3000}
+    FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-${EDGE_SUBNET:-172.30.0.0/24}}
+    DEMO_FAULTS_ENABLED: ${DEMO_FAULTS_ENABLED:-true}
+    FEATURE_A4: ${FEATURE_A4:-false}
+
+services:
+  # Edge (CS-E-01.S3.T3, lane C). SITE_ADDRESS is required: the domain on the VM, or :80 locally (the override defaults it).
+  caddy:
+    image: caddy:2.11-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    networks: [edge]
+    depends_on:
+      web: {condition: service_healthy}
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-}   # no default: empty makes Caddy refuse to start (VM must set the domain; local gets :80 from compose.override.yaml)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Next.js app (CS-E-04.S4.T1 Dockerfile). Holds no secret (doc 07 s1.4), so no environment block.
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    networks: [edge]
+    expose: ["3000"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  agent_a:
+    <<: *agent
+    environment:
+      <<: *agent-env
+      SERVED_BY: agent_a
+
+  agent_b:
+    <<: *agent
+    environment:
+      <<: *agent-env
+      SERVED_BY: agent_b
+
+  core:
+    <<: *python
+    build:
+      context: .
+      dockerfile: infra/python.Dockerfile
+      args: {SERVICE: core}
+    networks: [backend]
+    depends_on:
+      migrate_core: {condition: service_completed_successfully}
+    healthcheck:
+      <<: *py-health
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3).status == 200 else 1)"]
+    environment:
+      CORE_TOKEN_AGENT: ${CORE_TOKEN_AGENT}
+      CORE_TOKEN_COMMIT: ${CORE_TOKEN_COMMIT}
+      CORE_TOKEN_OPS: ${CORE_TOKEN_OPS}
+      PIN_PEPPER: ${PIN_PEPPER}
+      OPERATOR_TOKEN_KEY: ${OPERATOR_TOKEN_KEY}
+      OPERATOR_ACCESS_CODE: ${OPERATOR_ACCESS_CODE}
+      CORE_DB_URL: ${CORE_DB_URL}
+      DEMO_FAULTS_ENABLED: ${DEMO_FAULTS_ENABLED:-true}
+      FEATURE_A4: ${FEATURE_A4:-false}
+      DEMO_RESEED: ${DEMO_RESEED:-false}
+      POLICY_PATH: /app/data/policy.yaml
+    volumes:
+      - ./data/policy.yaml:/app/data/policy.yaml:ro   # the one config file core reads (doc 07 s13.1)
+
+  # One-shot seeding job (profile "seed", not part of `up`): `docker compose run --rm seed_core` seeds an empty
+  # schema, `... seed_core python -m core.seeds --reseed` wipes and reseeds (needs DEMO_RESEED=true). Runs as
+  # core_owner because the runtime role may not TRUNCATE or delete append-only history (doc 07 s3.6, s12).
+  seed_core:
+    <<: *python
+    profiles: [seed]
+    build:
+      context: .
+      dockerfile: infra/python.Dockerfile
+      args: {SERVICE: core}
+    restart: "no"
+    command: ["python", "-m", "core.seeds"]
+    networks: [backend]
+    depends_on:
+      migrate_core: {condition: service_completed_successfully}
+    volumes:
+      - ./data/seeds:/app/data/seeds:ro
+    environment:
+      CORE_DB_OWNER_URL: ${CORE_DB_OWNER_URL}
+      PIN_PEPPER: ${PIN_PEPPER}
+      DEMO_RESEED: ${DEMO_RESEED:-false}
+      SEEDS_DIR: /app/data/seeds
+
+  knowledge:
+    <<: *python
+    build:
+      context: .
+      dockerfile: infra/python.Dockerfile
+      args: {SERVICE: knowledge}
+    networks: [backend, egress]
+    depends_on:
+      migrate_knowledge: {condition: service_completed_successfully}
+    healthcheck:
+      <<: *py-health
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status == 200 else 1)"]
+    volumes: ["./data:/data:ro"]   # models.yaml (embedding model id) when present
+    environment:
+      KNOWLEDGE_TOKEN_AGENT: ${KNOWLEDGE_TOKEN_AGENT}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      KNOWLEDGE_DB_URL: ${KNOWLEDGE_DB_URL}
+
+  # One-shot ingest job (profile "jobs": never part of a plain `up`). Reads the article snapshot and policy from ./data.
+  # Run: docker compose run --rm ingest_knowledge   (after the migrate jobs; safe to re-run, unchanged articles cost nothing)
+  ingest_knowledge:
+    <<: *python
+    profiles: [jobs]
+    build:
+      context: .
+      dockerfile: infra/python.Dockerfile
+      args: {SERVICE: knowledge}
+    restart: "no"
+    command: ["python", "-m", "knowledge.ingest.job", "--articles", "/data/articles", "--policy", "/data/policy.yaml"]
+    networks: [backend, egress]
+    depends_on:
+      migrate_knowledge: {condition: service_completed_successfully}
+    volumes: ["./data:/data:ro"]
+    environment:
+      KNOWLEDGE_DB_URL: ${KNOWLEDGE_DB_URL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+  # One migrate job per service, run as that service's owner role. Order core, knowledge, agent (chained for readable logs).
+  migrate_core:
+    <<: *python
+    build:
+      context: .
+      dockerfile: infra/python.Dockerfile
+      args: {SERVICE: core}
+    restart: "no"
+    command: ["python", "/app/migrate.py"]
+    networks: [backend]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      SERVICE: core
+      CORE_DB_OWNER_URL: ${CORE_DB_OWNER_URL}
+
+  migrate_knowledge:
+    <<: *python
+    build:
+      context: .
+      dockerfile: infra/python.Dockerfile
+      args: {SERVICE: knowledge}
+    restart: "no"
+    command: ["python", "/app/migrate.py"]
+    networks: [backend]
+    depends_on:
+      migrate_core: {condition: service_completed_successfully}
+    environment:
+      SERVICE: knowledge
+      KNOWLEDGE_DB_OWNER_URL: ${KNOWLEDGE_DB_OWNER_URL}
+
+  migrate_agent:
+    <<: *python
+    build:
+      context: .
+      dockerfile: infra/python.Dockerfile
+      args: {SERVICE: agent}
+    restart: "no"
+    command: ["python", "/app/migrate.py"]
+    networks: [backend]
+    depends_on:
+      migrate_knowledge: {condition: service_completed_successfully}
+    environment:
+      SERVICE: agent
+      AGENT_DB_OWNER_URL: ${AGENT_DB_OWNER_URL}
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    networks: [backend]
+    environment:
+      POSTGRES_DB: quillstack
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      AGENT_OWNER_PASSWORD: ${AGENT_OWNER_PASSWORD}
+      AGENT_APP_PASSWORD: ${AGENT_APP_PASSWORD}
+      CORE_OWNER_PASSWORD: ${CORE_OWNER_PASSWORD}
+      CORE_APP_PASSWORD: ${CORE_APP_PASSWORD}
+      KNOWLEDGE_OWNER_PASSWORD: ${KNOWLEDGE_OWNER_PASSWORD}
+      KNOWLEDGE_APP_PASSWORD: ${KNOWLEDGE_APP_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h 127.0.0.1: the init-time temporary server listens on the socket only, so this stays red until init is done
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d quillstack"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+networks:
+  edge:
+    ipam:
+      config: [{subnet: "${EDGE_SUBNET:-172.30.0.0/24}"}]  # set EDGE_SUBNET per lane stack so projects do not collide
+  backend:
+    internal: true
+  egress: {}
+
+volumes:
+  pgdata: {}
+  caddy_data: {}
+  caddy_config: {}

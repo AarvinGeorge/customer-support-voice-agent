@@ -1,0 +1,32 @@
+[project]
+name = "agent-spikes"
+version = "0.1.0"
+description = "Day-1 agent harness spikes (doc 07 s14) against pinned LangChain v1"
+requires-python = ">=3.13"
+# Pinned exactly: spike results are only valid for these versions.
+dependencies = [
+    "langchain==1.5.2",
+    "langchain-core==1.8.5",
+    "langgraph==1.2.24",
+    "langgraph-checkpoint==4.3.2",
+    "langchain-anthropic==1.7.13",
+    "langchain-openai==1.8.5",
+    "anthropic==2.14.0",
+    "openai==3.60.0",
+    "python-dotenv>=1.2.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.2.0",
+    "pytest-asyncio==1.5.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["."]
+python_files = ["spike_*.py"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q -rA"
+markers = ["real: makes real provider calls (deselect with -m 'not real')"]

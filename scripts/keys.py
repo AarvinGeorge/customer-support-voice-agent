@@ -22,6 +22,17 @@ from pathlib import Path
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
+DB_SERVICES = ("agent", "core", "knowledge")
+DB_ROLES = ("owner", "app")
+DB_NAME = "quillstack"
+DB_HOST = "postgres:5432"
+# (service, role, env name) for the six URLs of doc 07 section 15.2: *_app is the runtime role, *_owner migrates.
+DB_URL_PLAN = tuple(
+    (svc, role, f"{svc.upper()}_DB_URL" if role == "app" else f"{svc.upper()}_DB_OWNER_URL")
+    for svc in DB_SERVICES for role in DB_ROLES
+)
+
+
 @dataclass(frozen=True)
 class KeySpec:
     """What: description of one secret the app needs.
@@ -31,7 +42,7 @@ class KeySpec:
     name: str
     purpose: str
     prefixes: tuple[str, ...]  # accepted prefixes; empty means no prefix check
-    source: str  # "provider" (a person pastes it) or "generated" (random, made by gen)
+    source: str  # "provider" (pasted), "generated" (random, made by gen) or "composed" (built by gen from others)
     verify_url: str | None = None
 
 
@@ -54,6 +65,10 @@ REGISTRY: tuple[KeySpec, ...] = (
     KeySpec("DEMO_ACCESS_CODE", "Gate on the demo URL (shared with reviewers)", (), "generated"),
     KeySpec("OPERATOR_ACCESS_CODE", "Gate on the operator approvals page", (), "generated"),
     KeySpec("POSTGRES_PASSWORD", "Local and VM Postgres password (Compose)", (), "generated"),
+    *(KeySpec(f"{svc.upper()}_{role.upper()}_PASSWORD", f"Postgres password of role {svc}_{role}", (),
+              "generated") for svc in DB_SERVICES for role in DB_ROLES),
+    *(KeySpec(name, f"Database URL for role {svc}_{role} (composed from its password)", (), "composed")
+      for svc, role, name in DB_URL_PLAN),
 )
 SPECS = {s.name: s for s in REGISTRY}
 
@@ -74,12 +89,27 @@ def read_env(path: Path) -> dict[str, str]:
     return out
 
 
+def require_live_target(path: Path) -> None:
+    """What: refuse a dangling symlink, naming the missing target.
+    Use when: before reading or writing the env file. Inputs: path. Output: none.
+    Side effects: raises FileNotFoundError if path is a symlink whose target does not exist.
+    Role: stops a stale link from silently minting a fresh secrets file."""
+    if path.is_symlink() and not path.exists():
+        raise FileNotFoundError(
+            f"{path} is a symlink to a missing file: {os.path.realpath(path)} "
+            "(fix the link or restore the target; nothing was written)"
+        )
+
+
 def upsert_env(path: Path, name: str, value: str) -> None:
     """What: set NAME=value in the env file, replacing an existing line or appending one.
     Use when: storing a key. Inputs: path, name, value (no newlines). Output: none.
-    Side effects: atomic rewrite of the file with mode 0600. Role: the only writer of .env."""
+    Side effects: raises FileNotFoundError on a dangling symlink; atomic rewrite of the file with mode 0600; a symlinked path is resolved first so the
+    link stays a link and the target is the file rewritten. Role: the only writer of .env."""
     if "\n" in value or "\r" in value:
         raise ValueError("value must be a single line")
+    require_live_target(path)
+    path = Path(os.path.realpath(path))
     lines = path.read_text().splitlines(keepends=True) if path.exists() else []
     new_line = f"{name}={value}\n"
     replaced = False
@@ -154,6 +184,7 @@ def verify(spec: KeySpec, value: str) -> str:
 def cmd_status() -> int:
     """What: print each registry key as MISSING or masked. Use when: checking setup.
     Inputs: none. Output: exit 1 if any key is missing. Side effects: reads .env. Role: subcommand."""
+    require_live_target(ENV_PATH)
     env = read_env(ENV_PATH)
     missing_now = 0
     for spec in REGISTRY:
@@ -168,6 +199,7 @@ def cmd_set(names: list[str]) -> int:
     """What: prompt (hidden) for each named key, or every provider key, and save it.
     Use when: adding or rotating keys. Inputs: key names. Output: exit 0 on success.
     Side effects: writes .env. Role: subcommand."""
+    require_live_target(ENV_PATH)
     targets = names or [s.name for s in REGISTRY if s.source == "provider"]
     for name in targets:
         if name not in SPECS:
@@ -209,8 +241,10 @@ def cmd_verify() -> int:
 def generate_missing(path: Path) -> list[str]:
     """What: create a random value for every generated secret that is not set yet.
     Use when: first setup, or after adding a new generated secret. Inputs: env file path.
+    Then composes the six database URLs (doc 07 s15.2) from the role passwords.
     Output: names that were created (empty if nothing was missing); never overwrites a set value.
-    Side effects: writes the env file. Role: generator for internal secrets."""
+    Side effects: writes the env file; raises FileNotFoundError on a dangling symlink. Role: generator for internal secrets."""
+    require_live_target(path)
     env = read_env(path)
     made = []
     for spec in REGISTRY:
@@ -219,12 +253,20 @@ def generate_missing(path: Path) -> list[str]:
         short = spec.name in ("DEMO_ACCESS_CODE", "OPERATOR_ACCESS_CODE")
         upsert_env(path, spec.name, secrets.token_urlsafe(9 if short else 32))
         made.append(spec.name)
+    env = read_env(path)
+    for svc, role, name in DB_URL_PLAN:
+        if env.get(name):
+            continue
+        pw = env[f"{svc.upper()}_{role.upper()}_PASSWORD"]
+        upsert_env(path, name, f"postgresql://{svc}_{role}:{pw}@{DB_HOST}/{DB_NAME}")
+        made.append(name)
     return made
 
 
 def cmd_gen() -> int:
     """What: generate missing internal secrets and say which. Use when: first setup.
     Inputs: none. Output: exit 0. Side effects: writes .env. Role: subcommand."""
+    require_live_target(ENV_PATH)
     made = generate_missing(ENV_PATH)
     print("Generated: " + (", ".join(made) if made else "nothing (all already set)"))
     return 0
@@ -238,6 +280,16 @@ def main(argv: list[str]) -> int:
         print("Usage: python3 scripts/keys.py status | set [NAME ...] | verify | gen")
         return 0
     cmd, rest = argv[0], argv[1:]
+    try:
+        return run_command(cmd, rest)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def run_command(cmd: str, rest: list[str]) -> int:
+    """What: route one subcommand to its handler. Use when: main dispatches. Inputs: cmd, args.
+    Output: exit code. Side effects: per subcommand. Role: dispatch table."""
     if cmd == "status":
         return cmd_status()
     if cmd == "set":
