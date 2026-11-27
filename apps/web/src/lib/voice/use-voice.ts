@@ -24,7 +24,7 @@ import { VOICE_LABELS, isLive } from "./machine";
  * Side effects: none.
  * Role: constant (stable reference for useSyncExternalStore).
  */
-const IDLE: VoiceSnapshot = Object.freeze({ state: "idle", label: VOICE_LABELS.idle, caption: null, error: null, muted: false, endsAt: null });
+const IDLE: VoiceSnapshot = Object.freeze({ state: "idle", label: VOICE_LABELS.idle, caption: null, error: null, muted: false, endsAt: null, agentLine: null });
 
 /**
  * What: what the console needs to drive a call.

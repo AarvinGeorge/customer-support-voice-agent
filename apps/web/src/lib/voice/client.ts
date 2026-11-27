@@ -7,12 +7,13 @@
  * Output: a VoiceClient (connect, end, subscribe, getSnapshot, settled).
  * Side effects: microphone capture; one POST voice/token (agent mints the secret, doc 07 s6.6);
  *   one POST to api.openai.com with the ephemeral secret; a peer connection, data channel and
- *   audio element; a 10-minute timer (doc 07 s8.1). The secret stays in a local variable: it is
+ *   audio element; a 10-minute timer (doc 07 s8.1); POST transcript of finished items (through
+ *   the relay, CS-E-05.S4.T3). The secret stays in a local variable: it is
  *   never stored, logged or put in the snapshot.
  * Role: CS-E-05.S3.T3 VoiceClient. The browser never sets instructions or tools (they are in the
  *   minted session). A dropped call returns to chat with the thread intact (06 s17).
  */
-import { LIMITS, type VoiceToken } from "@contracts/contracts";
+import { LIMITS, type TranscriptPost, type VoiceToken } from "@contracts/contracts";
 import type { StoreApi } from "zustand";
 import { ApiError, apiFetch, type ApiDeps } from "@/lib/api/client";
 import type { TurnStoreState } from "@/lib/turns/store";
@@ -64,6 +65,8 @@ export interface VoiceSnapshot {
   muted: boolean;
   /** Epoch ms when the 10-minute cap ends the call; null when no call is open. */
   endsAt: number | null;
+  /** What the agent is saying now (live transcript), or null. */
+  agentLine: string | null;
 }
 
 /**
@@ -164,7 +167,7 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
   const d: Required<VoiceClientDeps> = { ...browserDeps(), ...deps };
   const api: ApiDeps = { fetch: d.fetch };
   const listeners = new Set<() => void>();
-  let snap: VoiceSnapshot = { state: "idle", label: VOICE_LABELS.idle, caption: null, error: null, muted: false, endsAt: null };
+  let snap: VoiceSnapshot = { state: "idle", label: VOICE_LABELS.idle, caption: null, error: null, muted: false, endsAt: null, agentLine: null };
   let epoch = 0;
   let media: MediaStream | null = null;
   let pc: RTCPeerConnection | null = null;
@@ -250,7 +253,7 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
     epoch += 1;
     teardown();
     const state = nextVoiceState(snap.state, "fail");
-    update({ state, error: words, caption: null, muted: false, endsAt: null });
+    update({ state, error: words, caption: null, muted: false, endsAt: null, agentLine: null });
   };
 
   /**
@@ -265,7 +268,7 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
     epoch += 1;
     teardown();
     const state = nextVoiceState(snap.state, "end");
-    if (state !== snap.state || snap.endsAt !== null) update({ state, caption: null, muted: false, endsAt: null });
+    if (state !== snap.state || snap.endsAt !== null) update({ state, caption: null, muted: false, endsAt: null, agentLine: null });
   };
 
   /**
@@ -327,6 +330,12 @@ export function createVoiceClient({ sessionId, store, deps = {} }: VoiceClientOp
         },
         onMachine: dispatch,
         onCaption: (caption) => update({ caption }),
+        onAgentLine: (agentLine) => {
+          if (agentLine !== snap.agentLine) update({ agentLine });
+        },
+        postTranscript: async (body: TranscriptPost) => {
+          await apiFetch<void>(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`, { method: "POST", body }, api);
+        },
         deps: api,
       });
       relay = r;

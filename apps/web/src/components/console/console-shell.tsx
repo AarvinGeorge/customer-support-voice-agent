@@ -105,6 +105,7 @@ export function announcement(thread: readonly ThreadItem[], turns: Readonly<Reco
   const last = thread.at(-1);
   if (last === undefined || last.kind === "user") return "";
   if (last.kind === "error") return `Couldn't send. ${last.message}`;
+  if (last.kind === "agent-voice") return "";
   const turn = turns[last.turnId];
   if (turn === undefined) return "";
   const summary = trailSummary(turn);
@@ -366,7 +367,7 @@ export function ConsoleShell({
           </div>
           <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
             {isLive(voice.state) ? (
-              <VoiceDock voice={voice} levels={vc.levels} step={step} onMute={vc.mute} onStopSpeaking={vc.stopSpeaking} onEnd={vc.end} />
+              <VoiceDock voice={voice} levels={vc.levels} step={step} agentLine={voice.agentLine} onMute={vc.mute} onStopSpeaking={vc.stopSpeaking} onEnd={vc.end} />
             ) : (
               <>
                 <VoiceLine state={voice.state} label={voice.label} caption={null} error={voice.error} />

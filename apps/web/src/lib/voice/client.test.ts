@@ -336,4 +336,23 @@ describe("VoiceClient", () => {
     h.client.stopSpeaking();
     expect(ch.sent.map((m) => JSON.parse(m) as { type: string })).toEqual([{ type: "output_audio_buffer.clear" }]);
   });
+
+  it("posts finished transcript items to /transcript when the call ends, and shows what the agent says", async () => {
+    const h = harness();
+    const ch = await connectLive(h);
+    ch.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: "u1", transcript: "Hello" });
+    ch.emit({ type: "response.created", response: { id: "r1", status: "in_progress", output: [] } });
+    ch.emit({ type: "response.output_audio_transcript.delta", response_id: "r1", item_id: "a1", delta: "Hi there." });
+    ch.emit({ type: "output_audio_buffer.started", response_id: "r1" });
+    expect(h.client.getSnapshot().agentLine).toBe("Hi there.");
+    ch.emit({ type: "output_audio_buffer.stopped", response_id: "r1" });
+    expect(h.client.getSnapshot().agentLine).toBeNull();
+    h.client.end();
+    await vi.advanceTimersByTimeAsync(0);
+    const call = h.fetchMock.mock.calls.find(([u]) => String(u) === `/api/sessions/${SID}/transcript`);
+    expect(call).toBeDefined();
+    const body = JSON.parse(String((call?.[1] as RequestInit).body)) as { voice_session_id: string; items: Array<{ realtime_item_id: string }> };
+    expect(body.voice_session_id).toBe("vs-1");
+    expect(body.items.map((i) => i.realtime_item_id)).toEqual(["u1"]);
+  });
 });

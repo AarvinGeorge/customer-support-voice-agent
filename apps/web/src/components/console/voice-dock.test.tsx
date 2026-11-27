@@ -58,6 +58,7 @@ const snap = (state: VoiceState, over: Partial<VoiceSnapshot> = {}): VoiceSnapsh
   error: null,
   muted: false,
   endsAt: null,
+  agentLine: null,
   ...over,
 });
 
@@ -143,5 +144,11 @@ describe("VoiceDock", () => {
     expect(screen.getByText("Actually, what about the invoice")).toBeTruthy();
     expect(screen.getByTestId("voice-state").textContent).toContain("7:48 left");
     vi.useRealTimers();
+  });
+
+  it("while speaking, the caption box shows what the agent is saying", () => {
+    render(<VoiceDock voice={snap("speaking")} agentLine="The invoice ending 0412 is for 96 dollars." levels={noLevels} onMute={() => {}} onStopSpeaking={() => {}} onEnd={() => {}} />);
+    expect(screen.getAllByText("Agent")).toHaveLength(2);
+    expect(screen.getByText("The invoice ending 0412 is for 96 dollars.")).toBeTruthy();
   });
 });
