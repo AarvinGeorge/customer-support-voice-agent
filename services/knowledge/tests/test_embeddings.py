@@ -36,6 +36,7 @@ def test_batch_is_one_call_and_counted():
     seen = []
 
     def handler(req):
+        """What: fake HTTP handler. Use when: the test below. Inputs: request. Output: response. Side effects: records the body. Role: test double."""
         seen.append(json.loads(req.content))
         return ok(req)
     e = make(handler)
@@ -71,6 +72,7 @@ def test_wrong_vector_length_fails():
     """What: a 1024-float vector raises EmbeddingError naming the length. Use when: CI. Inputs: bad response.
     Output: assertion. Side effects: none. Role: draft A step 8 loud check."""
     def bad(req):
+        """What: fake HTTP handler. Use when: the test below. Inputs: request. Output: response. Side effects: none. Role: test double."""
         return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1] * 1024}]})
     with pytest.raises(EmbeddingError, match="1024"):
         make(bad).embed_batch(["x"])
@@ -82,6 +84,7 @@ def test_retries_429_then_succeeds_and_counts_each_attempt():
     state = {"n": 0}
 
     def handler(req):
+        """What: fake HTTP handler. Use when: the test below. Inputs: request. Output: response. Side effects: counts calls. Role: test double."""
         state["n"] += 1
         return httpx.Response(429, json={}) if state["n"] == 1 else ok(req)
     e = make(handler, retry_sleep=0)
@@ -101,6 +104,7 @@ def test_async_embed_one_times_out():
     """What: aembed_one raises EmbeddingError when the server hangs longer than the timeout. Use when: CI.
     Inputs: a handler that sleeps. Output: assertion. Side effects: sleeps 0.3 s. Role: search budget."""
     async def slow(req):
+        """What: fake HTTP handler. Use when: the test below. Inputs: request. Output: response. Side effects: sleeps 0.5 s. Role: test double."""
         await asyncio.sleep(0.5)
         return ok(req)
     e = make(slow)

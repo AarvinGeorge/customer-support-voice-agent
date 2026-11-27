@@ -1,5 +1,5 @@
 # Local dev conveniences (picked up automatically by `docker compose up`; the VM uses `-f compose.yaml` only).
-# Source is mounted and uvicorn reloads on change; Caddy is published on localhost:3000 (SITE_ORIGIN).
+# Source is mounted and uvicorn reloads on change; Caddy is published on localhost:${EDGE_PORT:-3000} (SITE_ORIGIN; set EDGE_PORT per lane stack).
 # Migrations are baked into the image. After adding or changing a SQL or hook file on an EXISTING stack run
 # `scripts/migrate.sh` (rebuilds and reruns migrate_core, migrate_knowledge, migrate_agent; applied files are skipped).
 # `docker compose up -d --build` also reruns a migrate job whose image changed, but do not rely on it; the script is explicit.
@@ -9,7 +9,9 @@ x-dev-python: &dev-python
 
 services:
   caddy:
-    ports: !override ["127.0.0.1:3000:80"]
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    ports: !override ["127.0.0.1:${EDGE_PORT:-3000}:80"]
   agent_a:
     <<: *dev-python
     volumes: ["./services/agent/src:/app/src"]

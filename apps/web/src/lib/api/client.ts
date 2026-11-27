@@ -1,13 +1,28 @@
 /**
  * What: typed fetch wrapper for the agent public API (`/api`, same origin, doc 07 s2.2).
  * Use when: the web app calls any JSON `/api/*` route (not the SSE turn stream, which
- *   streamTurn in CS-E-04.S4.T2 owns, though it reuses parseErrorResponse for pre-stream errors).
+ *   stream.ts owns, though it reuses parseErrorResponse, NetworkError and redirectOn401).
  * Inputs: a path, a method and JSON body, and optional injected fetch and redirect.
- * Output: the parsed 2xx body, or a thrown ApiError or ContractViolationError.
+ * Output: the parsed 2xx body, or a thrown ApiError, ContractViolationError or NetworkError.
  * Side effects: network request; on 401 navigates to the access gate unless the caller opts out.
  * Role: the single place the browser turns doc 07 s1.3 error envelopes into typed errors.
  */
-import { ERROR_CLASSES, type ErrorBody, type ErrorEnvelope } from "./contract-types";
+import { ERROR_CLASSES, type ErrorBody, type ErrorEnvelope } from "@contracts/contracts";
+
+/**
+ * What: compile-time proof that the runtime class list and the ErrorBody union agree.
+ * Use when: never called; a class added to or removed from the contract fails `pnpm typecheck`.
+ * Inputs: none.
+ * Output: none.
+ * Side effects: none.
+ * Role: drift guard between ERROR_CLASSES and ErrorBody["class"].
+ */
+type ClassListMatchesUnion = [ErrorBody["class"]] extends [(typeof ERROR_CLASSES)[number]]
+  ? [(typeof ERROR_CLASSES)[number]] extends [ErrorBody["class"]]
+    ? true
+    : never
+  : never;
+export const CLASS_LIST_MATCHES_UNION: ClassListMatchesUnion = true;
 
 /**
  * What: where a 401 sends the visitor (the access gate is the home page, CS-E-04.S1).
@@ -79,6 +94,60 @@ export class ContractViolationError extends Error {
     this.status = status;
     this.raw = raw;
   }
+}
+
+/**
+ * What: why a request produced no contract-shaped answer at the transport level.
+ * Use when: switching on NetworkError.reason (UI copy, the drop path of CS-E-04.S4.T3).
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: "network": fetch or a body read failed (offline, DNS, reset); "aborted": the caller
+ *   aborted; "no_bytes_timeout": no byte for 20 s (doc 07 s8.1 browser chat no bytes);
+ *   "turn_timeout": the whole turn passed 50 s; "dropped": the stream closed before turn.completed.
+ */
+export type NetworkErrorReason = "network" | "aborted" | "no_bytes_timeout" | "turn_timeout" | "dropped";
+
+/**
+ * What: a transport failure: no response, an aborted request, a stalled or dropped stream.
+ * Use when: catching API or stream failures that carry no ErrorEnvelope.
+ * Inputs: reason, the turn id if the stream had started (turn.started seen), the cause.
+ * Output: an Error subclass.
+ * Side effects: none.
+ * Role: typed network error (scaffold review M2); a stream error keeps turnId so the UI can
+ *   look the turn up instead of guessing, because a turn is not idempotent (doc 07 s9).
+ */
+export class NetworkError extends Error {
+  readonly reason: NetworkErrorReason;
+  readonly turnId: string | null;
+
+  /**
+   * What: builds a NetworkError.
+   * Use when: fetch rejects, a body read fails, a watchdog fires or a stream drops.
+   * Inputs: reason, turnId (null outside a started turn), cause (the original error, if any).
+   * Output: the instance.
+   * Side effects: none.
+   * Role: constructor.
+   */
+  constructor(reason: NetworkErrorReason, turnId: string | null = null, cause?: unknown) {
+    super(`network: ${reason}${turnId ? ` (turn ${turnId})` : ""}`, cause === undefined ? undefined : { cause });
+    this.name = "NetworkError";
+    this.reason = reason;
+    this.turnId = turnId;
+  }
+}
+
+/**
+ * What: maps a thrown fetch or body-read error to a NetworkError.
+ * Use when: wrapping a fetch call or a body read.
+ * Inputs: the caught value, the request's abort signal.
+ * Output: NetworkError with reason "aborted" if the signal fired, else "network".
+ * Side effects: none.
+ * Role: one place that decides abort versus network failure.
+ */
+export function toNetworkError(err: unknown, signal?: AbortSignal | null): NetworkError {
+  if (err instanceof NetworkError) return err;
+  return new NetworkError(signal?.aborted ? "aborted" : "network", null, err);
 }
 
 /**
@@ -192,12 +261,17 @@ function envelopeProblem(value: unknown): string | null {
  * What: turns a non-2xx Response into ApiError or ContractViolationError.
  * Use when: any fetch to `/api/*` (JSON or the SSE turn route before the stream opens) is not ok.
  * Inputs: the Response, the current time in ms.
- * Output: the error to throw (it does not throw itself).
+ * Output: the error to throw (it does not throw itself); NetworkError if the body read fails.
  * Side effects: consumes the response body.
  * Role: shared error parser for apiFetch and streamTurn.
  */
-export async function parseErrorResponse(res: Response, nowMs: number): Promise<ApiError | ContractViolationError> {
-  const raw = await res.text();
+export async function parseErrorResponse(res: Response, nowMs: number): Promise<ApiError | ContractViolationError | NetworkError> {
+  let raw: string;
+  try {
+    raw = await res.text();
+  } catch (err) {
+    return toNetworkError(err);
+  }
   let json: unknown;
   try {
     json = JSON.parse(raw);
@@ -238,6 +312,22 @@ function browserPathname(): string | null {
 }
 
 /**
+ * What: applies the 401 policy to a parsed error.
+ * Use when: apiFetch or streamTurn got a non-2xx response.
+ * Inputs: the parsed error, ApiDeps (on401, redirect, pathname).
+ * Output: none.
+ * Side effects: on a contract-shaped 401, navigates to ACCESS_GATE_PATH unless on401 is "throw"
+ *   or the visitor is already on the gate (no reload loop).
+ * Role: shared 401 handling for JSON calls and the turn stream.
+ */
+export function redirectOn401(err: Error, deps: ApiDeps): void {
+  const onGate = (deps.pathname ?? browserPathname)() === ACCESS_GATE_PATH;
+  if (err instanceof ApiError && err.status === 401 && (deps.on401 ?? "redirect") === "redirect" && !onGate) {
+    (deps.redirect ?? browserRedirect)(ACCESS_GATE_PATH);
+  }
+}
+
+/**
  * What: a request id for X-Request-Id (doc 07 s1.2, optional header).
  * Use when: the caller did not supply one.
  * Inputs: none.
@@ -245,7 +335,7 @@ function browserPathname(): string | null {
  * Side effects: none.
  * Role: helper; the agent mints an id when the header is absent.
  */
-function newRequestId(): string | null {
+export function newRequestId(): string | null {
   return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : null;
 }
 
@@ -256,7 +346,8 @@ function newRequestId(): string | null {
  * Output: the parsed 2xx JSON as T (undefined for 204 or an empty body).
  * Side effects: network request with a fresh X-Request-Id; on a contract-shaped 401
  *   redirects to ACCESS_GATE_PATH unless on401 is "throw" or the visitor is already on the
- *   gate (no reload loop). A non-JSON 2xx body throws ContractViolationError. It never retries by itself:
+ *   gate (no reload loop). A non-JSON 2xx body throws ContractViolationError; a rejected fetch or
+ *   body read throws NetworkError ("aborted" if req.signal fired). It never retries by itself:
  *   ApiError.retryAfterS tells the UI how long to count down (doc 07 s9; turns are not idempotent).
  * Role: the API client entry point.
  */
@@ -271,15 +362,25 @@ export async function apiFetch<T = unknown>(path: string, req: ApiRequest = {}, 
     headers.set("content-type", "application/json");
     body = JSON.stringify(req.body);
   }
-  const res = await doFetch(path, {
-    method: req.method ?? "GET",
-    headers,
-    body,
-    credentials: "same-origin",
-    signal: req.signal,
-  });
+  let res: Response;
+  try {
+    res = await doFetch(path, {
+      method: req.method ?? "GET",
+      headers,
+      body,
+      credentials: "same-origin",
+      signal: req.signal,
+    });
+  } catch (err) {
+    throw toNetworkError(err, req.signal);
+  }
   if (res.ok) {
-    const text = await res.text();
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (err) {
+      throw toNetworkError(err, req.signal);
+    }
     if (text === "") return undefined as T;
     try {
       return JSON.parse(text) as T;
@@ -288,9 +389,6 @@ export async function apiFetch<T = unknown>(path: string, req: ApiRequest = {}, 
     }
   }
   const err = await parseErrorResponse(res, (deps.now ?? Date.now)());
-  const onGate = (deps.pathname ?? browserPathname)() === ACCESS_GATE_PATH;
-  if (err instanceof ApiError && err.status === 401 && (deps.on401 ?? "redirect") === "redirect" && !onGate) {
-    (deps.redirect ?? browserRedirect)(ACCESS_GATE_PATH);
-  }
+  redirectOn401(err, deps);
   throw err;
 }

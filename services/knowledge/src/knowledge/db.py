@@ -5,6 +5,8 @@ Side effects: opens a connection per call with a 1 s connect timeout and stateme
 Role: the only module that talks to Postgres; unit tests replace Database with a fake."""
 from __future__ import annotations
 
+from typing import Any
+
 import psycopg
 from psycopg.rows import dict_row
 
@@ -24,20 +26,20 @@ class Database:
         Role: constructor."""
         self.url = url
 
-    def _connect(self) -> psycopg.Connection:
+    def _connect(self) -> psycopg.Connection[dict[str, Any]]:
         """What: open a connection with short timeouts. Use when: any method. Inputs: none.
         Output: connection (dict rows). Side effects: network. Role: shared connect settings."""
-        return psycopg.connect(self.url, row_factory=dict_row, connect_timeout=1,
+        return psycopg.connect(self.url, row_factory=dict_row, connect_timeout=1,  # pyright: ignore[reportArgumentType, reportReturnType]
                                options="-c statement_timeout=1000")
 
     def status(self) -> dict | None:
-        """What: readiness facts: chunk count and the latest ok corpus_version. Use when: /readyz.
+        """What: readiness facts: chunk count and the corpus_version of the latest finished run (ok or failed). Use when: /readyz.
         Inputs: none. Output: {"chunks": int, "corpus_version": str} or None when the database does not answer.
         Side effects: two SELECTs. Role: doc 07 s4.2 readiness (calibration check arrives with CS-E-02.S3.T3)."""
         try:
             with self._connect() as conn:
-                n = conn.execute("SELECT count(*)::int AS n FROM chunks").fetchone()["n"]
-                run = conn.execute("SELECT corpus_version FROM ingest_runs WHERE status = 'ok' "
+                n = conn.execute("SELECT count(*)::int AS n FROM chunks").fetchone()["n"]  # pyright: ignore[reportOptionalSubscript]
+                run = conn.execute("SELECT corpus_version FROM ingest_runs WHERE corpus_version IS NOT NULL "
                                    "ORDER BY finished_at DESC LIMIT 1").fetchone()
             return {"chunks": n, "corpus_version": (run["corpus_version"] if run else None) or "none"}
         except psycopg.Error:
@@ -96,7 +98,7 @@ class Database:
                 "SELECT a.article_slug AS slug, a.title, a.doc_version, a.last_updated::text AS last_updated, "
                 "count(c.chunk_id)::int AS chunks FROM articles a LEFT JOIN chunks c USING (article_slug) "
                 "GROUP BY a.article_slug ORDER BY a.article_slug").fetchall()
-            run = conn.execute("SELECT corpus_version, finished_at FROM ingest_runs WHERE status = 'ok' "
+            run = conn.execute("SELECT corpus_version, finished_at FROM ingest_runs WHERE corpus_version IS NOT NULL "
                                "ORDER BY finished_at DESC LIMIT 1").fetchone()
         return {"corpus_version": (run["corpus_version"] if run else None) or "none", "articles": arts,
                 "last_ingest_at": run["finished_at"].isoformat() if run else None}

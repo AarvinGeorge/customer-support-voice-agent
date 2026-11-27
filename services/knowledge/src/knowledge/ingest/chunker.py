@@ -23,7 +23,8 @@ SMALL = 50
 TARGET_MAX = 400
 HARD_MAX = 500
 ERROR_CODE = re.compile(r"\bE-[A-Z]{2,6}-\d{3}\b")
-_TIERS_ANY = re.compile(r"<!--\s*tiers\b.*?-->", re.I | re.S)
+_TIERS_ANY = re.compile(r"<!--\s*tier.*?-->", re.I | re.S)
+_TIERS_OPEN = re.compile(r"<!--\s*tier", re.I)
 _TIERS_STRICT = re.compile(r"<!--\s*tiers:\s*([A-Za-z]+(?:\s*,\s*[A-Za-z]+)*)\s*-->", re.I)
 DOC_VERSION = 1  # the Notion snapshot carries no version; one constant until it does
 
@@ -131,6 +132,9 @@ def _prepare(article: Article, policy) -> list[Block]:
 
     text = _TIERS_ANY.sub(tiers_sentinel, body)
     text = COMMENT.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    for m in _TIERS_OPEN.finditer(text):  # an unclosed tier comment is not blanked above and would act as none
+        line_no = article.body_first_line + text.count("\n", 0, m.start())
+        raise IngestError(f"{article.filename}:{line_no}: unclosed tiers comment, it must read '<!-- tiers: a, b -->'")
     out: list[Block] = []
     for b in parse_blocks(text, article.body_first_line):
         if b.kind == "tiers":

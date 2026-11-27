@@ -2,9 +2,12 @@
 Use when: pytest collects this package. Inputs: none. Output: fixtures `client` and TOKEN.
 Side effects: sets KNOWLEDGE_TOKEN_AGENT and a fake DB url in the environment of the test process.
 Role: builds the app against a fake database so unit tests never need Postgres."""
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
+ROOT = Path(__file__).resolve().parents[3]
 TOKEN = "test-token-for-knowledge-agent-0123456789"
 
 
@@ -35,3 +38,14 @@ def client(monkeypatch):
     monkeypatch.setattr(db, "Database", lambda url: FakeDb())
     with TestClient(create_app(), raise_server_exceptions=False) as c:
         yield c
+
+
+@pytest.fixture()
+def corpus(tmp_path):
+    """What: a temp copy of three real articles. Use when: job tests. Inputs: tmp_path. Output: directory.
+    Side effects: copies files. Role: small, real input."""
+    d = tmp_path / "articles"
+    d.mkdir()
+    for name in ("refund-policy", "sso-login-troubleshooting", "support-and-escalation"):
+        (d / f"{name}.md").write_text((ROOT / "data" / "articles" / f"{name}.md").read_text())
+    return d
