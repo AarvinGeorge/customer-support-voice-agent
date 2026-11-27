@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 from contracts import limits
+from contracts import redact as redaction
 from contracts.tools import ASK_SUPPORT_AGENT_TOOL
 from contracts.trust import escape_untrusted
 
@@ -55,12 +56,18 @@ def _text_of(content: Any) -> str:
     return ""
 
 
-def summary_from_thread(values: dict[str, Any] | None) -> SessionSummary:
-    """What: build the summary from the checkpointed SupportState values (already PIN-redacted, doc 07 s2.4 9a).
-    Use when: voice/token. Inputs: thread channel values or None for a new session.
+def summary_from_thread(values: dict[str, Any] | None,
+                        context: redaction.RedactContext | None = None) -> SessionSummary:
+    """What: build the summary from the checkpointed SupportState values. Only what doc 07 s6.6 lists leaves:
+    the verified name, the pending read-back, and the customer's own words (the <customer_message> block of a
+    human message; human messages without one, such as merged <voice_transcript> blocks, are skipped, and no
+    <account_context> or <turn_context> ever leaves) plus agent replies. Every line goes through contracts redact
+    (emails masked, the s11.1 PIN scanner once CS-E-03.S7.T9 adds it).
+    Use when: voice/token. Inputs: thread channel values or None for a new session; the session's RedactContext.
     Output: SessionSummary: verified name from claims_snapshot (or a neutral label), the last agent message as
     the read-back while state.pending is set, the last 8 customer and agent text messages.
-    Side effects: none. Role: core stays the authority; this is display context for speech only."""
+    Side effects: none. Role: core stays the authority; this is display context for speech only (review PR #2 I2)."""
+    ctx = context or redaction.RedactContext()
     if not values:
         return SessionSummary()
     name = None
@@ -73,13 +80,14 @@ def summary_from_thread(values: dict[str, Any] | None) -> SessionSummary:
             text = _text_of(m.content).strip()
             speaker = "agent"
         elif kind == "human":
-            raw = _text_of(m.content)
-            found = _CUSTOMER_RE.search(raw)
-            text, speaker = (found.group(1) if found else raw).strip(), "customer"
+            found = _CUSTOMER_RE.search(_text_of(m.content))
+            if not found:
+                continue
+            text, speaker = found.group(1).strip(), "customer"
         else:
             continue
         if text:
-            lines.append((speaker, text))
+            lines.append((speaker, redaction.redact(text, ctx)))
     readback = None
     if values.get("pending"):
         readback = next((t for s, t in reversed(lines) if s == "agent"), None)
