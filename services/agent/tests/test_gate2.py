@@ -441,3 +441,63 @@ async def test_the_verifier_receives_the_escaped_input():
     [msgs] = ver.model.seen
     human = str(msgs[-1].content)
     assert human.count("</draft>") == 1 and human.count("</evidence>") == 1
+
+
+# --- fix round 2 (re-review N1): questions and acknowledgements never fail on zero claims ---------------------
+CLARIFYING_REPLIES = [
+    "Which plan are you on?", "Are you asking about a refund or about cancelling?",
+    "Are you the owner of the workspace?", "Sorry, I can't quite tell what you mean. Could you rephrase?",
+    "Do you want me to open a ticket for the billing team?", "Is the refund for the Pro plan charge from this month?",
+    "Could you tell me which workspace you mean?", "Which charge do you mean, the one from 21 November?",
+    "Got it. Which invoice is this about?", "Thanks. Is this for your team or only for you?",
+    "Understood. Do you want to change the plan or cancel it?", "Happy to help with billing. What do you need?",
+    CLARIFY_LINE, "Is the last day of your trial today?", "Do you see an error code? If so, what does it say?",
+    "To look at your account I need to verify you. Please enter your account ID and support PIN in the form below.",
+]
+ASSERTIVE_DRAFTS = [
+    DRAFT, "You have a 14-day trial.", "It costs USD 96 per seat.", "You are ineligible for that on your plan.",
+    "That is not allowed.", "You cannot do that.", "Your tier does not include that.", "Refunds are always approved.",
+    "The Business plan includes audit logs.", "We can waive that fee.", "The rule PRO_PAST_LATE_BAND applies.",
+    "Which plan are you on? The Pro plan refunds within 30 days.",
+]
+
+
+@pytest.mark.parametrize("draft", CLARIFYING_REPLIES)
+def test_zero_claims_on_a_clarifying_reply_passes(draft: str):
+    out = enforce_code_rules(GroundingResult("pass", []), draft, SUSPECT, tool_names=set())
+    assert out.verdict == "pass" and out.passed
+
+
+@pytest.mark.parametrize("draft", ASSERTIVE_DRAFTS)
+def test_zero_claims_on_a_policy_assertion_still_fails_closed(draft: str):
+    assert needs_grounding(draft, False) is True
+    assert enforce_code_rules(GroundingResult("pass", []), draft, SUSPECT, tool_names=set()).verdict == "fail"
+
+
+@pytest.mark.parametrize("draft", [
+    "You're covered for the first fortnight.", "Yes, we can waive that for you.", "Students get half off.",
+    "There is a cooling-off period.", "You have until Friday to dispute it.", "Exports are unlimited on your account.",
+    "Storage is capped at ten gigabytes.",
+])
+def test_reviewer_r1_phrasings_now_run_gate2(draft: str):
+    assert needs_grounding(draft, False) is True
+
+
+async def test_two_clarifying_questions_in_a_row_never_open_a_ticket():
+    h = Harness(verifier(claims_json(), claims_json()), replies=[AIMessage("Which plan are you on?")])
+    first, events, values = await h.run()
+    assert first.end_reason == "answered" and first.final.text == "Which plan are you on?"
+    assert grounding_gate(events).verdict == "pass" and values.get("grounding_failures", 0) == 0
+    h.script(AIMessage("Are you asking about a refund or about cancelling?"))
+    second, _, values = await h.run(turn_id="019a7c2e-5b20-7000-8000-0000000000c3")
+    assert second.final.text == "Are you asking about a refund or about cancelling?"
+    assert h.tickets.reasons == [] and values.get("grounding_failures", 0) == 0
+
+
+async def test_a_clarifying_question_after_a_weak_search_is_kept():
+    search = AIMessage("", tool_calls=[{"name": "search_kb", "args": {"query": "refund"}, "id": "c1",
+                                        "type": "tool_call"}])
+    q = "Is the refund for the Pro plan charge from this month?"
+    h = Harness(verifier(claims_json()), replies=[search, AIMessage(q)], body=search_body("weak"))
+    outcome, events, _ = await h.run()
+    assert outcome.final.text == q and grounding_gate(events).verdict == "pass"

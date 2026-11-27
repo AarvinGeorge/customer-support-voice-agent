@@ -10,7 +10,7 @@ Inputs: the knowledge SearchResponse JSON, the checkpointed weak_streak, the bou
 the scope_classifier role (data/models.yaml).
 Output: retrieval_decision, apply_retrieval_gate, retrieval_unavailable, run_scope_check, next_weak_streak,
 ScopeClassifier, GateStep, start_gate_step, last_user_text, GATE_TAGS; matches_policy, needs_grounding,
-turn_messages, evidence_text, verifier_input, enforce_code_rules, GroundingVerifier, GroundingResult,
+asserts_policy, turn_messages, evidence_text, verifier_input, enforce_code_rules, GroundingVerifier, GroundingResult,
 parse_verifier_reply, citations_for, CLARIFY_LINE, CHECKING_POLICY_LINE.
 Side effects: emits step.started, gate and step.completed on the turn stream; sets TurnControl.route; the scope
 classifier (2 s) and the verifier (3 s) each make one model call, 0 retries, tagged internal:gate and nostream.
@@ -242,7 +242,7 @@ _NUM_WORDS = ("zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twel
 _POLICY_PARTS = (
     r"\d",  # digits: amounts, durations ("30-day"), dates, percentages
     rf"\b(?:{_NUM_WORDS})(?:[\s-]+(?:{_NUM_WORDS}|of|and))*[\s-]+(?:(?:business|calendar|working)[\s-]+)?"
-    r"(?:day|week|month|year|hour|minute|quarter)s?\b",  # "thirty-day", "two weeks", "a few business days"
+    r"(?:day|week|fortnight|month|year|hour|minute|quarter)s?\b",  # "thirty-day", "two weeks", "a few business days"
     r"[$€£¥₹%]|\b(?:usd|eur|gbp|cad|aud|inr|jpy|dollars?|euros?|pounds?|cents?|bucks|percent)\b",  # money
     r"\bfees?\b|\b(?:pric|cost|charg|bill|invoic|pay|paid|credit|discount|money|prorat|reimburs|subscri|refund|cancel)",
     r"\bfor\s+free\b|\bfree\s+(?:of|plan|tier|trial|seat|account)",
@@ -252,10 +252,29 @@ _POLICY_PARTS = (
     r"\bcan[’']?t\b|\bmust\b|\brequire|\bonly\b|\bexcept|\bapprov|\bdeclin|\bden(?:y|ied)\b|\brefus|"
     r"\bguarantee|\bwarrant|\bpolic(?:y|ies)\b|\bterms\b|\blimit|\brules?\b|\balways\b|\bnever\b",  # eligibility
     r"\bpast[\s-]due\b|\bunpaid\b|\boverdue\b|\bowner|\badmin|\broles?\b",  # reason-code language
+    r"\bwaiv|\bcover(?:ed|s|age)?\b|\bunlimited\b|\bcap(?:ped|s)?\b|\bhalf[\s-]off\b|\bfortnight|\buntil\b|"
+    r"\bperiod\b|\bdisput",  # re-review R1 additions
 )
 _POLICY_RE = re.compile("|".join(_POLICY_PARTS), re.IGNORECASE)
 _REASON_CODE_RE = re.compile(r"\b[A-Z]{2,}(?:_[A-Z0-9]+)+\b")  # PRO_PAST_LATE_BAND and the other s13.1 codes
 VERIFIER_TAGS = ("evidence", "draft")
+
+# Policy-bearing ASSERTIONS (re-review N1): what zero extracted claims must not hide. Narrower than _POLICY_RE and
+# applied only to the draft's non-question sentences, so "Which plan are you on?" or "I can't quite tell what you
+# mean" never fails on zero claims, while "You have a 14-day trial." still does.
+_ASSERTION_PARTS = (
+    r"\d|[$€£¥₹%]|\b(?:usd|eur|gbp|cad|aud|inr|jpy|dollars?|euros?|cents?|percent)\b",  # numbers and money
+    rf"\b(?:{_NUM_WORDS})(?:[\s-]+(?:{_NUM_WORDS}|of|and))*[\s-]+(?:(?:business|calendar|working)[\s-]+)?"
+    r"(?:day|week|fortnight|month|year|hour|minute|quarter)s?\b",  # durations in words
+    r"\brefund|\bcredit|\bdiscount|\bwaiv|\bprorat|\bhalf[\s-]off\b|\bfree\s+(?:of|plan|tier|trial)",
+    r"eligib|\bqualif|\bentitle|\ballow|\bpermit|\bapprov|\bguarantee|\bnot\s+(?:covered|included|possible)\b",
+    r"\b(?:you|they|we|it|that|this|refunds?|charges?|owners?|admins?|members?)\s+(?:cannot|can[’']?t|can\s+not|"
+    r"must|are\s+not\s+able|is\s+not\s+able)\b",  # eligibility statements (not "I can't tell")
+    r"\b(?:pro|business|enterprise|starter|premium)\b",  # plan names
+    r"\b(?:plan|tier)s?\b[^.!?]*\b(?:includ|cover|allow|support|get|come|ha[sv]e?)",  # tier rules
+)
+_ASSERTION_RE = re.compile("|".join(_ASSERTION_PARTS), re.IGNORECASE)
+_SENTENCE_RE = re.compile(r"[^.!?]+[.!?]*")
 
 VERIFIER_PROMPT = (
     "You check a customer support draft against the evidence the support agent had in this turn. The evidence "
@@ -275,9 +294,19 @@ VERIFIER_PROMPT = (
 def matches_policy(draft: str) -> bool:
     """What: the policy-claim pattern: digits, durations in words ("thirty-day", "two weeks"), money in any form,
     plan and tier names in any case, eligibility and rule words, and reason-code language.
-    Use when: needs_grounding; enforce_code_rules (zero claims on a policy draft fails closed).
+    Use when: needs_grounding (whether the verifier runs at all).
     Inputs: draft text. Output: bool. Side effects: none. Role: recall first (review PR #52 I1)."""
     return bool(_POLICY_RE.search(draft) or _REASON_CODE_RE.search(draft))
+
+
+def asserts_policy(draft: str) -> bool:
+    """What: true when a sentence of the draft that is not a question states a number, money, a duration, an
+    eligibility rule, a plan name or a tier rule (or names a reason code).
+    Use when: enforce_code_rules, for a verifier reply with zero claims. Inputs: draft text. Output: bool.
+    Side effects: none. Role: re-review N1: questions, acknowledgements, the fixed clarifying line and the
+    verification prompt pass on zero claims; a policy assertion the verifier did not extract still fails closed."""
+    statements = [m.group(0) for m in _SENTENCE_RE.finditer(draft) if not m.group(0).rstrip().endswith("?")]
+    return any(_ASSERTION_RE.search(t) or _REASON_CODE_RE.search(t) for t in statements)
 
 
 def needs_grounding(draft: str, turn_had_tool_result: bool) -> bool:
@@ -404,7 +433,8 @@ def enforce_code_rules(result: GroundingResult, draft: str, chunks: dict[str, di
     1. A supported claim counts only when its source_id is a relevant chunk this turn that is not flagged
        injection_suspect, or the name of a non-search tool that returned a result this turn. Any other source
        (null, unknown id, "search_kb", a suspect chunk) makes the claim unsupported, so it is never cited.
-    2. Zero claims on a draft that matches the policy-claim pattern fails closed.
+    2. Zero claims fails closed only when a non-question sentence asserts policy (asserts_policy); a question
+       or an acknowledgement with zero claims passes.
     Use when: GroundingMiddleware, right after the verifier. Inputs: result, draft text, TurnControl
     retrieval_chunks, this turn's tool names. Output: a new GroundingResult ("error" is returned unchanged).
     Side effects: none. Role: review PR #52 I2 and I3; rules in code, not in the prompt."""
@@ -414,7 +444,7 @@ def enforce_code_rules(result: GroundingResult, draft: str, chunks: dict[str, di
     claims = [{**c, "supported": bool(c["supported"]) and (c.get("source_id") or "") in sources}
               for c in result.claims]
     if not claims:
-        verdict = "fail" if matches_policy(draft) else "pass"
+        verdict = "fail" if asserts_policy(draft) else "pass"
     else:
         verdict = "pass" if all(c["supported"] for c in claims) else "fail"
     return GroundingResult(verdict, claims, result.commitment)
