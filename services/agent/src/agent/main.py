@@ -4,8 +4,9 @@ Inputs: Settings (env); optional probes dict (tests).
 Output: create_app(settings, probes) and the module-level ASGI `app`.
 Side effects: the lifespan opens a psycopg pool (agent_app), the TrajectoryWriter (its own small pool), a Redis
 client and an httpx client and closes them on shutdown; nothing connects at import time.
-Role: composition root of the HTTP service: access gate, visitor routes, voice routes, health. The /turns route and
-the agent loop arrive in later tasks; until an Ingress is set on app.state.voice, voice/ask answers 503.
+Role: composition root of the HTTP service: access gate, visitor routes, turn and voice routes, health. The agent
+loop and the shared Ingress are built by agent.composition.wire_app in the lifespan; without them /turns and
+voice/ask answer 503.
 """
 from __future__ import annotations
 
@@ -20,9 +21,11 @@ from fastapi.responses import JSONResponse
 
 from agent.access import install_access_gate, install_not_owned_handler
 from agent.api import install_api
+from agent.composition import wire_app
 from agent.assembly import CheckpointerFactory, postgres_checkpointer_factory
 from agent.ingress import PgTurnStore
 from agent.readiness import Probe, build_probes, readiness
+from agent.routes.turns import install_turns
 from agent.sessions import PgSessionStore, SessionStore
 from agent.settings import Settings
 from agent.trajectory import TrajectoryWriter
@@ -34,14 +37,16 @@ log = logging.getLogger("agent.main")
 
 def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None = None,
                checkpointer_factory: CheckpointerFactory | None = None,
-               session_store: SessionStore | None = None, voice: VoiceDeps | None = None) -> FastAPI:
+               session_store: SessionStore | None = None, voice: VoiceDeps | None = None,
+               ingress: Any = None) -> FastAPI:
     """What: build the app.
     Use when: process start (no args) or tests (settings, fake probes, fake checkpointer factory).
     Inputs: Settings (default from env); probes keyed redis, postgres, core, knowledge (default: real
     probes built in the lifespan); checkpointer factory (default: the agent_app Postgres pool; with
     injected probes and no factory, no checkpointer is opened); session_store (tests; default
     PgSessionStore built in the lifespan); voice (tests; default VoiceDeps built in the lifespan with the
-    Postgres voice store, the OpenAI minter and the voice role of models.yaml).
+    Postgres voice store, the OpenAI minter and the voice role of models.yaml); ingress (tests; default built by
+    agent.composition.wire_app in the lifespan).
     Output: FastAPI app. Side effects: none until the lifespan runs.
     Role: app factory."""
     cfg = settings or Settings.from_env()
@@ -87,6 +92,8 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
         app.state.trajectory = trajectory
         if voice is None:
             app.state.voice = _voice_deps(app, pool, http)
+        if ingress is None:
+            wire_app(app, cfg)
         app.state.probes = build_probes(pg_pool=pool, redis_client=rds, http=http, core_url=cfg.core_url,
                                         knowledge_url=cfg.knowledge_url)
         try:
@@ -125,6 +132,7 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
         app.state.probes = probes
     app.state.session_store = session_store
     app.state.voice = voice
+    app.state.ingress = ingress
     install_access_gate(app)  # before install_http: ids and headers wrap the gate
     install_http(app, cfg.served_by)
     install_not_owned_handler(app)
@@ -132,6 +140,7 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
         if not value:
             log.error("%s is not set: nobody can sign in until it is", name)
     install_api(app)
+    install_turns(app)
     install_voice(app)
 
     @app.get("/api/healthz")
