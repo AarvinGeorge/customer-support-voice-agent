@@ -6,7 +6,8 @@ Inputs: primary and fallback chat models (from ModelRegistry roles agent and age
 a LangGraph checkpointer.
 Output: MIDDLEWARE_ORDER, build_middleware, build_agent, build_agent_from_registry, run_config,
 postgres_checkpointer_factory, memory_checkpointer_factory.
-Side effects: none at build time (no network); the Postgres factory opens a connection when entered.
+Side effects: none at build time (no network); the Postgres factory opens a small connection pool when
+entered (the app lifespan enters it once and closes it on shutdown).
 Role: composition root of the agent loop. Tool limits live in ToolGuard (D-048), so no
 ToolCallLimitMiddleware is added.
 """
@@ -27,6 +28,8 @@ from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from agent.middleware.stubs import (
     DeadlineAndFaultMiddleware,
@@ -116,20 +119,38 @@ def run_config(session_id: str, **extra: Any) -> dict[str, Any]:
     return {"configurable": {"thread_id": str(session_id)}, **extra}
 
 
+CHECKPOINTER_POOL_MAX = 4  # concurrent checkpoint reads and writes per replica (turns run in parallel)
+
+
 def postgres_checkpointer_factory(dsn: str) -> CheckpointerFactory:
-    """What: factory for an AsyncPostgresSaver on the agent schema's app role.
-    Use when: service startup (`async with factory() as saver`). Tables are created by the
-    migrate runner (D-047), so setup() is not called here; timeouts and the Postgres read-back are
-    verified in the T7 spikes.
+    """What: factory for an AsyncPostgresSaver over a small psycopg pool on the agent schema's app role.
+    Use when: the app lifespan (`async with factory() as saver`), once per process. Tables are created
+    by the migrate runner (D-047), so setup() is not called here.
     Inputs: libpq DSN for agent_app.
     Output: zero-arg callable returning an async context manager that yields the saver.
-    Side effects: opens and closes one connection when entered and exited.
+    Side effects: opens the pool on enter without waiting (startup never blocks on Postgres) and closes
+    it on exit. Each checkout waits at most 2 s; each connect and each statement is capped at 2 s
+    (doc 07 s8.1 "Postgres checkpointer 2 s, 0 retries"); a broken connection is checked and replaced on
+    checkout, so the saver recovers after a Postgres restart (review PR #17 I1).
     Role: production checkpointer seam.
     """
-    def factory() -> Any:
-        """What: open the saver. Use when: entered once. Inputs: none. Output: async cm.
-        Side effects: connects on enter. Role: factory closure."""
-        return AsyncPostgresSaver.from_conn_string(dsn)
+    timeout_s = limits.POSTGRES_CHECKPOINTER_TIMEOUT_S
+
+    @asynccontextmanager
+    async def factory() -> AsyncIterator[BaseCheckpointSaver]:
+        """What: open the pool and yield the saver. Use when: entered once. Inputs: none. Output: saver.
+        Side effects: pool open and close. Role: factory closure."""
+        pool: AsyncConnectionPool[Any] = AsyncConnectionPool(
+            dsn, min_size=1, max_size=CHECKPOINTER_POOL_MAX, open=False, timeout=timeout_s,
+            check=AsyncConnectionPool.check_connection, name="checkpointer",
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row,
+                    "connect_timeout": int(timeout_s),
+                    "options": f"-c statement_timeout={int(timeout_s * 1000)}"})
+        await pool.open(wait=False)
+        try:
+            yield AsyncPostgresSaver(conn=pool)
+        finally:
+            await pool.close()
     return factory
 
 
