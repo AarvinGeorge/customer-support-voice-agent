@@ -483,8 +483,9 @@ def test_role_decline_next_step_is_stated_by_its_section():
     """Browser pass 2b: the next step the decline gives ("an owner or billing admin ... can ask for it") must be
     what the cited section says (the request needs an owner or billing admin)."""
     c = load_policy(POLICY)
-    rc = c.reason_codes["ROLE_NOT_PERMITTED"]
+    rc = c.reason_codes[ReasonCode.ROLE_NOT_PERMITTED]
     section = _section_text(rc.policy_ref.article, rc.policy_ref.section).lower()
+    assert rc.message is not None
     assert "needs an owner or billing admin" in section and "owner or billing admin" in rc.message.lower()
 
 
@@ -492,4 +493,4 @@ def test_the_s3_fixture_decline_message_is_the_policy_message():
     """Review PR #71 M3: the contract fixtures quote the decline core sends; a stale copy would test the old text."""
     from contracts.fixtures_build import ROLE_DECLINE_MESSAGE
 
-    assert ROLE_DECLINE_MESSAGE == load_policy(POLICY).reason_codes["ROLE_NOT_PERMITTED"].message
+    assert ROLE_DECLINE_MESSAGE == load_policy(POLICY).reason_codes[ReasonCode.ROLE_NOT_PERMITTED].message
