@@ -23,7 +23,12 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest==9.2.0", "pytest-asyncio==1.5.0", "python-dotenv>=1.2.4"]
+dev = [
+    "fakeredis>=2.26",
+    "pytest==9.2.0",
+    "pytest-asyncio==1.5.0",
+    "python-dotenv>=1.2.4",
+]
 
 [tool.uv.sources]
 # Non-editable: macOS hides .pth files in .venv and Python 3.13 skips them (BRIEF known trap).

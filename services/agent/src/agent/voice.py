@@ -24,13 +24,14 @@ from contracts.base import StrictModel
 from contracts import redact as redaction
 from contracts.redact import RedactContext
 from contracts.trust import wrap_voice_transcript
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from langchain_core.utils.uuid import uuid7
 
 from agent.access import owned_session
 from agent.assembly import run_config
 from agent.ingress import Ingress, IngressInput, SessionRow, TurnRow, to_response
+from agent.limits.ratelimit import canonical_sid, limit_session_post, limit_voice_token, turn_counter
 from agent.models.config import RoleSpec
 from agent.prompt import _escape_frame  # pyright: ignore[reportPrivateUsage]  (the frame-tag escaper, M5)
 from agent.realtime import MintedSecret, MintError, SessionSummary, build_session_config, render_instructions, \
@@ -80,18 +81,28 @@ class VoiceStore(Protocol):
     """What: the voice_sessions and transcript_items operations. Use when: typing.
     Inputs: see methods. Output: see methods. Side effects: database. Role: storage port."""
 
-    async def create_voice_session(self, row: VoiceSessionRow) -> None: ...
-    async def get_voice_session(self, voice_session_id: str) -> VoiceSessionRow | None: ...
+    async def create_voice_session(self, row: VoiceSessionRow) -> None:
+        """What: insert a voice session row. Use when: voice/token minted. Inputs: row. Output: none. Side effects: one INSERT. Role: port method."""
+        ...
+    async def get_voice_session(self, voice_session_id: str) -> VoiceSessionRow | None:
+        """What: look up a voice session. Use when: step 3 of ingress and transcript posts. Inputs: voice session id. Output: row or None. Side effects: one read. Role: port method."""
+        ...
     async def add_transcript_items(self, session_id: str, voice_session_id: str,
-                                   items: list[TranscriptItemIn]) -> int: ...
-    async def take_unmerged(self, session_id: str, turn_id: str, covered: CoveredItem | None) -> list[MergedItem]: ...
+                                   items: list[TranscriptItemIn]) -> int:
+        """What: store client-reported transcript items. Use when: POST /transcript. Inputs: session id, voice session id, items. Output: count stored. Side effects: INSERTs (re-posts ignored). Role: port method."""
+        ...
+    async def take_unmerged(self, session_id: str, turn_id: str, covered: CoveredItem | None) -> list[MergedItem]:
+        """What: claim unmerged transcript items for a turn. Use when: ingress step 12. Inputs: session id, turn id, covered item. Output: items to fold in. Side effects: UPDATE marks them merged. Role: port method."""
+        ...
 
 
 class Minter(Protocol):
     """What: mints a Realtime client secret. Use when: typing. Inputs: session config. Output: MintedSecret.
     Side effects: provider call. Role: port (OpenAIRealtimeMinter in production)."""
 
-    async def mint(self, session: dict[str, Any]) -> MintedSecret: ...
+    async def mint(self, session: dict[str, Any]) -> MintedSecret:
+        """What: mint a Realtime client secret. Use when: voice/token. Inputs: session config. Output: MintedSecret. Side effects: one provider call. Role: port method."""
+        ...
 
 
 @dataclass
@@ -289,11 +300,12 @@ def install_voice(app: FastAPI) -> None:
     Inputs: app (reads app.state.voice and app.state.session_store). Output: none. Side effects: mutates app.
     Role: route wiring (the access gate already ran: cookie and Origin)."""
 
-    @app.post("/api/sessions/{sid}/voice/token")
+    @app.post("/api/sessions/{sid}/voice/token", dependencies=[Depends(limit_voice_token)])
     async def post_voice_token(sid: str, _: EmptyBody, request: Request) -> Any:
         """What: mint a Realtime client secret for this session and record the voice session.
         Use when: the mic click. Inputs: session id, `{}`. Output: VoiceToken (max_session_s 600).
         Side effects: one OpenAI call, INSERT agent.voice_sessions. Role: doc 07 s2.2, s6.6."""
+        sid = canonical_sid(sid)
         owned = await owned_session(request.app.state.session_store, sid, request.state.visitor_id)
         sid = owned.session_id  # canonical spelling from the row, never the path alias (review M4)
         deps: VoiceDeps | None = getattr(request.app.state, "voice", None)
@@ -320,6 +332,7 @@ def install_voice(app: FastAPI) -> None:
         Use when: the browser relays an ask_support_agent function call.
         Inputs: session id, VoiceAskRequest. Output: text/event-stream; turn.completed.final.say is spoken.
         Side effects: a full agent turn. Role: doc 07 s2.2, s2.4 (20 s deadline from TURN_DEADLINE_S)."""
+        sid = canonical_sid(sid)
         owned = await owned_session(request.app.state.session_store, sid, request.state.visitor_id)
         sid = owned.session_id  # canonical (review M4)
         deps: VoiceDeps | None = getattr(request.app.state, "voice", None)
@@ -334,15 +347,16 @@ def install_voice(app: FastAPI) -> None:
         result = await deps.ingress.handle(IngressInput(
             session_id=sid, visitor_id=request.state.visitor_id, client_turn_id=str(body.client_turn_id),
             mode="voice", input_kind="voice", text=body.question, realtime_call_id=body.realtime_call_id,
-            body=body, redact_context=_redact_context(owned)))
+            body=body, redact_context=_redact_context(owned), count_turn=turn_counter(request, sid)))
         return to_response(request, result)
 
-    @app.post("/api/sessions/{sid}/transcript", status_code=204)
+    @app.post("/api/sessions/{sid}/transcript", status_code=204, dependencies=[Depends(limit_session_post)])
     async def post_transcript(sid: str, body: TranscriptPost, request: Request) -> Response:
         """What: store client-reported voice chatter for the step 12 merge.
         Use when: the browser flushes final transcription items. Inputs: session id, TranscriptPost.
         Output: 204. Side effects: INSERT agent.transcript_items (redacted, re-posts ignored).
         Role: doc 07 s2.2, s2.6 (untrusted display text)."""
+        sid = canonical_sid(sid)
         session = await owned_session(request.app.state.session_store, sid, request.state.visitor_id)
         sid = session.session_id  # canonical (review M4)
         deps: VoiceDeps | None = getattr(request.app.state, "voice", None)
