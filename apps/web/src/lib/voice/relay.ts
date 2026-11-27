@@ -16,8 +16,14 @@
  *   starts when the call arrives and includes that wait; on timeout or error answer the fixed line;
  *   interrupting never cancels the backend turn; a call that has not posted when the call ends
  *   never posts.
+ *   CS-E-05.S4.T3 adds live transcripts and interruption: user finals and what the agent said
+ *   go into the shared thread keyed by item_id (the say is linked to its voice/ask turn); a
+ *   barge-in or Stop speaking while agent audio plays sends `output_audio_buffer.clear` at once
+ *   (audio only, never response.cancel, SPIKE_NOTE s5) and freezes the bubble at what was heard
+ *   (wall time since the response's audio started, then the server's `conversation.item.truncated`
+ *   audio_end_ms); finished items are posted to POST /transcript in batches (doc 07 s2.3, s2.6).
  */
-import { LIMITS, type TurnCompletedEvent, type VoiceAskRequest } from "@contracts/contracts";
+import { LIMITS, type TranscriptItemIn, type TranscriptPost, type TurnCompletedEvent, type VoiceAskRequest } from "@contracts/contracts";
 import type { StoreApi } from "zustand";
 import type { ApiDeps } from "@/lib/api/client";
 import type { TurnStoreState } from "@/lib/turns/store";
@@ -33,6 +39,62 @@ import type { VoiceEvent } from "./machine";
  * Role: constant; never "nothing was changed", because the server turn may still finish.
  */
 export const RELAY_FAILURE_SAY = "I couldn't finish that just now. Please check the chat for the result before trying again.";
+
+/**
+ * What: the speaking rate used to estimate what was heard of an interrupted utterance.
+ * Use when: heardText.
+ * Inputs: none.
+ * Output: characters per second.
+ * Side effects: none.
+ * Role: constant. On WebRTC the transcript text arrives faster than the audio plays and no event
+ *   carries the heard text, only audio_end_ms, so the cut is the time heard times this rate
+ *   (about 165 words a minute, a typical synthetic voice).
+ */
+export const CHARS_PER_SECOND = 15;
+
+/**
+ * What: the debounce before finished items are posted to /transcript.
+ * Use when: queueing a finished item.
+ * Inputs: none.
+ * Output: ms.
+ * Side effects: none.
+ * Role: constant; batching keeps a 10-minute call well under the 120 posts per hour limit (doc
+ *   07 s9) and lets a truncation event refine an interrupted item before it is sent.
+ */
+const TRANSCRIPT_FLUSH_MS = 1500;
+
+/**
+ * What: the part of an utterance heard in a given time, cut at a word boundary.
+ * Use when: freezing an interrupted assistant bubble.
+ * Inputs: the full text, the heard time in ms.
+ * Output: the heard prefix (the whole text when the time covers it).
+ * Side effects: none.
+ * Role: pure helper.
+ */
+export function heardText(text: string, heardMs: number): string {
+  const n = Math.floor((Math.max(0, heardMs) / 1000) * CHARS_PER_SECOND);
+  if (n >= text.length) return text;
+  let cut = text.slice(0, n);
+  if (!/\s/.test(text.charAt(n))) cut = cut.replace(/\S*$/, "");
+  return cut.trimEnd();
+}
+
+/**
+ * What: one assistant utterance the relay tracks.
+ * Use when: the relay's `spoken` map.
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: state record. `ended` is true once its audio finished playing (output_audio_buffer.stopped).
+ */
+interface Utterance {
+  responseId: string | null;
+  text: string;
+  done: boolean;
+  interrupted: boolean;
+  heardMs: number | null;
+  ended: boolean;
+}
 
 /**
  * What: the Realtime tool name the relay answers.
@@ -102,6 +164,10 @@ export interface RelayDeps {
   send: (msg: Record<string, unknown>) => void;
   onMachine?: (event: VoiceEvent) => void;
   onCaption?: (caption: Caption | null) => void;
+  /** What the agent is saying now (null when its audio stops), for the dock. */
+  onAgentLine?: (text: string | null) => void;
+  /** Posts finished transcript items (POST /transcript); absent posts nothing. */
+  postTranscript?: (body: TranscriptPost) => Promise<void>;
   deps?: ApiDeps;
   transcriptWaitMs?: number;
   relayTimeoutMs?: number;
@@ -117,6 +183,8 @@ export interface RelayDeps {
  */
 export interface VoiceRelay {
   handle: (event: RealtimeEvent) => void;
+  /** Stop speaking: clears the agent's audio buffer (audio only; the backend turn goes on). */
+  stopSpeaking: () => void;
   close: () => void;
   settled: () => Promise<void>;
 }
@@ -197,6 +265,154 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
   let sayResponseId: string | null = null;
   let sayPlaying = false;
   let sayInterrupted = false;
+  let lastTurnId: string | null = null;
+  const sayTurn = new Map<string, string | null>();
+  /** Assistant utterances by item id. */
+  const spoken = new Map<string, Utterance>();
+  let playing: { responseId: string; startedAt: number } | null = null;
+  /** Responses whose audio has started playing. */
+  const started = new Set<string>();
+  /** Responses whose audio was cleared, with the heard time to give utterances that arrive later. */
+  const wiped = new Map<string, number>();
+  /** The say is created and its audio has not finished playing (review PR #55 I2). */
+  let sayPending = false;
+  const outbox = new Map<string, TranscriptItemIn>();
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * What: sends every queued transcript item in one POST.
+   * Use when: the debounce fires, or close.
+   * Inputs: none.
+   * Output: none.
+   * Side effects: one postTranscript call (errors are dropped: the transcript is a best-effort
+   *   copy; the live thread is unaffected).
+   * Role: helper.
+   */
+  const flush = () => {
+    if (flushTimer !== null) clearTimeout(flushTimer);
+    flushTimer = null;
+    if (outbox.size === 0 || d.postTranscript === undefined) return;
+    const items = [...outbox.values()].slice(0, 50);
+    for (const i of items) outbox.delete(i.realtime_item_id);
+    void d.postTranscript({ voice_session_id: d.voiceSessionId, items }).catch(() => undefined);
+    if (outbox.size > 0) flush();
+  };
+
+  /**
+   * What: queues one finished item for /transcript (a later call for the same item replaces it).
+   * Use when: a user final, an assistant utterance done or interrupted, a truncation.
+   * Inputs: item id, role, text, interrupted.
+   * Output: none.
+   * Side effects: restarts the debounce timer.
+   * Role: helper; the client time is when the item first finished.
+   */
+  const queue = (itemId: string, role: "user" | "assistant", text: string, interrupted: boolean) => {
+    if (d.postTranscript === undefined || closed || text === "") return;
+    const client_ts = outbox.get(itemId)?.client_ts ?? new Date(Date.now()).toISOString();
+    outbox.set(itemId, { realtime_item_id: itemId, role, text: text.slice(0, 4000), interrupted, client_ts });
+    if (flushTimer !== null) clearTimeout(flushTimer);
+    flushTimer = setTimeout(flush, TRANSCRIPT_FLUSH_MS);
+  };
+
+  /**
+   * What: the utterance record for an item, created on first sight.
+   * Use when: a transcript delta or done.
+   * Inputs: the item id and the event's response id.
+   * Output: the record (interrupted from the start when its response was already cleared).
+   * Side effects: inserts into `spoken`.
+   * Role: helper.
+   */
+  const utterance = (itemId: string, responseId: string | null): Utterance => {
+    const have = spoken.get(itemId);
+    if (have !== undefined) return have;
+    const cut = responseId === null ? undefined : wiped.get(responseId);
+    const u: Utterance = { responseId, text: "", done: false, interrupted: cut !== undefined, heardMs: cut ?? null, ended: false };
+    spoken.set(itemId, u);
+    return u;
+  };
+
+  /**
+   * What: writes an assistant utterance into the thread, and into the outbox once it is settled.
+   * Use when: its transcript is done, its audio ended, it was interrupted, or a truncation refined it.
+   * Inputs: the item id.
+   * Output: none.
+   * Side effects: store.upsertAgentVoice; queue only when the audio ended or was interrupted
+   *   (the server keeps the first post of an item, so the first one must be final: review PR #55 I1).
+   * Role: helper.
+   */
+  const publish = (itemId: string) => {
+    const u = spoken.get(itemId);
+    if (u === undefined || (!u.done && !u.interrupted)) return;
+    const heard = u.interrupted ? heardText(u.text, u.heardMs ?? 0) : u.text;
+    const turnId = u.responseId === null ? null : (sayTurn.get(u.responseId) ?? null);
+    d.store.getState().upsertAgentVoice({ itemId, text: u.text, heard, interrupted: u.interrupted, turnId });
+    if (u.interrupted || (u.ended && u.done)) queue(itemId, "assistant", heard, u.interrupted);
+  };
+
+  /**
+   * What: marks every utterance of a response interrupted at a heard time.
+   * Use when: its audio was cleared or the call ended while it played or waited to play.
+   * Inputs: the response id, the heard ms.
+   * Output: none.
+   * Side effects: updates records, publish; remembers the response in `wiped`.
+   * Role: helper.
+   */
+  const cutResponse = (responseId: string, heardMs: number) => {
+    wiped.set(responseId, heardMs);
+    for (const [itemId, u] of spoken) {
+      if (u.responseId !== responseId || u.interrupted || u.ended) continue;
+      u.interrupted = true;
+      u.heardMs = heardMs;
+      publish(itemId);
+    }
+  };
+
+  /**
+   * What: stops the agent audio that is playing or queued and freezes what was said so far.
+   * Use when: a barge-in (speech_started), Stop speaking, a matching cleared event, or call end,
+   *   while agent audio plays or the say waits to play.
+   * Inputs: whether to send the clear (false for a cleared event and at call end).
+   * Output: none.
+   * Side effects: sends output_audio_buffer.clear (never response.cancel: the backend turn and
+   *   any function call in flight go on); marks the playing response's utterances interrupted
+   *   with the heard time, and a say that had not started with 0 ms heard (it sets
+   *   last_assistant_interrupted, review PR #55 I2); the dock's agent line clears.
+   * Role: helper (06 s17: agent audio stops within 0.5 s of barge-in).
+   */
+  const interruptPlaying = (send = true) => {
+    if (playing === null && !sayPending) return;
+    const now = Date.now();
+    const current = playing;
+    playing = null;
+    if (send && !closed) d.send({ type: "output_audio_buffer.clear" });
+    if (current !== null) {
+      if (current.responseId === sayResponseId) sayInterrupted = true;
+      cutResponse(current.responseId, now - current.startedAt);
+    }
+    if (sayPending && sayResponseId !== null) {
+      sayInterrupted = true;
+      if (current?.responseId !== sayResponseId) cutResponse(sayResponseId, 0);
+    }
+    sayPending = false;
+    sayPlaying = false;
+    d.onAgentLine?.(null);
+  };
+
+  /**
+   * What: settles the utterances of every response that has played, when the audio stops.
+   * Use when: output_audio_buffer.stopped.
+   * Inputs: none.
+   * Output: none.
+   * Side effects: marks records ended and publishes them (queues them for /transcript).
+   * Role: helper (no stopped arrives between back-to-back responses, SPIKE_NOTE s5).
+   */
+  const audioEnded = () => {
+    for (const [itemId, u] of spoken) {
+      if (u.responseId === null || !started.has(u.responseId) || u.ended || u.interrupted) continue;
+      u.ended = true;
+      publish(itemId);
+    }
+  };
 
   /**
    * What: waits for the final transcript of a user item, up to the wait window.
@@ -239,6 +455,7 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
    * Role: helper. An empty final transcript counts as none (review PR #46 M4).
    */
   const relayOne = async (callId: string, args: string | null, userItemId: string | null, interrupted: boolean, deadline: number): Promise<FunctionCallOutput | null> => {
+    lastTurnId = null;
     const transcript = (await waitFinal(userItemId)) || null;
     if (closed) return null;
     const question = (questionOf(args) || transcript || "").slice(0, 2000);
@@ -256,6 +473,7 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
     try {
       const left = Math.max(1, deadline - Date.now());
       const { completed } = await d.store.getState().sendVoiceAsk(d.sessionId, body, { deps: d.deps, turnMs: left, noBytesMs: left });
+      lastTurnId = completed.turn_id;
       return toFunctionOutput(completed);
     } catch {
       return { say: RELAY_FAILURE_SAY, escalated: false };
@@ -319,6 +537,7 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
         return;
       case "input_audio_buffer.speech_started":
         if (sayPlaying) sayInterrupted = true;
+        interruptPlaying();
         d.onCaption?.(null);
         machine("user_speech");
         return;
@@ -341,7 +560,10 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
         finals.set(itemId, text);
         partial.delete(itemId);
         d.onCaption?.({ itemId, text, final: true });
-        if (text !== "") d.store.getState().addUserMessage(text, "voice");
+        if (text !== "") {
+          d.store.getState().addUserMessage(text, "voice", itemId);
+          queue(itemId, "user", text, false);
+        }
         for (const w of waiters.get(itemId) ?? []) w(text);
         waiters.delete(itemId);
         return;
@@ -353,8 +575,10 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
         const meta = (e.response as { metadata?: unknown } | undefined)?.metadata;
         if (sayTag !== null && str(meta, "qs_say") === sayTag) {
           sayTag = null;
+          sayTurn.set(id, lastTurnId);
           sayResponseId = id;
           sayInterrupted = false;
+          sayPending = true;
           machine("audio_started");
         }
         return;
@@ -362,19 +586,59 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
       case "response.done":
         onResponseDone(e);
         return;
-      case "output_audio_buffer.started":
-        if (str(e, "response_id") === sayResponseId && sayResponseId !== null) sayPlaying = true;
+      case "output_audio_buffer.started": {
+        const rid = str(e, "response_id");
+        if (rid === sayResponseId && sayResponseId !== null) sayPlaying = true;
+        if (rid !== null) {
+          playing = { responseId: rid, startedAt: Date.now() };
+          started.add(rid);
+        }
         machine("audio_started");
         return;
-      case "output_audio_buffer.stopped":
+      }
+      case "output_audio_buffer.stopped": {
+        const rid = str(e, "response_id");
+        if (sayResponseId !== null && (rid === sayResponseId || started.has(sayResponseId))) sayPending = false;
         sayPlaying = false;
+        playing = null;
+        audioEnded();
+        d.onAgentLine?.(null);
         machine("audio_stopped");
         return;
-      case "output_audio_buffer.cleared":
+      }
+      case "output_audio_buffer.cleared": {
+        const rid = str(e, "response_id");
+        if (rid !== null && playing !== null && rid !== playing.responseId) return;
         if (sayPlaying) sayInterrupted = true;
-        sayPlaying = false;
+        interruptPlaying(false);
         machine("audio_stopped");
         return;
+      }
+      case "response.output_audio_transcript.delta": {
+        if (itemId === null) return;
+        const u = utterance(itemId, str(e, "response_id"));
+        u.text += str(e, "delta") ?? "";
+        if (!u.interrupted) d.onAgentLine?.(u.text);
+        else publish(itemId);
+        return;
+      }
+      case "response.output_audio_transcript.done": {
+        if (itemId === null) return;
+        const u = utterance(itemId, str(e, "response_id"));
+        u.text = str(e, "transcript") ?? u.text;
+        u.done = true;
+        publish(itemId);
+        return;
+      }
+      case "conversation.item.truncated": {
+        const u = itemId === null ? undefined : spoken.get(itemId);
+        const end = typeof e.audio_end_ms === "number" ? e.audio_end_ms : null;
+        if (u === undefined || itemId === null || end === null) return;
+        u.interrupted = true;
+        u.heardMs = end;
+        publish(itemId);
+        return;
+      }
       default:
         return;
     }
@@ -382,7 +646,13 @@ export function createVoiceRelay(d: RelayDeps): VoiceRelay {
 
   return {
     handle,
+    stopSpeaking: () => {
+      if (playing !== null) interruptPlaying();
+      else if (!closed) d.send({ type: "output_audio_buffer.clear" });
+    },
     close: () => {
+      if (!closed) interruptPlaying(false);
+      flush();
       closed = true;
     },
     settled: async () => {

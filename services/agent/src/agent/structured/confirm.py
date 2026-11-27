@@ -23,9 +23,11 @@ import httpx
 from contracts import limits
 
 from agent.clients.core_agent import CoreAgentClient
+from agent.escalation import Escalator
 from agent.clients.http import ToolCallError, base_headers, call_json_within
 from agent.middleware.router import NO_TICKET_CLAUSE
 from agent.middleware.tool_guard import clamp_timeout, retry_fits
+from agent.settings import secret_problem
 from agent.steps import Step
 from agent.turn_control import TurnControl
 
@@ -73,9 +75,14 @@ class CoreCommitClient:
     @classmethod
     def from_env(cls, base_url: str, *, http: httpx.AsyncClient, demo_faults_enabled: bool = False) -> "CoreCommitClient":
         """What: build the client with the commit token from the environment. Use when: the app composition root.
-        Inputs: base URL, client, fault flag. Output: client. Side effects: reads one env var (never logged).
-        Role: the only read of the commit token in the agent."""
-        return cls(base_url, os.environ[COMMIT_TOKEN_ENV], http=http, demo_faults_enabled=demo_faults_enabled)
+        Inputs: base URL, client, fault flag. Output: client; ValueError naming the variable (never its value) when
+        it is unset, empty, a placeholder or too short (review PR #58 I2: an empty token must not start healthy).
+        Side effects: reads one env var (never logged). Role: the only read of the commit token in the agent."""
+        token = os.environ.get(COMMIT_TOKEN_ENV)
+        problem = secret_problem(token)
+        if problem is not None or token is None:
+            raise ValueError(f"{COMMIT_TOKEN_ENV} is {problem}: every commit would get 401")
+        return cls(base_url, token, http=http, demo_faults_enabled=demo_faults_enabled)
 
     def _headers(self, control: TurnControl, *, idempotency_key: str | None = None, turn: bool = True) -> dict[str, str]:
         """What: s1.2 headers, X-Turn-Id, Idempotency-Key, and the forwarded tool_error fault (s10).
@@ -142,28 +149,23 @@ def _line(text: str, outcome: str, changed: bool | None, end_reason: str = "answ
 
 
 def agent_ticket_opener(core: CoreAgentClient) -> OpenTicket:
-    """What: a failure-path ticket opener on the agent token: one attempt, clamped to min(3 s, remaining) inside the
-    reserve, key {session_id}:{turn_id}:esc:{reason}, origin code.
-    Use when: the Confirmer's failure and unconfirmed rows (until the escalation module, CS-E-03.S4.T1, provides
-    its own opener). Inputs: core client. Output: async opener returning a TicketRef dict or None.
-    Side effects: at most one core ticket call. Role: doc 07 s8.1 failure-path ticket row (0 retries)."""
+    """What: the failure-path ticket opener for the Confirmer, on the agent token through the escalation module: one
+    attempt, clamped to min(3 s, remaining) (it runs in the reserve), key {session_id}:{turn_id}:esc:{reason}, origin
+    code, escalation_reason tool_failure (the L1 s7 row), category refund or billing.
+    Use when: the Confirmer's failure and unconfirmed rows. Inputs: core client. Output: async opener returning a
+    TicketRef dict or None. Side effects: at most one core ticket call and its escalation step.
+    Role: doc 07 s8.1 failure-path ticket row (0 retries)."""
+    escalator = Escalator(core)
 
     async def open_ticket(control: TurnControl, reason: str, pending: dict[str, Any]) -> dict[str, Any] | None:
-        """What: open the ticket. Use when: a commit or submit failed or is unconfirmed. Inputs: control, reason,
-        pending. Output: TicketRef dict or None on any failure. Side effects: one call. Role: opener."""
-        timeout = clamp_timeout(limits.CORE_TICKET_TIMEOUT_S, control.remaining_s(), reserve_s=0.0)
-        if timeout is None:
-            return None
+        """What: open the ticket. Use when: a commit or submit failed or is unconfirmed. Inputs: control, reason
+        (commit_failed, commit_unconfirmed, submit_failed, submit_unconfirmed), pending. Output: TicketRef dict or
+        None. Side effects: one call. Role: opener."""
         category = "refund" if pending.get("action_type") == "refund" else "billing"
-        body = {"category": category, "summary": f"{pending.get('title') or 'Pending action'}: {reason.replace('_', ' ')} "
-                f"({pending.get('pending_action_id')})", "steps_tried": [], "blocking": False, "origin": "code",
-                "escalation_reason": reason, "transcript_ref": control.session_id}
-        try:
-            res = await asyncio.wait_for(core.create_ticket(control, body, f"{control.session_id}:{control.turn_id}:esc:{reason}"),
-                                         timeout)
-        except (ToolCallError, TimeoutError, asyncio.TimeoutError):
-            return None
-        return res.get("ticket") if isinstance(res, dict) else None
+        summary = (f"{pending.get('title') or 'Pending action'}: {reason.replace('_', ' ')} "
+                   f"({pending.get('pending_action_id')}).")
+        return await escalator.open_ticket(control, "tool_failure", summary=summary, category=category,
+                                           key_reason=reason)
 
     return open_ticket
 

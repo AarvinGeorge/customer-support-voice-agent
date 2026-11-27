@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from agent.access import install_access_gate, install_not_owned_handler
 from agent.api import install_api
 from agent.composition import assert_wired, wire_app
+from agent.limits.ratelimit import install_limits
 from agent.assembly import CheckpointerFactory, postgres_checkpointer_factory
 from agent.ingress import PgTurnStore
 from agent.readiness import Probe, build_probes, readiness
@@ -73,7 +74,7 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
     async def _clients(app: FastAPI) -> AsyncIterator[None]:
         """What: the agent_app pool, Redis and HTTP clients plus the real probes.
         Use when: lifespan without injected probes. Inputs: app. Output: none.
-        Side effects: opens and closes the clients. Role: resource lifetime."""
+        Side effects: opens and closes the clients (also when the startup check fails). Role: resource lifetime."""
         import redis.asyncio as aioredis
         from psycopg_pool import AsyncConnectionPool
 
@@ -90,14 +91,14 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
         trajectory = TrajectoryWriter(cfg.agent_db_url, on_incomplete=PgTurnStore(pool).mark_events_incomplete)
         await trajectory.start()
         app.state.trajectory = trajectory
-        if voice is None:
-            app.state.voice = _voice_deps(app, pool, http)
-        if ingress is None:
-            wire_app(app, cfg)  # after trajectory.start(), so the Ingress gets the writer (review PR #48 I2)
-            assert_wired(app)   # a missing hook stops startup instead of failing silently
-        app.state.probes = build_probes(pg_pool=pool, redis_client=rds, http=http, core_url=cfg.core_url,
-                                        knowledge_url=cfg.knowledge_url)
         try:
+            if voice is None:
+                app.state.voice = _voice_deps(app, pool, http)
+            if ingress is None:
+                wire_app(app, cfg)  # after trajectory.start(), so the Ingress gets the writer (review PR #48 I2)
+                assert_wired(app)   # a missing hook, secret or (production) safety piece stops startup
+            app.state.probes = build_probes(pg_pool=pool, redis_client=rds, http=http, core_url=cfg.core_url,
+                                            knowledge_url=cfg.knowledge_url)
             yield
         finally:
             await trajectory.aclose()
@@ -137,6 +138,7 @@ def create_app(settings: Settings | None = None, probes: dict[str, Probe] | None
     install_access_gate(app)  # before install_http: ids and headers wrap the gate
     install_http(app, cfg.served_by)
     install_not_owned_handler(app)
+    install_limits(app)
     for name, value in ("SESSION_SIGNING_KEY", cfg.session_signing_key), ("DEMO_ACCESS_CODE", cfg.demo_access_code):
         if not value:
             log.error("%s is not set: nobody can sign in until it is", name)

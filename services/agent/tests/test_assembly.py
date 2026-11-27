@@ -18,7 +18,6 @@ from langgraph.checkpoint.memory import InMemorySaver
 from contracts import limits
 from agent import assembly
 from agent.assembly import MIDDLEWARE_ORDER, build_agent, build_middleware, run_config
-from agent.middleware import stubs
 from agent.middleware.deadline_fault import DeadlineAndFaultMiddleware, model_retry_on
 from agent.prompt import SYSTEM_PROMPT
 from agent.state import SupportState
@@ -90,10 +89,11 @@ def test_builtin_middleware_settings():
     assert cache.ttl == "5m" and cache.unsupported_model_behavior == "ignore"
 
 
-def test_every_stub_names_the_task_that_fills_it():
-    fills = {m.name: getattr(m, "FILLED_BY", None) for m in build_middleware(fallback_model=fake("fb"))
-             if m.name in stubs.STUB_NAMES}
-    assert fills == {"GroundingMiddleware": "CS-E-02.S4.T2"}
+def test_no_placeholder_middleware_is_left():
+    # CS-E-02.S4.T2 filled the last stub (GroundingMiddleware); the stubs module is gone.
+    assert all(getattr(m, "FILLED_BY", None) is None for m in build_middleware(fallback_model=fake("fb")))
+    with pytest.raises(ImportError):
+        __import__("agent.middleware.stubs")
 
 
 def test_deadline_middleware_recognises_the_fallback_it_was_built_with():
@@ -178,11 +178,9 @@ async def test_caching_middleware_marks_the_system_prompt_on_anthropic_models():
     assert isinstance(blocks, list) and isinstance(blocks[-1], dict) and blocks[-1].get("cache_control") == {"type": "ephemeral", "ttl": "5m"}
 
 
-@pytest.mark.parametrize("name", sorted(stubs.STUB_NAMES))
-async def test_stubs_are_pass_through(name: str):
-    mw = {m.name: m for m in build_middleware(fallback_model=fake("fb"))}[name]
-    if name == "GroundingMiddleware":
-        assert await mw.aafter_model({"messages": []}, None) is None  # pyright: ignore[reportArgumentType]  # stub ignores runtime
+async def test_grounding_without_a_verifier_is_off():
+    mw = {m.name: m for m in build_middleware(fallback_model=fake("fb"))}["GroundingMiddleware"]
+    assert await mw.aafter_model({"messages": [AIMessage("hi")]}, None) is None  # pyright: ignore[reportArgumentType]  # no runtime needed
 
 
 

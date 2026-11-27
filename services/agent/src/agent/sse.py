@@ -21,11 +21,12 @@ from typing import Any, AsyncGenerator, Awaitable, Callable
 
 from contracts import VERSION, limits
 from contracts.errors import ErrorBody
-from contracts.events import KEEPALIVE, Envelope, FinalAnswer, FinalConfidence, Usage, format_sse, parse_event
+from contracts.events import KEEPALIVE, Citation, Envelope, FinalAnswer, FinalConfidence, Usage, format_sse, parse_event
 from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 
 from agent.middleware.router import route_reply
 from agent.models.usage import add_usage, normalize_usage, token_usage
+from agent.say import speak
 from agent.structured.pending import confirm_label
 from agent.turn_control import TURN_CONTROL, TurnControl, bind_turn_control
 
@@ -33,11 +34,13 @@ log = logging.getLogger("agent.sse")
 
 FLUSH_CHARS = 40
 LIMIT_PREFIX = "Model call limits exceeded:"  # ModelCallLimitMiddleware(exit_behavior="end") text (spike 17a)
-# Placeholder wording until the escalation module (CS-E-03.S4.T1) adds the limit_reached ticket.
-LIMIT_LINE = "I couldn't finish that within the steps I'm allowed for one message. Could you ask again in a simpler way?"
+# The thread line until the escalation module (agent.escalation, CS-E-03.S4.T1) rewrites it with the limit_reached
+# ticket after the loop (same message id, limit-{turn_id}).
+LIMIT_LINE = "I couldn't finish that within the steps I'm allowed for one message."
 SLOW_LINE = "This is taking a little longer than usual."
 INTERNAL_ERROR_CLASS = "core_unavailable"  # doc 07 s1.3 has no generic server class; closest internal class
 _RUNNING: set[asyncio.Task[Any]] = set()
+
 
 
 def chunk_text(text: str, size: int = FLUSH_CHARS) -> list[str]:
@@ -79,8 +82,8 @@ class TurnOutcome:
               error: ErrorBody | None = None) -> "TurnOutcome":
         """What: an outcome for a code-written line (no model draft). Use when: cap, deadline, routes, errors.
         Inputs: text, end reason, optional say, status, error. Output: TurnOutcome (confidence null).
-        Side effects: none. Role: constructor. `say` defaults to text until the say builder (CS-E-05.S2.T1)."""
-        return cls(final=FinalAnswer(text=text, say=say if say is not None else text, citations=[],
+        Side effects: none. Role: constructor. `say` is the spoken form (agent.say.speak) of say, else of text."""
+        return cls(final=FinalAnswer(text=text, say=speak(say if say is not None else text), citations=[],
                                      escalated=False), end_reason=end_reason, status=status, error=error)
 
 
@@ -204,6 +207,8 @@ async def _drive(stream: TurnStream, body: Callable[[TurnStream], Awaitable[Turn
         if outcome.error is not None and outcome.status == "failed" and \
                 not any(getattr(e, "type", None) == "error" for e in stream.events):
             _emit_error(stream, outcome.error)
+        # doc 07 s6.2 FinalAnswer.say: every final is speakable (no markdown, ids as endings, amounts in words)
+        outcome.final = outcome.final.model_copy(update={"say": speak(outcome.final.say)})
         latency = stream.ms()
         outcome.usage = outcome.usage.model_copy(update={
             "latency_ms": latency, "first_status_ms": stream.first_status_ms,
@@ -259,6 +264,16 @@ def _tool_messages(result: Any) -> int:
     return 0
 
 
+def final_confidence(control: TurnControl | None) -> FinalConfidence:
+    """What: FinalAnswer.confidence for a turn with a model draft: the last Gate 1 verdict and scores, and the
+    Gate 2 result (TurnControl.grounding: pass, fail, skipped, or not_run when Gate 2 did not run). Use when: classify_final.
+    Inputs: the turn's control or None. Output: FinalConfidence. Side effects: none. Role: doc 07 s6.2."""
+    r = (control.retrieval if control is not None else None) or {}
+    return FinalConfidence(retrieval_verdict=r.get("verdict"), top_cosine=r.get("top_cosine"),
+                           tau_low=r.get("tau_low"), tau_high=r.get("tau_high"),
+                           grounding=control.grounding if control is not None else "not_run")  # type: ignore[arg-type]
+
+
 def route_outcome(stream: TurnStream, control: TurnControl, usage: Usage, model_used: str | None) -> TurnOutcome:
     """What: the outcome of a turn the router ended: its fixed line, say and end_reason; a verify route also
     emits verification.required (doc 07 s6.3 step 3); a readback route with a card emits confirmation.required and
@@ -286,7 +301,8 @@ def classify_final(stream: TurnStream, messages: list[Any], model_ids: set[str],
     Use when: end of stream_agent_turn. Inputs: stream, final messages, ids of messages written by node
     `model`, accumulated usage, last model id, the turn's control (router lines).
     Output: TurnOutcome.
-    Side effects: token events for a model draft only. Role: doc 07 s6.4 flush rule and s2.4 step 15
+    Side effects: token events for a model draft only (with the citations Gate 2 recorded); the Gate 2
+    clarifying line ends "clarify" with no tokens. Role: doc 07 s6.4 flush rule and s2.4 step 15
     (the model-call limit line is never an answer); a router line ends with its route's end_reason."""
     usage = usage or token_usage()
     last = messages[-1] if messages else None
@@ -296,14 +312,21 @@ def classify_final(stream: TurnStream, messages: list[Any], model_ids: set[str],
     if control is not None and control.route is not None and last.id == control.route_message_id:
         return route_outcome(stream, control, usage, model_used)
     text = last.text if isinstance(last.text, str) else str(last.content)
+    if control is not None and control.gate_message_id is not None and last.id == control.gate_message_id:
+        # Gate 2 first fail: the fixed clarifying line replaced the draft (doc 07 s6.4); written by code, no tokens.
+        final = FinalAnswer(text=text, say=text, citations=[], escalated=False, confidence=final_confidence(control))
+        return TurnOutcome(final=final, usage=usage, end_reason="clarify", model_used=model_used)
     if text.startswith(LIMIT_PREFIX):
         return replace(TurnOutcome.fixed(LIMIT_LINE, end_reason="limit_reached"), usage=usage, model_used=model_used)
     if last.id in model_ids and not last.tool_calls:
         for piece in chunk_text(text):
             stream.emit("token", text=piece)
-        final = FinalAnswer(text=text, say=text, citations=[], escalated=False,
-                            confidence=FinalConfidence(grounding="not_run"))
-        return TurnOutcome(final=final, usage=usage, end_reason="answered", model_used=model_used)
+        cites = [Citation.model_validate(c) for c in (control.citations if control is not None else [])]
+        final = FinalAnswer(text=text, say=text, citations=cites, escalated=False, confidence=final_confidence(control))
+        # Gate 1 row 2: a first weak turn ends with the model's one clarifying question.
+        clarify = control is not None and (control.retrieval or {}).get("decision") == "clarify"
+        return TurnOutcome(final=final, usage=usage, end_reason="clarify" if clarify else "answered",
+                           model_used=model_used)
     # Another hook-written line (Gate 2): deterministic, no tokens.
     return replace(TurnOutcome.fixed(text, end_reason="answered"), usage=usage, model_used=model_used)
 
@@ -378,6 +401,8 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
                     attempt["timer"] = asyncio.create_task(slow_timer(step_id))
                 else:
                     stop_timer()
+                    if chunk.get("error") is not None:  # the model node failed (doc 07 s6.7 trigger)
+                        control.model_node_failed = True
                     msgs = _ai_messages(chunk.get("result"))
                     call = token_usage()
                     model_name = "unknown"
@@ -409,5 +434,5 @@ async def _stream_agent_turn(stream: TurnStream, agent: Any, agent_input: dict[s
     outcome.fallback_used = outcome.usage.fallback_used
     if outcome.end_reason == "limit_reached" and messages:
         # doc 07 s2.4 step 15 / spike 17a: replace the framework line in the thread with ours.
-        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=messages[-1].id), AIMessage(LIMIT_LINE)]})
+        await agent.aupdate_state(config, {"messages": [RemoveMessage(id=messages[-1].id), AIMessage(LIMIT_LINE, id=f"limit-{control.turn_id}")]})
     return outcome

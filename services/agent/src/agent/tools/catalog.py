@@ -34,12 +34,12 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from agent.clients.core_agent import CoreAgentClient
 from agent.clients.knowledge import KnowledgeClient
+from agent.gates import apply_retrieval_gate
 from agent.structured.pending import card_from_prepare
 from agent.turn_control import CURRENT_CALL, CallScope, Route, TurnControl, require_control
 
 TOOL_NAMES: tuple[str, ...] = ("search_kb", "request_verification", "get_account_summary", "list_charges",
                                "list_tickets", "prepare_refund", "create_ticket")
-WEAK_VERDICTS = frozenset({"weak", "uncalibrated"})
 Result = tuple[str, Any]
 A = TypeVar("A", bound=StrictModel)
 
@@ -86,6 +86,24 @@ def charge_ref(charge_id: str | None, ending: str | None, on: Any) -> dict[str, 
     return None
 
 
+MODEL_TICKET_REASONS = {"human_requested": "customer_asked_human", "commitment": "needs_commitment"}
+
+
+def record_model_ticket(control: TurnControl, category: str, result: Any) -> None:
+    """What: record a ticket the model opened (control.ticket, so a later code escalation in the same turn reuses it)
+    and emit `escalated` origin model for the customer_asked_human and needs_commitment rows (doc 07 s3.4, s6.2).
+    Use when: create_ticket succeeded. Inputs: control, the tool's category, core's response. Output: none.
+    Side effects: control.ticket, at most one event. Role: L1 s7 model-owned rows (exactly one ticket per turn)."""
+    ticket = result.get("ticket") if isinstance(result, dict) else None
+    if not isinstance(ticket, dict):
+        return
+    if control.ticket is None:
+        control.ticket = ticket
+    reason = MODEL_TICKET_REASONS.get(category)
+    if reason is not None and control.events is not None:
+        control.events.emit("escalated", reason=reason, ticket=ticket, origin="model", offer_ticket_button=False)
+
+
 def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseTool]:
     """What: the seven thin-slice tools bound to the given clients, with strict JSON schemas and the contract
     descriptions. Use when: once per process (build_agent tools=...). Inputs: core client, knowledge client.
@@ -93,9 +111,12 @@ def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseT
     Role: tool factory."""
 
     async def search_kb(**raw: Any) -> Result:
-        """What: knowledge search with tier and verified from claims; relevant chunks only (s4.1, s5.1 row 1).
+        """What: knowledge search with tier and verified from claims; relevant chunks only (s4.1, s5.1 row 1),
+        then Gate 1 (agent.gates.apply_retrieval_gate: the clarify instruction on a first weak turn, the route on
+        escalate, the scope check on none).
         Use when: the model searches help articles. Inputs: query, error_code. Output: ("ok", artifact with
-        verdict, instruction, docs, chunk_ids, confidence). Side effects: one knowledge call. Role: tool."""
+        verdict, instruction, docs, chunk_ids, confidence). Side effects: one knowledge call; gate events and
+        TurnControl gate fields. Role: tool."""
         args = _args(SearchKbArgs, "search_kb", raw)
         control, scope = require_control(), _scope()
         verified = bool(_state_get(scope.state, "verified"))
@@ -106,12 +127,12 @@ def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseT
             body["error_code"] = args.error_code
         resp = await knowledge.search(control, body)
         verdict = resp["confidence"]["verdict"]
-        weak_before = int(_state_get(scope.state, "weak_streak") or 0) > 0
+        decision = apply_retrieval_gate(control, resp, int(_state_get(scope.state, "weak_streak") or 0))
         docs = [{"id": c["chunk_id"], "article": c["article_slug"], "section": " > ".join(c["section_path"]),
                  "text": c["text"], "injection_suspect": "injection_suspect" in c.get("flags", [])}
                 for c in resp["chunks"] if c.get("relevant")]
         return "ok", {"verdict": verdict,
-                      "instruction": WEAK_RETRIEVAL_INSTRUCTION if verdict in WEAK_VERDICTS and not weak_before else None,
+                      "instruction": WEAK_RETRIEVAL_INSTRUCTION if decision == "clarify" else None,
                       "docs": docs, "chunk_ids": [c["chunk_id"] for c in resp["chunks"]],
                       "confidence": resp["confidence"]}
 
@@ -169,13 +190,15 @@ def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseT
     async def create_ticket(**raw: Any) -> Result:
         """What: open a ticket with origin "model" (s5.1 row 10, s3.4 owners). Use when: the customer asks for
         a human, a commitment is needed, or other model-owned cases. Inputs: category, summary, steps_tried,
-        blocking. Output: ("ok", {ticket, merged, created}). Side effects: one core call (a ticket).
-        Role: tool."""
+        blocking. Output: ("ok", {ticket, merged, created}). Side effects: one core call (a ticket); records the
+        turn's ticket and emits `escalated` origin model (CS-E-03.S4.T1). Role: tool."""
         a = _args(CreateTicketArgs, "create_ticket", raw)
         control, scope = require_control(), _scope()
         body = {"category": a.category, "summary": a.summary, "steps_tried": list(a.steps_tried),
                 "blocking": a.blocking, "origin": "model", "transcript_ref": control.session_id}
-        return "ok", await core.create_ticket(control, body, _key(control, scope))
+        res = await core.create_ticket(control, body, _key(control, scope))
+        record_model_ticket(control, a.category, res)
+        return "ok", res
 
     funcs: dict[str, Callable[..., Awaitable[Result]]] = {
         "search_kb": search_kb, "request_verification": request_verification,
