@@ -1,0 +1,268 @@
+"use client";
+/**
+ * What: the console shell: top bar (brand, verified identity chip, New conversation, Inspector
+ *   placeholder, theme toggle), the conversation log and the input bar, bound to a turn store.
+ * Use when: the /console route and the dev-only fixture replay route.
+ * Inputs: { sessionId, store?, onNewConversation? }.
+ * Output: the full-height console frame.
+ * Side effects: sending a message or pressing a card calls store.sendTurn (one network request);
+ *   an in-flight turn is aborted on unmount (its turn ends in the failed state, review PR #16 I1).
+ * Role: CS-E-04.S5.T1 shell, laid out from the Figma page "Console, chat (S1)".
+ */
+import { MotionConfig } from "motion/react";
+import { PanelRight, Plus, Shield, ShieldCheck } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useStore, type StoreApi } from "zustand";
+import type { ConfirmInput, TurnRequest, VerificationInput, VerifiedPerson } from "@contracts/contracts";
+
+import { ThemeToggle } from "@/components/theme-toggle";
+import { Button } from "@/components/ui/button";
+import type { TurnView } from "@/lib/turns/reducer";
+import { turnStore, type ThreadItem, type TurnStoreState } from "@/lib/turns/store";
+import { trailSummary } from "@/lib/turns/trail";
+
+import { ConversationLog, type CardActions } from "./conversation-log";
+import { InputBar } from "./input-bar";
+
+/**
+ * What: words for a verified person's role.
+ * Use when: the identity chip.
+ * Inputs: none.
+ * Output: a frozen map.
+ * Side effects: none.
+ * Role: copy table.
+ */
+const ROLE_WORDS: Readonly<Record<VerifiedPerson["role"], string>> = Object.freeze({
+  owner: "Owner",
+  billing_admin: "Billing admin",
+  member: "Member",
+});
+
+/**
+ * What: words for a plan tier.
+ * Use when: the identity chip.
+ * Inputs: none.
+ * Output: a frozen map.
+ * Side effects: none.
+ * Role: copy table.
+ */
+const TIER_WORDS: Readonly<Record<VerifiedPerson["tier"], string>> = Object.freeze({
+  free: "Free",
+  pro: "Pro",
+  business: "Business",
+  enterprise: "Enterprise",
+});
+
+/**
+ * What: the identity chip: "Verified as {name}" with role and plan, or "Not verified".
+ * Use when: the top bar.
+ * Inputs: { person } from conversation.verified.
+ * Output: a pill.
+ * Side effects: none.
+ * Role: session identity shown in words (DESIGN.md chips).
+ */
+export function IdentityChip({ person }: { person: VerifiedPerson | null }) {
+  if (person === null) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-rule bg-raised px-2.5 py-1 text-label-sm text-muted">
+        <Shield aria-hidden className="size-3.5" />
+        <span>Not verified</span>
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-rule bg-raised px-2.5 py-1 text-label-sm">
+      <ShieldCheck aria-hidden className="size-3.5 shrink-0 text-success" />
+      <span className="truncate text-ink">Verified as {person.display_name}</span>
+      <span className="shrink-0 text-muted max-sm:hidden">
+        {ROLE_WORDS[person.role]} · {TIER_WORDS[person.tier]}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * What: the sentence the console's one polite status region announces for the latest thread item:
+ *   a running turn's live line, a settled turn's summary and answer, a failure, or a send error.
+ * Use when: ConsoleShell renders its status region.
+ * Inputs: the thread and turns.
+ * Output: a string ("" when there is nothing to say).
+ * Side effects: none.
+ * Role: single announcer (review PR #20, M3), so trails and streamed text are not read twice.
+ */
+export function announcement(thread: readonly ThreadItem[], turns: Readonly<Record<string, TurnView>>): string {
+  const last = thread.at(-1);
+  if (last === undefined || last.kind === "user") return "";
+  if (last.kind === "error") return `Couldn't send. ${last.message}`;
+  const turn = turns[last.turnId];
+  if (turn === undefined) return "";
+  const summary = trailSummary(turn);
+  if (turn.phase === "failed") return `Couldn't finish. ${turn.failure?.message ?? ""}`.trim();
+  if (summary.state === "running") return summary.text;
+  return summary.stepCount > 0 ? `${summary.text}. ${turn.text}` : turn.text;
+}
+
+/**
+ * What: props of ConsoleShell.
+ * Use when: typing the component.
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: `store` defaults to the app singleton; tests and the replay route pass their own.
+ */
+export interface ConsoleShellProps {
+  sessionId: string | null;
+  store?: StoreApi<TurnStoreState>;
+  onNewConversation?: () => void;
+}
+
+/**
+ * What: the ConsoleShell component.
+ * Use when: see module.
+ * Inputs: ConsoleShellProps.
+ * Output: JSX.
+ * Side effects: see module.
+ * Role: see module.
+ */
+export function ConsoleShell({ sessionId, store = turnStore, onNewConversation }: ConsoleShellProps) {
+  const thread = useStore(store, (s) => s.thread);
+  const conversation = useStore(store, (s) => s.conversation);
+  const person = useStore(store, (s) => s.conversation.verified);
+  const busy = useStore(store, (s) => s.connection.phase === "streaming");
+  const inflight = useRef<AbortController | null>(null);
+  const messageRef = useRef<HTMLTextAreaElement | null>(null);
+  const pinRef = useRef<HTMLInputElement | null>(null);
+  const [account, setAccount] = useState("");
+
+  useEffect(() => () => inflight.current?.abort(), []);
+  useEffect(() => () => inflight.current?.abort(), [sessionId]);
+  useEffect(() => setAccount(""), [sessionId]);
+
+  /**
+   * What: moves keyboard focus after a card press settles, so it never falls to the page body
+   *   when the pressed control goes away (WCAG 2.4.3, review PR #24 I2).
+   * Use when: a Verify, Confirm or Cancel turn has ended.
+   * Inputs: "verify" or "decide".
+   * Output: none.
+   * Side effects: on the next task, focuses the PIN field of a retry card when one is showing
+   *   (verify only), else the message field.
+   * Role: helper.
+   */
+  const refocus = useCallback((after: "verify" | "decide") => {
+    setTimeout(() => {
+      const pin = pinRef.current;
+      if (after === "verify" && pin !== null && pin.isConnected) pin.focus();
+      else messageRef.current?.focus();
+    }, 0);
+  }, []);
+
+  /**
+   * What: sends one turn: a chat message, or a card's verification or confirm body.
+   * Use when: the input bar submits, or a card is pressed.
+   * Inputs: the TurnRequest without client_turn_id (exactly one of text, verification, confirm).
+   * Output: a promise that settles when the turn ends (resolves on success and on failure).
+   * Side effects: one streamed request with a fresh client_turn_id; failures land on the turn
+   *   (failed phase) or in connection.error (shown by CS-E-04.S5.T3), so the rejection is
+   *   swallowed here. Without a session nothing is sent.
+   * Role: handler. The request object is not kept anywhere after the call, so a card PIN lives
+   *   only for the request (doc 07 s11).
+   */
+  const run = useCallback(
+    (part: Omit<TurnRequest, "client_turn_id">): Promise<void> => {
+      if (sessionId === null) return Promise.resolve();
+      const ctrl = new AbortController();
+      inflight.current = ctrl;
+      return store
+        .getState()
+        .sendTurn(sessionId, { client_turn_id: crypto.randomUUID(), ...part }, { signal: ctrl.signal })
+        .then(() => undefined)
+        .catch(() => undefined)
+        .finally(() => {
+          if (inflight.current === ctrl) inflight.current = null;
+        });
+    },
+    [sessionId, store],
+  );
+
+  /**
+   * What: sends one chat message.
+   * Use when: the input bar submits.
+   * Inputs: the text.
+   * Output: none.
+   * Side effects: see run.
+   * Role: handler.
+   */
+  const send = useCallback((text: string) => void run({ text }), [run]);
+
+  const cards: CardActions = useMemo(
+    () => ({
+      disabled: busy,
+      account,
+      setAccount,
+      pinRef,
+      verify: (verification: VerificationInput) => run({ verification }).finally(() => refocus("verify")),
+      decide: (confirm: ConfirmInput) => run({ confirm }).finally(() => refocus("decide")),
+    }),
+    [busy, run, account, refocus],
+  );
+
+  /**
+   * What: sends a failed message again from its error row.
+   * Use when: the Retry button.
+   * Inputs: the error item id.
+   * Output: none.
+   * Side effects: one streamed request (store.retry removes the error row and its bubble first).
+   * Role: handler.
+   */
+  const retry = useCallback(
+    (errorId: string) => {
+      if (sessionId === null) return;
+      const ctrl = new AbortController();
+      inflight.current = ctrl;
+      store
+        .getState()
+        .retry(errorId, sessionId, { signal: ctrl.signal })
+        .catch(() => undefined)
+        .finally(() => {
+          if (inflight.current === ctrl) inflight.current = null;
+        });
+    },
+    [sessionId, store],
+  );
+
+  return (
+    <MotionConfig reducedMotion="user">
+      <div className="flex min-h-dvh flex-col bg-paper">
+        <header className="sticky top-0 z-10 flex items-center gap-4 border-b border-rule bg-paper px-6 py-3.5 max-sm:gap-2 max-sm:px-4">
+          <span className="flex shrink-0 items-center gap-1.5">
+            <span aria-hidden className="size-[18px] rounded-[5px] bg-ink" />
+            <span className="text-heading text-ink">Quillstack</span>
+            <span className="text-heading text-muted max-sm:hidden">Support</span>
+          </span>
+          <span className="flex-1" />
+          <IdentityChip person={person} />
+          <Button variant="quiet" onClick={onNewConversation} aria-label="New conversation">
+            <Plus aria-hidden className="size-3.5" />
+            <span className="max-sm:hidden">New conversation</span>
+          </Button>
+          <Button variant="quiet" disabled title="The Inspector arrives with the observability drawer" className="max-sm:hidden">
+            <PanelRight aria-hidden className="size-3.5" />
+            Inspector
+          </Button>
+          <ThemeToggle className="size-[34px] rounded-full border-rule bg-raised text-ink" />
+        </header>
+        <main className="mx-auto flex w-full max-w-[45rem] flex-1 flex-col px-4 pt-10 pb-6 sm:px-0">
+          <div className="flex flex-1 flex-col">
+            <ConversationLog thread={thread} conversation={conversation} cards={cards} onRetry={retry} />
+            <div role="status" aria-live="polite" className="sr-only">
+              {announcement(thread, conversation.turns)}
+            </div>
+          </div>
+          <div className="sticky bottom-0 bg-paper pt-7 pb-[max(1rem,env(safe-area-inset-bottom))]">
+            <InputBar onSend={send} busy={busy} disabled={sessionId === null} inputRef={messageRef} />
+          </div>
+        </main>
+      </div>
+    </MotionConfig>
+  );
+}
