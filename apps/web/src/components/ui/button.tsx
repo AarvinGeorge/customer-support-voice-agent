@@ -11,6 +11,14 @@ import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "@/lib/utils";
 
+/**
+ * What: class recipe for the Button variants and sizes.
+ * Use when: Button renders, or a link must look like a button.
+ * Inputs: { variant, size, className }.
+ * Output: a class string.
+ * Side effects: none.
+ * Role: the one button style source.
+ */
 const buttonVariants = cva(
   "inline-flex shrink-0 items-center justify-center gap-2 rounded-md border text-label whitespace-nowrap outline-none select-none transition-colors duration-150 ease-out-expo focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {

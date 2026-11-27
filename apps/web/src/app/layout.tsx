@@ -14,14 +14,46 @@ import { Providers } from "@/components/providers";
 
 import "./globals.css";
 
+/**
+ * What: Inter font loader, exposed as the --font-inter variable.
+ * Use when: the root html class list.
+ * Inputs: none.
+ * Output: a next/font object.
+ * Side effects: next/font downloads and self-hosts the font at build time.
+ * Role: body and label typeface.
+ */
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
+/**
+ * What: JetBrains Mono font loader, exposed as --font-jetbrains-mono.
+ * Use when: the root html class list.
+ * Inputs: none.
+ * Output: a next/font object.
+ * Side effects: next/font downloads and self-hosts the font at build time.
+ * Role: typeface for IDs, timings, tokens and cost.
+ */
 const jetbrainsMono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-jetbrains-mono", display: "swap" });
 
+/**
+ * What: page metadata for every route.
+ * Use when: Next.js builds the document head.
+ * Inputs: none.
+ * Output: a Metadata object.
+ * Side effects: none.
+ * Role: default title and description.
+ */
 export const metadata: Metadata = {
   title: "Quillstack Support",
   description: "Support for Quillstack by chat and voice, with every step shown.",
 };
 
+/**
+ * What: viewport theme colors for light and dark.
+ * Use when: Next.js builds the document head.
+ * Inputs: none.
+ * Output: a Viewport object.
+ * Side effects: none.
+ * Role: browser chrome matches Paper.
+ */
 export const viewport: Viewport = {
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#fcfaf6" },

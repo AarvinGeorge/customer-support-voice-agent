@@ -114,6 +114,21 @@ describe("apiFetch 429", () => {
     expect(parseRetryAfter("garbage", now)).toBeNull();
     expect(parseRetryAfter(null, now)).toBeNull();
   });
+
+  it("rejects non-integer Retry-After values and clamps to 1..3600 s", () => {
+    const now = Date.parse("2026-11-27T10:00:00Z");
+    expect(parseRetryAfter("1.5", now)).toBeNull();
+    expect(parseRetryAfter("-5", now)).toBeNull();
+    expect(parseRetryAfter("0", now)).toBe(1);
+    expect(parseRetryAfter("99999999999999999999", now)).toBe(3600);
+    expect(parseRetryAfter("Fri, 27 Nov 2026 09:00:00 GMT", now)).toBe(1);
+  });
+
+  it("clamps a body retry_after_s below the s9 minimum of 1", async () => {
+    const fetch = fakeFetch(429, envelope({ retry_after_s: 0 }));
+    const e = (await rejection(apiFetch("/api/sessions", { method: "POST", body: {} }, { fetch }))) as ApiError;
+    expect(e.retryAfterS).toBe(1);
+  });
 });
 
 describe("apiFetch 401", () => {
@@ -126,6 +141,21 @@ describe("apiFetch 401", () => {
     expect((err as ApiError).status).toBe(401);
   });
 
+  it("does not redirect when already on the access gate (no reload loop)", async () => {
+    const fetch = fakeFetch(401, envelope({ class: "access_denied", code: "AUTH_REQUIRED", retryable: false }));
+    const redirect = vi.fn();
+    const err = await rejection(apiFetch("/api/demo/personas", {}, { fetch, redirect, pathname: () => ACCESS_GATE_PATH }));
+    expect(redirect).not.toHaveBeenCalled();
+    expect(err).toBeInstanceOf(ApiError);
+  });
+
+  it("still redirects from another route", async () => {
+    const fetch = fakeFetch(401, envelope({ class: "access_denied", code: "AUTH_REQUIRED", retryable: false }));
+    const redirect = vi.fn();
+    await rejection(apiFetch("/api/me", {}, { fetch, redirect, pathname: () => "/console" }));
+    expect(redirect).toHaveBeenCalledWith(ACCESS_GATE_PATH);
+  });
+
   it("does not redirect when the caller handles 401 itself (the access form)", async () => {
     const fetch = fakeFetch(401, envelope({ class: "access_denied", code: "ACCESS_DENIED", retryable: false }));
     const redirect = vi.fn();
@@ -135,7 +165,30 @@ describe("apiFetch 401", () => {
   });
 });
 
+describe("apiFetch request headers", () => {
+  it("keeps a caller-supplied X-Request-Id", async () => {
+    const fetch = fakeFetch(200, {});
+    await apiFetch("/api/me", { headers: { "X-Request-Id": "caller-id" } }, { fetch });
+    const [, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(new Headers(init.headers).get("x-request-id")).toBe("caller-id");
+  });
+});
+
 describe("apiFetch unknown error shapes fail loudly", () => {
+  it("rejects a 2xx body that is not JSON", async () => {
+    const fetch = fakeFetch(200, "<html>login</html>");
+    const err = await rejection(apiFetch("/api/me", {}, { fetch }));
+    expect(err).toBeInstanceOf(ContractViolationError);
+    expect((err as ContractViolationError).status).toBe(200);
+  });
+
+  it("rejects an envelope with a non-string trace_id or array details", async () => {
+    for (const over of [{ trace_id: 42 }, { details: [1] }]) {
+      const err = await rejection(apiFetch("/api/me", {}, { fetch: fakeFetch(500, envelope(over)) }));
+      expect(err).toBeInstanceOf(ContractViolationError);
+    }
+  });
+
   it("rejects a FastAPI default error body", async () => {
     const fetch = fakeFetch(404, { detail: "Not Found" });
     const err = await rejection(apiFetch("/api/sessions/x", {}, { fetch }));

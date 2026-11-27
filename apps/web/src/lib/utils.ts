@@ -9,6 +9,14 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
+/**
+ * What: merges class values and drops conflicting Tailwind classes.
+ * Use when: building a className from base, variant and caller classes.
+ * Inputs: class values (strings, arrays, conditional objects).
+ * Output: one class string.
+ * Side effects: none.
+ * Role: shared UI utility.
+ */
 export function cn(...inputs: ClassValue[]): string {
   return twMerge(clsx(inputs));
 }

@@ -6,6 +6,15 @@
  *   text-body, font-mono, rounded-md and so on) and shadcn semantic aliases (background, primary, ring).
  * Side effects: sets base element styles.
  * Role: the single source of visual tokens in the web app; change DESIGN.md first, then here.
+ *
+ * Traps for later tasks (review PR #5, M6):
+ * - Spacing: DESIGN.md step N is not Tailwind's N. Steps 1 to 4 match (p-1 to p-4); steps 5 to 8
+ *   (24, 32, 48, 64 px) are Tailwind p-6, p-8, p-12, p-16. Tailwind p-5 is 20px, off the scale.
+ * - `muted` is DESIGN.md's text color (labels, timings). shadcn registry components that use
+ *   `bg-muted` as a surface must be changed to `bg-margin` when added.
+ * - Radii: use rounded-sm, rounded-md, rounded-lg (6, 10, 14 px) and rounded-full for pills;
+ *   Tailwind's default rounded-xl (12px) is smaller than lg here, so do not use it.
+ * - Additions beyond DESIGN.md: --ease-out-quart, and Inter features cv11 and ss01.
  */
 @import "tailwindcss";
 @import "tw-animate-css";

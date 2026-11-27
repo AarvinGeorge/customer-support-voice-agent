@@ -13,6 +13,14 @@ import { useSyncExternalStore } from "react";
 
 import { Button } from "@/components/ui/button";
 
+/**
+ * What: a no-op store subscription for useSyncExternalStore.
+ * Use when: detecting hydration (server snapshot false, client true).
+ * Inputs: none.
+ * Output: an unsubscribe function that does nothing.
+ * Side effects: none.
+ * Role: hydration guard helper.
+ */
 const subscribe = () => () => {};
 
 /**

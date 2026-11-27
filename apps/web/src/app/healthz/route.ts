@@ -6,6 +6,14 @@
  * Side effects: none.
  * Role: health endpoint; outside `/api` so Caddy's `/api/*` route to the agent never shadows it.
  */
+/**
+ * What: marks the route dynamic so it is never prerendered.
+ * Use when: Next.js decides how to build /healthz.
+ * Inputs: none.
+ * Output: the string force-dynamic.
+ * Side effects: none.
+ * Role: route config.
+ */
 export const dynamic = "force-dynamic";
 
 /**

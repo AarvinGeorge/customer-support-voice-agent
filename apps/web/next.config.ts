@@ -11,6 +11,14 @@
 import path from "node:path";
 import type { NextConfig } from "next";
 
+/**
+ * What: the repo root (two levels above apps/web).
+ * Use when: setting the tracing and Turbopack roots.
+ * Inputs: none.
+ * Output: an absolute path.
+ * Side effects: none.
+ * Role: constant.
+ */
 const repoRoot = path.join(__dirname, "..", "..");
 
 const nextConfig: NextConfig = {

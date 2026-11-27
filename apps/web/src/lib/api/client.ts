@@ -9,7 +9,14 @@
  */
 import { ERROR_CLASSES, type ErrorBody, type ErrorEnvelope } from "./contract-types";
 
-/** What: where a 401 sends the visitor (the access gate is the home page, CS-E-04.S1). Role: constant. */
+/**
+ * What: where a 401 sends the visitor (the access gate is the home page, CS-E-04.S1).
+ * Use when: redirecting on 401, or checking whether the visitor is already on the gate.
+ * Inputs: none.
+ * Output: the path "/".
+ * Side effects: none.
+ * Role: constant.
+ */
 export const ACCESS_GATE_PATH = "/";
 
 /**
@@ -27,6 +34,14 @@ export class ApiError extends Error {
   readonly retryAfterS: number | null;
   readonly traceId: string | null;
 
+  /**
+   * What: builds an ApiError.
+   * Use when: parseErrorResponse found a valid envelope.
+   * Inputs: status, body, retryAfterS, traceId.
+   * Output: the instance.
+   * Side effects: none.
+   * Role: constructor.
+   */
   constructor(status: number, body: ErrorBody, retryAfterS: number | null, traceId: string | null) {
     super(`${status} ${body.code}: ${body.message}`);
     this.name = "ApiError";
@@ -38,7 +53,8 @@ export class ApiError extends Error {
 }
 
 /**
- * What: a non-2xx response whose body is not a doc 07 ErrorEnvelope.
+ * What: a response whose body breaks the doc 07 contract shape (a non-2xx body that is not an
+ *   ErrorEnvelope, or a 2xx body that is not JSON).
  * Use when: never caught to hide; it means a proxy page, a framework default error or contract drift.
  * Inputs: HTTP status, a reason, the first part of the raw body.
  * Output: an Error subclass.
@@ -49,15 +65,49 @@ export class ContractViolationError extends Error {
   readonly status: number;
   readonly raw: string;
 
+  /**
+   * What: builds a ContractViolationError.
+   * Use when: a body breaks the contract shape.
+   * Inputs: status, reason, raw body text.
+   * Output: the instance.
+   * Side effects: none.
+   * Role: constructor.
+   */
   constructor(status: number, reason: string, raw: string) {
-    super(`HTTP ${status}: error body is not a doc 07 ErrorEnvelope (${reason}): ${raw.slice(0, 200)}`);
+    super(`HTTP ${status}: body breaks the doc 07 contract (${reason}): ${raw.slice(0, 200)}`);
     this.name = "ContractViolationError";
     this.status = status;
     this.raw = raw;
   }
 }
 
-/** What: per-call options for apiFetch. Role: request description plus test seams. */
+/**
+ * What: smallest retry delay in seconds (doc 07 s9 minimum).
+ * Use when: clamping retry delays.
+ * Inputs: none.
+ * Output: 1.
+ * Side effects: none.
+ * Role: constant.
+ */
+const RETRY_AFTER_MIN_S = 1;
+/**
+ * What: largest retry delay in seconds, a sanity cap.
+ * Use when: clamping retry delays.
+ * Inputs: none.
+ * Output: 3600.
+ * Side effects: none.
+ * Role: constant.
+ */
+const RETRY_AFTER_MAX_S = 3600;
+
+/**
+ * What: per-call request options for apiFetch.
+ * Use when: describing one call (method, JSON body, extra headers, abort signal).
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: request description.
+ */
 export interface ApiRequest {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   /** JSON-serialisable body; sent with Content-Type application/json. */
@@ -66,30 +116,53 @@ export interface ApiRequest {
   signal?: AbortSignal;
 }
 
-/** What: injectable dependencies and 401 policy. Role: test seams and the access-form opt out. */
+/**
+ * What: injectable dependencies and the 401 policy for apiFetch.
+ * Use when: tests inject fetch, redirect, pathname and clock; the access form sets on401 "throw".
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: test seams and the access-form opt out.
+ */
 export interface ApiDeps {
   fetch?: typeof fetch;
   redirect?: (path: string) => void;
   /** "redirect" (default) sends the visitor to the access gate; "throw" leaves 401 to the caller. */
   on401?: "redirect" | "throw";
   now?: () => number;
+  /** Current route path; defaults to window.location.pathname (null on the server). */
+  pathname?: () => string | null;
 }
 
 /**
- * What: parses a Retry-After header value (delta seconds or HTTP date).
+ * What: clamps a retry delay to RETRY_AFTER_MIN_S..RETRY_AFTER_MAX_S whole seconds.
+ * Use when: any retry delay is about to reach the UI countdown.
+ * Inputs: seconds (any finite number).
+ * Output: an integer in 1..3600.
+ * Side effects: none.
+ * Role: helper for 429 and 503 handling.
+ */
+function clampRetry(seconds: number): number {
+  return Math.min(RETRY_AFTER_MAX_S, Math.max(RETRY_AFTER_MIN_S, Math.ceil(seconds)));
+}
+
+/**
+ * What: parses a Retry-After header value (non-negative integer seconds or HTTP date).
  * Use when: the error body has no retry_after_s.
  * Inputs: the header value, the current time in ms.
- * Output: whole seconds to wait (never negative), or null if absent or unparseable.
+ * Output: seconds to wait clamped to 1..3600, or null if absent or unparseable
+ *   (decimals and negatives are rejected; a date must contain letters).
  * Side effects: none.
  * Role: helper for 429 and 503 handling.
  */
 export function parseRetryAfter(value: string | null, nowMs: number): number | null {
   if (value === null) return null;
   const v = value.trim();
-  if (/^\d+$/.test(v)) return Number(v);
+  if (/^\d+$/.test(v)) return clampRetry(Number(v));
+  if (!/[a-z]/i.test(v)) return null;
   const at = Date.parse(v);
   if (Number.isNaN(at)) return null;
-  return Math.max(0, Math.ceil((at - nowMs) / 1000));
+  return clampRetry((at - nowMs) / 1000);
 }
 
 /**
@@ -110,7 +183,8 @@ function envelopeProblem(value: unknown): string | null {
   if (typeof e.retryable !== "boolean" || typeof e.fault_injected !== "boolean") return "retryable or fault_injected not a boolean";
   if (!(e.changed === null || typeof e.changed === "boolean")) return "changed not boolean or null";
   if (!(e.retry_after_s == null || typeof e.retry_after_s === "number")) return "retry_after_s not a number";
-  if (typeof e.details !== "object" || e.details === null) return "details not an object";
+  if (!(e.trace_id == null || typeof e.trace_id === "string")) return "trace_id not a string";
+  if (typeof e.details !== "object" || e.details === null || Array.isArray(e.details)) return "details not an object";
   return null;
 }
 
@@ -133,7 +207,8 @@ export async function parseErrorResponse(res: Response, nowMs: number): Promise<
   const problem = envelopeProblem(json);
   if (problem !== null) return new ContractViolationError(res.status, problem, raw);
   const body = (json as ErrorEnvelope).error;
-  const retryAfterS = body.retry_after_s ?? parseRetryAfter(res.headers.get("retry-after"), nowMs);
+  const retryAfterS =
+    body.retry_after_s != null ? clampRetry(body.retry_after_s) : parseRetryAfter(res.headers.get("retry-after"), nowMs);
   const traceId = body.trace_id ?? res.headers.get("x-trace-id");
   return new ApiError(res.status, body, retryAfterS, traceId);
 }
@@ -151,19 +226,45 @@ function browserRedirect(path: string): void {
 }
 
 /**
+ * What: default pathname reader.
+ * Use when: apiFetch decides whether a 401 redirect would reload the gate itself.
+ * Inputs: none.
+ * Output: window.location.pathname, or null on the server.
+ * Side effects: none.
+ * Role: default ApiDeps.pathname.
+ */
+function browserPathname(): string | null {
+  return typeof window !== "undefined" ? window.location.pathname : null;
+}
+
+/**
+ * What: a request id for X-Request-Id (doc 07 s1.2, optional header).
+ * Use when: the caller did not supply one.
+ * Inputs: none.
+ * Output: a uuid4 string, or null where crypto.randomUUID is missing (non-secure http context).
+ * Side effects: none.
+ * Role: helper; the agent mints an id when the header is absent.
+ */
+function newRequestId(): string | null {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : null;
+}
+
+/**
  * What: calls a JSON `/api/*` route and returns its typed body.
  * Use when: every non-streaming call from the web app to the agent.
  * Inputs: path, ApiRequest, ApiDeps.
  * Output: the parsed 2xx JSON as T (undefined for 204 or an empty body).
  * Side effects: network request with a fresh X-Request-Id; on a contract-shaped 401
- *   redirects to ACCESS_GATE_PATH unless on401 is "throw". It never retries by itself:
+ *   redirects to ACCESS_GATE_PATH unless on401 is "throw" or the visitor is already on the
+ *   gate (no reload loop). A non-JSON 2xx body throws ContractViolationError. It never retries by itself:
  *   ApiError.retryAfterS tells the UI how long to count down (doc 07 s9; turns are not idempotent).
  * Role: the API client entry point.
  */
 export async function apiFetch<T = unknown>(path: string, req: ApiRequest = {}, deps: ApiDeps = {}): Promise<T> {
   const doFetch = deps.fetch ?? fetch;
   const headers = new Headers(req.headers);
-  headers.set("x-request-id", crypto.randomUUID());
+  const requestId = headers.get("x-request-id") ?? newRequestId();
+  if (requestId !== null) headers.set("x-request-id", requestId);
   headers.set("accept", "application/json");
   let body: string | undefined;
   if (req.body !== undefined) {
@@ -179,10 +280,16 @@ export async function apiFetch<T = unknown>(path: string, req: ApiRequest = {}, 
   });
   if (res.ok) {
     const text = await res.text();
-    return (text === "" ? undefined : JSON.parse(text)) as T;
+    if (text === "") return undefined as T;
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      throw new ContractViolationError(res.status, "2xx body is not JSON", text);
+    }
   }
   const err = await parseErrorResponse(res, (deps.now ?? Date.now)());
-  if (err instanceof ApiError && err.status === 401 && (deps.on401 ?? "redirect") === "redirect") {
+  const onGate = (deps.pathname ?? browserPathname)() === ACCESS_GATE_PATH;
+  if (err instanceof ApiError && err.status === 401 && (deps.on401 ?? "redirect") === "redirect" && !onGate) {
     (deps.redirect ?? browserRedirect)(ACCESS_GATE_PATH);
   }
   throw err;

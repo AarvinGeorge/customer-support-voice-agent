@@ -11,6 +11,14 @@ import type { Metadata } from "next";
 
 import { ThemeToggle } from "@/components/theme-toggle";
 
+/**
+ * What: metadata for /console.
+ * Use when: Next.js builds the head for this route.
+ * Inputs: none.
+ * Output: a Metadata object.
+ * Side effects: none.
+ * Role: route title.
+ */
 export const metadata: Metadata = { title: "Console · Quillstack Support" };
 
 /**

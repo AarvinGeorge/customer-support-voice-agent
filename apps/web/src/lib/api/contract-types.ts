@@ -15,7 +15,14 @@
  *   removed from the contract fails the type check.
  */
 
-/** What: the error classes of doc 07 s1.3. Role: runtime validation list and type source. */
+/**
+ * What: the 17 error classes of doc 07 s1.3.
+ * Use when: validating an error body at runtime, or deriving ErrorClass.
+ * Inputs: none.
+ * Output: a readonly tuple of strings.
+ * Side effects: none.
+ * Role: runtime validation list and type source.
+ */
 export const ERROR_CLASSES = [
   "provider_timeout",
   "provider_rate_limited",
@@ -36,10 +43,24 @@ export const ERROR_CLASSES = [
   "validation",
 ] as const;
 
-/** What: one doc 07 s1.3 error class. Role: union type. */
+/**
+ * What: one doc 07 s1.3 error class.
+ * Use when: typing ErrorBody.class.
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: union type.
+ */
 export type ErrorClass = (typeof ERROR_CLASSES)[number];
 
-/** What: doc 07 s1.3 ErrorBody (JSON key "class"). Role: wire type of every non-2xx body. */
+/**
+ * What: doc 07 s1.3 ErrorBody (JSON key "class").
+ * Use when: reading a parsed error from ApiError.body.
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: wire type of every non-2xx body.
+ */
 export interface ErrorBody {
   class: ErrorClass;
   code: string;
@@ -52,7 +73,14 @@ export interface ErrorBody {
   details: Record<string, unknown>;
 }
 
-/** What: wrapper {"error": ErrorBody}. Role: wire type of every non-2xx response. */
+/**
+ * What: wrapper {"error": ErrorBody}.
+ * Use when: typing a decoded non-2xx response.
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: wire type of every non-2xx response.
+ */
 export interface ErrorEnvelope {
   error: ErrorBody;
 }
