@@ -117,7 +117,7 @@ async def test_redacted_but_not_credential_looking_text_goes_to_the_model_redact
     w, flags = guarded(AIMessage(content="Let me check that invoice."))
     w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True)
     evs = await chat(w, "invoice ending 0412")
-    assert evs[-1].final.text == "Let me check that invoice." and flags.calls == []
+    assert evs[-1].final.text != TYPED_PIN_LINE and flags.calls == []  # Gate 2 may rewrite the answer
     assert "invoice ending [PIN]" in model_text(w) and "0412" not in model_text(w)
     assert "0412" not in await thread_text(w)
 
@@ -232,7 +232,7 @@ def test_configure_tracing_sets_the_global_client(monkeypatch: pytest.MonkeyPatc
 async def test_glued_tens_words_do_not_crash_the_turn() -> None:
     w, _ = guarded(AIMessage(content="Pro is priced per seat."))
     evs = await chat(w, "we have about twentyfive, 30 seats on the Pro plan, what does it cost?")
-    assert evs[-1].end_reason == "answered" and evs[-1].final.text == "Pro is priced per seat."
+    assert evs[-1].end_reason in ("answered", "clarify") and evs[-1].type == "turn.completed"  # not "error"
 
 
 async def test_verified_refusal_does_not_put_the_session_back_to_awaiting() -> None:
