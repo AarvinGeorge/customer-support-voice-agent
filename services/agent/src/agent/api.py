@@ -5,7 +5,7 @@ Inputs: Settings (code, signing key, origin, personas path), app.state.session_s
 Output: routes with the contract bodies (Me, Persona list, SessionCreated).
 Side effects: access sets the qs_access cookie; sessions inserts a row.
 Role: the web app's landing page calls exactly these (apps/web/src/lib/api/access.ts).
-Rate limits (ACCESS_ATTEMPTS 10/hour per IP, IP_SESSIONS 20/hour) are NOT here: the limiter is CS-E-07.S2.T1.
+Rate limits (ACCESS_ATTEMPTS, IP_SESSIONS) are route dependencies from agent.limits.ratelimit (CS-E-07.S2.T1).
 """
 from __future__ import annotations
 
@@ -14,10 +14,11 @@ from typing import Any
 
 from contracts.agent_api import AccessRequest, Me, SessionCreated
 from contracts.base import StrictModel
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from agent import access
+from agent.limits.ratelimit import limit_access, limit_session_create
 from agent.personas import load_personas
 from agent.web import error_response
 
@@ -39,7 +40,7 @@ def install_api(app: FastAPI) -> None:
     """What: register the four visitor routes. Use when: once in create_app.
     Inputs: app. Output: none. Side effects: mutates app. Role: route wiring."""
 
-    @app.post("/api/access", status_code=204)
+    @app.post("/api/access", status_code=204, dependencies=[Depends(limit_access)])
     async def post_access(body: AccessRequest, request: Request) -> Response:
         """What: trade the demo code for a signed qs_access cookie.
         Use when: the visitor presses Continue on the gate. Inputs: AccessRequest.
@@ -68,7 +69,7 @@ def install_api(app: FastAPI) -> None:
         people = load_personas(request.app.state.settings.personas_path)
         return JSONResponse([p.model_dump(mode="json") for p in people])
 
-    @app.post("/api/sessions", status_code=201)
+    @app.post("/api/sessions", status_code=201, dependencies=[Depends(limit_session_create)])
     async def post_sessions(_: EmptyBody, request: Request) -> Any:
         """What: start a conversation bound to the caller's visitor id. Use when: Start on a persona row.
         Inputs: `{}`. Output: 201 SessionCreated. Side effects: INSERT into agent.sessions. Role: doc 07 s2.2."""

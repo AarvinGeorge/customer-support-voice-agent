@@ -185,7 +185,9 @@ class IngressInput:
     body: Any = None
     demo_fault: str | None = None  # already gated by demo_fault_from_header (doc 07 s10), request-scoped
     merged_transcript: str | None = None
+    later_user_item: bool | None = None  # step 12: a client user item was merged; None = unknown (fail closed)
     redact_context: RedactContext | None = None
+    count_turn: Callable[[], Awaitable[IngressError | None]] | None = None  # rate-limit hook, called at step 9
 
 
 @dataclass(frozen=True)
@@ -212,8 +214,19 @@ class IngressStream:
     task: asyncio.Task[TurnOutcome] | None
 
 
+@dataclass(frozen=True)
+class MergeResult:
+    """What: a step 12 merge outcome: the wrapped text (or None) and whether a client user item was claimed,
+    decided from the rows before any display truncation. Use when: a MergeTranscript that knows its rows
+    (agent.voice.TranscriptMerger). Inputs: text, later_user_item. Output: value. Side effects: none.
+    Role: lets the voice yes rule (doc 07 s7.3) read data, not display text (review PR #56 I2, M1)."""
+
+    text: str | None
+    later_user_item: bool
+
+
 AgentBody = Callable[[TurnStream, IngressInput, TurnRow], Awaitable[TurnOutcome]]
-MergeTranscript = Callable[[IngressInput, TurnRow], Awaitable[str | None]]
+MergeTranscript = Callable[[IngressInput, TurnRow], Awaitable["str | MergeResult | None"]]
 
 
 def parse_turn_request(raw: Any) -> TurnRequest | IngressError:
@@ -310,6 +323,11 @@ class Ingress:
                     return TurnOutcome.fixed(CAP_LINE, end_reason="cap_reached")
 
                 return IngressStream(stream, start_turn(stream, cap_body, write_final=_noop, after=release))
+            if inp.count_turn is not None:  # doc 07 s2.4 Counting: only a turn that starts counts (not replays or the cap)
+                refused = await inp.count_turn()
+                if refused is not None:
+                    await self.lock.release(inp.session_id, token)
+                    return refused
             return await self._start(inp, release)
         except BaseException:
             await self.lock.release(inp.session_id, token)
@@ -341,7 +359,9 @@ class Ingress:
         """What: step 12: claim unmerged client transcript items for this turn; a failure is logged and the turn
         goes on without them (they stay unmerged for the next turn only if the claim did not commit).
         Use when: the turn task, before the agent loop. Inputs: input, turn row.
-        Output: the input with merged_transcript set. Side effects: transcript_items UPDATE. Role: helper."""
+        Output: the input with merged_transcript set, and later_user_item when the merger reports it (a missing
+        merger, a failure or a plain-text result leave it None: unknown). Side effects: transcript_items UPDATE.
+        Role: helper."""
         if self.merge_transcript is None:
             return inp
         try:
@@ -350,6 +370,8 @@ class Ingress:
             log.warning("transcript merge failed session_id=%s turn_id=%s", inp.session_id, row.turn_id,
                         exc_info=True)
             merged = None
+        if isinstance(merged, MergeResult):
+            return replace(inp, merged_transcript=merged.text, later_user_item=merged.later_user_item)
         return replace(inp, merged_transcript=merged)
 
     async def _find(self, inp: IngressInput) -> TurnRow | None:
