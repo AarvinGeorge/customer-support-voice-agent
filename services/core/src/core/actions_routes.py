@@ -10,7 +10,9 @@ Role: doc 07 s3.3. Only CORE_TOKEN_COMMIT holds actions.commit, actions.submit a
 rules_changed) are returned by the engine and raised here after the transaction has committed."""
 from __future__ import annotations
 
+import logging
 import re
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -18,13 +20,17 @@ from contracts.core_api import RefundPrepareRequest
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from contracts.errors import CORE_ERROR_CODES
+
 from core.actions import cancel_pending, commit_pending, pending_status, prepare_refund, submit_pending
+from core.audit import AuditEvent, write_audit
 from core.auth import RequestContext, get_ctx
 from core.db import Database
 from core.errors import CoreError
 from core.identity import require_claims
 from core.idempotency import run_idempotent
 
+log = logging.getLogger("core.actions")
 PREPARE_ENDPOINT = "POST /v1/actions/refund/prepare"
 MAX_KEY_LENGTH = 200
 _PENDING_ID = re.compile(r"^PA-[0-9A-F]{8}$")
@@ -63,6 +69,25 @@ def _pending_id(raw: str) -> str:
     return raw
 
 
+def _audit_refusal(request: Request, ctx: RequestContext, session_id: str, event: str, pending_id: str | None,
+                   exc: CoreError) -> None:
+    """What: write one refusal audit row in its own transaction after the request transaction rolled back.
+    Use when: a prepare, commit, submit or cancel raised a CoreError (the effect and any audit row inside it are gone).
+    Inputs: request, context, session, event name (e.g. action_commit_refused), pending id or None, the error.
+    Output: none. Side effects: one INSERT on audit_events; a failure to write is logged, never raised (the original
+    error must reach the caller). Role: review M2 and D-055 ('an audit row records the refusal')."""
+    try:
+        with _db(request).tx() as conn:
+            write_audit(conn, AuditEvent(
+                event=event, actor="agent", trace_id=ctx.trace_id, session_id=uuid.UUID(session_id), mode=ctx.mode,
+                action_type="refund", pending_action_id=pending_id, decision="error",
+                policy_version=request.app.state.policy.policy_version, args={"code": exc.code},
+                result_status=CORE_ERROR_CODES[exc.code][0], idempotency_key=ctx.idempotency_key),
+                clock=request.app.state.clock)
+    except Exception as audit_exc:  # noqa: BLE001 (the refusal itself must still be returned)
+        log.warning("refusal audit not written event=%s code=%s error=%s", event, exc.code, type(audit_exc).__name__)
+
+
 def refund_prepare(request: Request, body: RefundPrepareRequest) -> JSONResponse:
     """What: prepare a refund once per Idempotency-Key. Use when: the prepare_refund tool calls core.
     Inputs: request (X-Session-Id, X-Turn-Id, Idempotency-Key), validated body. Output: 200 PrepareResult; a retry with
@@ -76,18 +101,23 @@ def refund_prepare(request: Request, body: RefundPrepareRequest) -> JSONResponse
     if key is None or len(key) > MAX_KEY_LENGTH:
         raise _missing("idempotency-key", "missing" if key is None else "too_long")
     policy, clock = request.app.state.policy, request.app.state.clock
-    with _db(request).tx() as conn:
-        claims = require_claims(conn, session_id, clock.now(), policy)
+    try:
+        with _db(request).tx() as conn:
+            claims = require_claims(conn, session_id, clock.now(), policy)
 
-        def effect() -> tuple[int, dict[str, Any]]:
-            """What: run the prepare engine. Use when: run_idempotent calls it once. Inputs: none.
-            Output: (200, PrepareResult dict). Side effects: the engine's writes. Role: the stored effect."""
-            out = prepare_refund(conn, policy=policy, clock=clock, claims=claims, session_id=session_id,
-                                 turn_id=turn_id, body=body, trace_id=ctx.trace_id, mode=ctx.mode, idempotency_key=key)
-            return 200, out.model_dump(mode="json")
+            def effect() -> tuple[int, dict[str, Any]]:
+                """What: run the prepare engine. Use when: run_idempotent calls it once. Inputs: none.
+                Output: (200, PrepareResult dict). Side effects: the engine's writes. Role: the stored effect."""
+                out = prepare_refund(conn, policy=policy, clock=clock, claims=claims, session_id=session_id,
+                                     turn_id=turn_id, body=body, trace_id=ctx.trace_id, mode=ctx.mode,
+                                     idempotency_key=key)
+                return 200, out.model_dump(mode="json")
 
-        result = run_idempotent(conn, caller=ctx.caller, key=key, endpoint=PREPARE_ENDPOINT,
-                                request={"session_id": session_id, "body": body.model_dump(mode="json")}, fn=effect)
+            result = run_idempotent(conn, caller=ctx.caller, key=key, endpoint=PREPARE_ENDPOINT,
+                                    request={"session_id": session_id, "body": body.model_dump(mode="json")}, fn=effect)
+    except CoreError as exc:
+        _audit_refusal(request, ctx, session_id, "action_prepare_refused", None, exc)
+        raise
     return JSONResponse(result.body, status_code=result.status_code)
 
 
@@ -99,18 +129,24 @@ def grace_prepare(request: Request) -> JSONResponse:
     raise CoreError("ACTION_DISABLED", "Payment grace extensions are not available here.")
 
 
-def _run(request: Request, pending_id: str, fn: Callable[..., Any], *, needs_turn: bool) -> JSONResponse:
+def _run(request: Request, pending_id: str, fn: Callable[..., Any], *, verb: str, needs_turn: bool) -> JSONResponse:
     """What: run one commit, submit or cancel engine call in a transaction; raise a returned CoreError after commit.
-    Use when: the three confirm routes. Inputs: request, raw pending id, engine function, whether X-Turn-Id is needed.
-    Output: 200 JSON of the engine result. Side effects: one transaction. Role: the persist-then-fail pattern."""
+    Use when: the three confirm routes. Inputs: request, raw pending id, engine function, verb (commit, submit, cancel;
+    names the refusal audit event), whether X-Turn-Id is needed. Output: 200 JSON of the engine result.
+    Side effects: one transaction; a raised CoreError rolls it back and gets a refusal audit row
+    (action_<verb>_refused). Role: the persist-then-fail pattern."""
     ctx = get_ctx(request)
     session_id = ctx.require_session()
     pid = _pending_id(pending_id)
     extra = {"turn_id": _turn(ctx)} if needs_turn else {}
     policy, clock = request.app.state.policy, request.app.state.clock
-    with _db(request).tx() as conn:
-        out = fn(conn, policy=policy, clock=clock, pending_id=pid, session_id=session_id, trace_id=ctx.trace_id,
-                 mode=ctx.mode, **extra)
+    try:
+        with _db(request).tx() as conn:
+            out = fn(conn, policy=policy, clock=clock, pending_id=pid, session_id=session_id, trace_id=ctx.trace_id,
+                     mode=ctx.mode, **extra)
+    except CoreError as exc:
+        _audit_refusal(request, ctx, session_id, f"action_{verb}_refused", pid, exc)
+        raise
     if isinstance(out, CoreError):
         raise out
     return JSONResponse(out.model_dump(mode="json"))
@@ -119,24 +155,24 @@ def _run(request: Request, pending_id: str, fn: Callable[..., Any], *, needs_tur
 def pending_commit(request: Request, pending_id: str) -> JSONResponse:
     """What: commit a prepared action. Use when: the confirm module sends a strict yes or Confirm press.
     Inputs: request (X-Session-Id, X-Turn-Id), pending id. Output: 200 CommitResult. Side effects: the refund.
-    Raises CoreError 404, 409 PENDING_NOT_ACTIVE, CONFIRMATION_REQUIRED, RULES_CHANGED, 403 STEP_UP_REQUIRED,
+    Raises CoreError 401 SESSION_NOT_VERIFIED (D-055), 404, 409 PENDING_NOT_ACTIVE, CONFIRMATION_REQUIRED, RULES_CHANGED, 403 STEP_UP_REQUIRED,
     410 PENDING_EXPIRED, 422. Role: doc 07 s3.3 commit row. The Idempotency-Key ({id}) is accepted but not needed:
     the row lock plus the stored result make every repeat a replay."""
-    return _run(request, pending_id, commit_pending, needs_turn=True)
+    return _run(request, pending_id, commit_pending, verb="commit", needs_turn=True)
 
 
 def pending_submit(request: Request, pending_id: str) -> JSONResponse:
     """What: send an awaiting_customer action for approval. Use when: the confirm module sends a strict yes or
     "Send for approval" press. Inputs: request (X-Session-Id, X-Turn-Id), pending id. Output: 200 SubmitResult.
     Side effects: one Pending approval ticket. Raises as commit. Role: doc 07 s3.3 submit row."""
-    return _run(request, pending_id, submit_pending, needs_turn=True)
+    return _run(request, pending_id, submit_pending, verb="submit", needs_turn=True)
 
 
 def pending_cancel(request: Request, pending_id: str) -> JSONResponse:
     """What: cancel an open action. Use when: strict no or Cancel press. Inputs: request (X-Session-Id), pending id.
     Output: 200 {pending_action_id, state: cancelled, changed: false}. Side effects: one UPDATE, no ticket.
     Raises CoreError 404, 409 PENDING_NOT_ACTIVE. Role: doc 07 s3.3 cancel row."""
-    return _run(request, pending_id, cancel_pending, needs_turn=False)
+    return _run(request, pending_id, cancel_pending, verb="cancel", needs_turn=False)
 
 
 def pending_status_route(request: Request, pending_id: str) -> JSONResponse:

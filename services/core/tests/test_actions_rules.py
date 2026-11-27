@@ -46,6 +46,9 @@ def _gate(**over: object) -> str | None:
     ({"state": "rules_changed"}, "PENDING_NOT_ACTIVE"),
     ({"state": "awaiting_approval", "expires_at": None}, "PENDING_NOT_ACTIVE"),
     ({"turn_id": "turn-1"}, "CONFIRMATION_REQUIRED"),                 # same turn as the read-back
+    ({"turn_id": "TURN-1"}, "CONFIRMATION_REQUIRED"),                 # uuid text is case-insensitive (review M1)
+    ({"prepare_turn_id": "0197B5A4-7C3E-7F00-8000-00000000000A",
+      "turn_id": "0197b5a4-7c3e-7f00-8000-00000000000a"}, "CONFIRMATION_REQUIRED"),
     ({"requires_step_up": True}, "STEP_UP_REQUIRED"),
     ({"requires_step_up": True, "step_up_at": NOW}, None),
     ({"expires_at": EARLIER, "turn_id": "turn-1"}, "PENDING_EXPIRED"),  # expiry is checked before the turn rule
