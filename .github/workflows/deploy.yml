@@ -1,0 +1,117 @@
+# What: manual VM deploy of a tag (CS-E-08.S4.T2; scripts/deploy/DEPLOY.md). Runs ONLY from the Actions tab (workflow_dispatch); never on push.
+# Use when: the owner has provisioned the VM and added the secrets below, then wants to ship a tag.
+# Inputs: `tag` (an existing git tag). Secrets: VM_HOST, VM_USER, VM_SSH_KEY, VM_KNOWN_HOSTS, VM_PATH (repo checkout on the VM),
+#   the 25 names in scripts/deploy/required-env.txt, SITE_ADDRESS and SITE_ORIGIN (secrets), and repository variables
+#   DEMO_FAULTS_ENABLED and FEATURE_A4 (true or false, required: no silent default on the VM) plus the optional ones in optional-env.txt.
+# Output: a green run means the deploy script's smoke passed on the VM. Side effects: renders .env on the runner, copies it to the VM
+#   (mode 600), runs scripts/deploy/deploy.sh up on the VM. Fails first, naming the secret, when any is missing.
+# Role: optional convenience; the runbook's manual SSH steps do the same thing.
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to deploy (for example v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-vm
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Require the VM secrets (names only in the error)
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+          VM_KNOWN_HOSTS: ${{ secrets.VM_KNOWN_HOSTS }}
+          VM_PATH: ${{ secrets.VM_PATH }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for n in VM_HOST VM_USER VM_SSH_KEY VM_KNOWN_HOSTS VM_PATH; do
+            [ -n "${!n:-}" ] || missing="$missing $n"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error title=deploy secrets missing::add these repository secrets, then re-run:$missing (see scripts/deploy/DEPLOY.md)"
+            exit 1
+          fi
+      - name: Render the VM .env from secrets (fails naming any missing one)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          CORE_TOKEN_AGENT: ${{ secrets.CORE_TOKEN_AGENT }}
+          CORE_TOKEN_COMMIT: ${{ secrets.CORE_TOKEN_COMMIT }}
+          CORE_TOKEN_OPS: ${{ secrets.CORE_TOKEN_OPS }}
+          KNOWLEDGE_TOKEN_AGENT: ${{ secrets.KNOWLEDGE_TOKEN_AGENT }}
+          SESSION_SIGNING_KEY: ${{ secrets.SESSION_SIGNING_KEY }}
+          PIN_PEPPER: ${{ secrets.PIN_PEPPER }}
+          OPERATOR_TOKEN_KEY: ${{ secrets.OPERATOR_TOKEN_KEY }}
+          DEMO_ACCESS_CODE: ${{ secrets.DEMO_ACCESS_CODE }}
+          OPERATOR_ACCESS_CODE: ${{ secrets.OPERATOR_ACCESS_CODE }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          AGENT_OWNER_PASSWORD: ${{ secrets.AGENT_OWNER_PASSWORD }}
+          AGENT_APP_PASSWORD: ${{ secrets.AGENT_APP_PASSWORD }}
+          CORE_OWNER_PASSWORD: ${{ secrets.CORE_OWNER_PASSWORD }}
+          CORE_APP_PASSWORD: ${{ secrets.CORE_APP_PASSWORD }}
+          KNOWLEDGE_OWNER_PASSWORD: ${{ secrets.KNOWLEDGE_OWNER_PASSWORD }}
+          KNOWLEDGE_APP_PASSWORD: ${{ secrets.KNOWLEDGE_APP_PASSWORD }}
+          AGENT_DB_URL: ${{ secrets.AGENT_DB_URL }}
+          CORE_DB_URL: ${{ secrets.CORE_DB_URL }}
+          KNOWLEDGE_DB_URL: ${{ secrets.KNOWLEDGE_DB_URL }}
+          AGENT_DB_OWNER_URL: ${{ secrets.AGENT_DB_OWNER_URL }}
+          CORE_DB_OWNER_URL: ${{ secrets.CORE_DB_OWNER_URL }}
+          KNOWLEDGE_DB_OWNER_URL: ${{ secrets.KNOWLEDGE_DB_OWNER_URL }}
+          SITE_ADDRESS: ${{ secrets.SITE_ADDRESS }}
+          SITE_ORIGIN: ${{ secrets.SITE_ORIGIN }}
+          EDGE_SUBNET: ${{ vars.EDGE_SUBNET }}
+          FORWARDED_ALLOW_IPS: ${{ vars.FORWARDED_ALLOW_IPS }}
+          DEMO_FAULTS_ENABLED: ${{ vars.DEMO_FAULTS_ENABLED }}
+          FEATURE_A4: ${{ vars.FEATURE_A4 }}
+          LANGSMITH_TRACING: ${{ vars.LANGSMITH_TRACING }}
+          LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT }}
+          LANGSMITH_ENDPOINT: ${{ vars.LANGSMITH_ENDPOINT }}
+          REDIS_URL: ${{ vars.REDIS_URL }}
+          CORE_URL: ${{ vars.CORE_URL }}
+          KNOWLEDGE_URL: ${{ vars.KNOWLEDGE_URL }}
+        run: |
+          set -euo pipefail
+          scripts/deploy/deploy.sh render-env --out "$RUNNER_TEMP/vm.env"
+      - name: Deploy the tag over SSH
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+          VM_KNOWN_HOSTS: ${{ secrets.VM_KNOWN_HOSTS }}
+          VM_PATH: ${{ secrets.VM_PATH }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::tag has characters outside A-Za-z0-9._-"; exit 1; }
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VM_SSH_KEY" > ~/.ssh/id_deploy
+          printf '%s\n' "$VM_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh_opts=(-i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes -o BatchMode=yes)
+          # Keep the old .env (rollback needs the config that matched the old tag), then fetch and check out the tag FIRST so the
+          # deploy script that runs is the tag's own, not the previous release's.
+          ssh "${ssh_opts[@]}" "$VM_USER@$VM_HOST" "cd '$VM_PATH' && { [ ! -f .env ] || cp -p .env .env.previous; } && git fetch --tags --prune origin && git checkout --detach 'refs/tags/$TAG'"
+          scp "${ssh_opts[@]}" "$RUNNER_TEMP/vm.env" "$VM_USER@$VM_HOST:$VM_PATH/.env"
+          ssh "${ssh_opts[@]}" "$VM_USER@$VM_HOST" "chmod 600 '$VM_PATH/.env' && cd '$VM_PATH' && scripts/deploy/deploy.sh up --tag '$TAG'"

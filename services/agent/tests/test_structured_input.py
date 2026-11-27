@@ -104,7 +104,7 @@ class World:
         await self.agent.aupdate_state(run_config(SID), values)
 
     async def send(self, mode: str = "chat", **body: Any) -> tuple[Any, list[Any]]:
-        """What: one turn with a TurnRequest body. Use when: tests. Inputs: mode (chat, or voice for the I3 refusal),
+        """What: one turn with a TurnRequest body. Use when: tests. Inputs: mode (chat, or voice for a body with no transcript),
         text, confirm or verification. Output: (outcome, events). Side effects: as a turn. Role: helper."""
         req = TurnRequest.model_validate({"client_turn_id": str(uuid.uuid4()), **body})
         res = await self.ingress.handle(IngressInput(session_id=SID, visitor_id=VISITOR,
@@ -305,14 +305,16 @@ async def test_lapsed_verification_at_the_refresh_on_a_confirm_turn_shows_the_ca
         assert (await w.values())["pending"]["id"] == ex.PENDING_ID
 
 
-async def test_voice_text_yes_never_commits_and_repeats_the_readback_with_the_card() -> None:
+async def test_voice_text_yes_without_a_final_transcript_never_commits_and_repeats_the_readback() -> None:
+    # CS-E-05.S1.T1 replaced the I3 refusal: a voice yes needs the final user_transcript (test_voice_adjacency.py).
+    # No step 12 merger here, so later_user_item is unknown: blocked, the full read-back (PR #56 I2), not the re-prompt
     w, _, _ = await readback_world()
     outcome, events = await w.send(mode="voice", text="yes")
     assert outcome.end_reason == "readback" and w.core_calls("/commit") == []
     (conf,) = of(events, "confirmation.required")
     assert conf.pending.pending_action_id == ex.PENDING_ID
-    assert ex.READBACK.voice in (outcome.final.say or "") and "press Confirm" in (outcome.final.say or "")
-    again, _ = await w.send(mode="voice", text="yes")  # still never commits by voice text
+    assert outcome.final.say == ex.READBACK.voice
+    again, _ = await w.send(mode="voice", text="yes")  # still never commits without a final transcript
     assert again.end_reason == "readback" and w.core_calls("/commit") == []
     done, _ = await w.send(mode="voice", confirm={"pending_action_id": ex.PENDING_ID, "decision": "confirm"})
     assert done.end_reason == "committed" and len(w.core_calls("/commit")) == 1

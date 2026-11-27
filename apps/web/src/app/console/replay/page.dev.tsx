@@ -1,5 +1,6 @@
 /**
- * What: DEV-ONLY route /console/replay?fixture=s1|s3|s4|s5|edge|voice|verify|confirm that renders a
+ * What: DEV-ONLY route /console/replay?fixture=s1|s3|s4|s5|edge|voice|verify|confirm (plus
+ *   &voice=listening|interrupted for the voice dock, CS-E-05.S4) that renders a
  *   recorded fixture conversation in the console, for screenshots and design review (verify and
  *   confirm stop S1 after its first or second turn, so the open card shows).
  * Use when: `pnpm dev` (the `.dev.tsx` extension is in pageExtensions only for the dev server;
@@ -73,5 +74,6 @@ export default async function ReplayPage({ searchParams }: { searchParams: Promi
     .filter((l) => l.trim() !== "")
     .map((l) => JSON.parse(l) as SseEvent);
   const keep = new Set([...new Set(events.map((e) => e.turn_id))].slice(0, script.turns ?? Infinity));
-  return <FixtureReplay events={events.filter((e) => keep.has(e.turn_id))} lines={script.lines} demo={q.demo === "1"} />;
+  const voiceDemo = q.voice === "listening" || q.voice === "interrupted" ? q.voice : undefined;
+  return <FixtureReplay events={events.filter((e) => keep.has(e.turn_id))} lines={script.lines} demo={q.demo === "1"} voiceDemo={voiceDemo} />;
 }
