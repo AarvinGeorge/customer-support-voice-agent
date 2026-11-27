@@ -2,10 +2,11 @@
 # What: deploy, roll back, reseed or smoke-test the Quillstack Compose stack on the VM (or a laptop with --local).
 # Use when: the owner or .github/workflows/deploy.yml ships a tag. Run it ON the VM from the repo checkout (see scripts/deploy/DEPLOY.md).
 # Inputs: a command (up, rollback, reseed, smoke, check, render-env) and options (--tag, --env-file, --local, --print,
-#   --state-dir, --out). Variables come from the env file (the shell wins on a clash, as in Compose); names are in
+#   --state-dir, --out, --restore-db). Variables come from the env file (the shell wins on a clash, as in Compose); names are in
 #   scripts/deploy/required-env.txt. Output: one line per step on stdout; errors on stderr; exit 0 only when every step passed.
-# Side effects: git checkout of the tag; docker builds, one-shot jobs and container restarts; writes <state-dir>/current and
-#   <state-dir>/previous (tags); `reseed` wipes the demo data. Never prints a secret value. --print runs nothing.
+# Side effects: git checkout of the tag; docker builds, one-shot jobs and container restarts; a pg_dump backup under <state-dir>/backups;
+#   state files in <state-dir>: good (last tag with a green smoke), rollback_to (what `rollback` restores), pending (an `up` that
+#   has not finished), last_backup; `reseed` wipes the demo data. Never prints a secret value. --print runs nothing.
 # Role: CS-E-08.S4.T2 (doc 09 s5, doc 06 s10, doc 07 s15.2; D-029, D-047, D-049): one ordered, repeatable deploy.
 set -euo pipefail
 
@@ -16,6 +17,7 @@ STATE_DIR="$ROOT/.deploy"
 TAG=""
 LOCAL=0
 PRINT=0
+RESTORE_DB=0
 OUT=""
 CMD=""
 
@@ -25,13 +27,14 @@ usage() {
 usage: scripts/deploy/deploy.sh [options] <command>
 commands:
   up --tag TAG    checkout TAG, build, migrate, seed (first time only), ingest, rolling restart, smoke
-  rollback        redeploy the previous tag recorded by the last successful `up`
+  rollback        restore the last GOOD tag (green smoke): after a failed `up` that is the tag that was running before it;
+                  --restore-db also restores the pre-migrate backup taken by that `up`
   reseed          wipe and reseed the demo data (run before the Loom take), then smoke
   smoke           read /readyz from core, knowledge and the edge, then one chat turn
   check           validate the env file only
   render-env      write an env file from the process environment (GitHub secrets); needs --out
 options: --env-file FILE (default .env)  --local (laptop dry-run: no git, local overlay)  --print (show commands, run none)
-         --state-dir DIR  --out FILE
+         --state-dir DIR  --out FILE  --restore-db (rollback only)
 USAGE
 }
 
@@ -43,6 +46,7 @@ while [ $# -gt 0 ]; do
     --out) [ $# -ge 2 ] || die "--out needs a value" 2; OUT="$2"; shift 2 ;;
     --local) LOCAL=1; shift ;;
     --print) PRINT=1; shift ;;
+    --restore-db) RESTORE_DB=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) usage >&2; die "unknown option: $1" 2 ;;
     *) [ -z "$CMD" ] || die "unexpected argument: $1" 2; CMD="$1"; shift ;;
@@ -86,45 +90,86 @@ preflight() {
   case "${DEMO_RESEED:-false}" in 1|true|TRUE|True) [ "$CMD" = reseed ] || die "DEMO_RESEED is on in the env file: remove it; only the reseed command sets it" ;; esac
   if [ "$LOCAL" = 0 ]; then
     case "$SITE_ADDRESS" in :*|http://*) die "SITE_ADDRESS=$SITE_ADDRESS would serve plain http: set the domain (https is automatic)" ;; esac
+    for n in DEMO_FAULTS_ENABLED FEATURE_A4; do
+      case "$(printenv "$n" || true)" in true|false) ;; *) die "$n must be set to true or false in the env file (behaviour flag, no silent default on the VM)" ;; esac
+    done
     [ "$SITE_ORIGIN" = "https://$SITE_ADDRESS" ] || die "SITE_ORIGIN ($SITE_ORIGIN) must be https://$SITE_ADDRESS"
     if [ -n "$(find "$ENV_FILE" \( -perm -g+r -o -perm -o+r \) -print 2>/dev/null)" ]; then
       die "$ENV_FILE is readable by group or others: chmod 600 $ENV_FILE"
     fi
   fi
+  echo "flags: DEMO_FAULTS_ENABLED=${DEMO_FAULTS_ENABLED:-true(default)} FEATURE_A4=${FEATURE_A4:-false(default)}"
   echo "preflight ok (env file $ENV_FILE; secrets present: $(names "$HERE/required-env.txt" | wc -l | tr -d ' '))"
 }
 
-compose() {
-  local files=(-f compose.yaml)
-  [ "$LOCAL" = 0 ] || files+=(-f scripts/deploy/compose.local.yaml)
-  run docker compose --env-file "$ENV_FILE" "${files[@]}" "$@"
-}
+COMPOSE_FILES=(-f compose.yaml)
+[ "$LOCAL" = 0 ] || COMPOSE_FILES+=(-f scripts/deploy/compose.local.yaml)
+compose() { run docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" "$@"; }
+# dc: a read-only compose call whose output the script uses (not echoed).
+dc() { docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" "$@"; }
 
 smoke_base() { if [ "$LOCAL" = 1 ]; then echo "http://127.0.0.1:${EDGE_PORT:-8088}"; else echo "${SITE_ORIGIN}"; fi; }
 
-# probe SERVICE PATH: GET a backend /readyz from a throwaway container of the release image (never exec into a live one).
+sha12() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -c1-12; }
+
+# expected_policy / expected_embedding: what the checked-out tag says /readyz must report.
+expected_policy() { echo "$(sed -n 's/^version_label: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' "$ROOT/data/policy.yaml" | head -n1)+$(sha12 "$ROOT/data/policy.yaml")"; }
+expected_embedding() { awk '/^ *embeddings:/{f=1} f&&/^ *model:/{print $2; exit}' "$ROOT/data/models.yaml"; }
+
+# has BODY NEEDLE: compact BODY (spaces removed) contains NEEDLE literally.
+has() { printf '%s' "$1" | tr -d ' ' | grep -qF -- "$2"; }
+# need LABEL BODY NEEDLE...: fail loudly naming the label and the missing needle (never the secrets: bodies carry none).
+need() { local label="$1" body="$2" n; shift 2; for n in "$@"; do has "$body" "$n" || { echo "deploy: $label read-back is missing $n; body: $body" >&2; return 1; }; done; }
+
+# probe SERVICE PATH: GET a backend readyz from a throwaway container of the release image (never exec into a live one).
+# Prints "<http status> <body>" even for a 503, so the cause is visible.
 probe() {
   local svc="$1" path="$2"
-  compose run --rm --no-deps -T "$svc" python -c "import json,urllib.request;d=json.load(urllib.request.urlopen('http://$svc:8000$path',timeout=5));print(json.dumps(d))"
+  dc run --rm --no-deps -T "$svc" python -c "import urllib.request,urllib.error
+try:
+    r=urllib.request.urlopen('http://$svc:8000$path',timeout=5); print(r.status, r.read().decode())
+except urllib.error.HTTPError as e:
+    print(e.code, e.read().decode())"
+}
+
+# revision_readback: each app container runs the image that was just built, and the checkout is the tag.
+revision_readback() {
+  local svc cid img built name
+  [ "$LOCAL" = 1 ] || echo "revision: $(git -C "$ROOT" describe --tags --exact-match 2>/dev/null || echo untagged) $(git -C "$ROOT" rev-parse --short HEAD)"
+  for svc in core knowledge agent_a agent_b; do
+    cid="$(docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" ps -q "$svc")"
+    [ -n "$cid" ] || { echo "deploy: $svc has no running container" >&2; return 1; }
+    img="$(docker inspect -f '{{.Image}}' "$cid")"
+    name="$(docker inspect -f '{{.Config.Image}}' "$cid")"
+    built="$(docker image inspect -f '{{.Id}}' "$name")"
+    [ "$img" = "$built" ] || { echo "deploy: $svc runs an older image than the one built ($name)" >&2; return 1; }
+  done
+  echo "revision: core knowledge agent_a agent_b run the freshly built images"
 }
 
 smoke() {
-  step "SMOKE readyz and one chat turn"
-  [ "$PRINT" = 0 ] || { echo "+ (smoke checks core, knowledge and edge readyz, then access, session, one turn)"; return 0; }
-  local want_cv core know edge base
-  want_cv="$(tr -d '[:space:]' < "$ROOT/packages/contracts/VERSION")"
-  core="$(probe core /readyz 2>/dev/null | tail -n1)" || die "core /readyz failed"
-  echo "core:      $core"
-  echo "$core" | grep -q "\"contract_version\": *\"$want_cv\"" || die "core contract_version is not $want_cv"
-  echo "$core" | grep -q '"policy_version"' || die "core /readyz has no policy_version"
-  echo "$core" | grep -q '"status": *"ready"' || die "core is not ready"
-  know="$(probe knowledge /readyz 2>/dev/null | tail -n1)" || die "knowledge /readyz failed"
-  echo "knowledge: $know"
-  echo "$know" | grep -q '"status": *"ready"' || die "knowledge is not ready"
+  step "SMOKE readyz versions, revision, in-flight and one chat turn"
+  [ "$PRINT" = 0 ] || { echo "+ (smoke compares contract, policy, embedding model and flags with the checkout, then access, session, one turn)"; return 0; }
+  local cv pv em df core know edge base out code chunks
+  cv="$(tr -d '[:space:]' < "$ROOT/packages/contracts/VERSION")"; pv="$(expected_policy)"; em="$(expected_embedding)"
+  df="$(printf '%s' "${DEMO_FAULTS_ENABLED:-true}" | tr '[:upper:]' '[:lower:]')"
+  [ -n "$pv" ] && [ -n "$em" ] || die "could not compute the expected policy version or embedding model from data/"
+  echo "expected: contract=$cv policy=$pv embedding=$em demo_faults=$df"
+  revision_readback || return 1
+  out="$(probe core /readyz)" || die "core /readyz probe failed to run"; code="${out%% *}"; core="${out#* }"
+  echo "core:      $code $core"
+  [ "$code" = 200 ] || die "core /readyz returned $code"
+  need core "$core" '"status":"ready"' "\"contract_version\":\"$cv\"" "\"policy_version\":\"$pv\"" "\"demo_faults\":$df" '"seed_date"' || exit 1
+  out="$(probe knowledge /readyz)" || die "knowledge /readyz probe failed to run"; code="${out%% *}"; know="${out#* }"
+  echo "knowledge: $code $know"
+  [ "$code" = 200 ] || die "knowledge /readyz returned $code"
+  need knowledge "$know" '"status":"ready"' "\"embedding_model\":\"$em\"" '"calibration_status"' || exit 1
+  chunks="$(printf '%s' "$know" | tr -d ' ' | sed -n 's/.*"chunks":\([0-9]*\).*/\1/p')"
+  [ "${chunks:-0}" -ge 1 ] || die "knowledge reports no chunks"
   base="$(smoke_base)"
   edge="$(curl -fsS --max-time 10 "$base/api/readyz")" || die "edge $base/api/readyz failed"
   echo "edge:      $edge"
-  echo "$edge" | grep -q "\"contract_version\": *\"$want_cv\"" || die "agent contract_version is not $want_cv"
+  need edge "$edge" '"status":"ready"' "\"contract_version\":\"$cv\"" '"redis":"ok"' '"postgres":"ok"' '"core":"ok"' '"knowledge":"ok"' "\"demo_faults\":$df" || exit 1
   chat_turn "$base"
   echo "smoke ok"
 }
@@ -167,6 +212,46 @@ checkout_tag() {
 
 wait_note() { echo "(waiting for healthy: --wait, up to 180 s)"; }
 
+PSQL=(postgres psql -U postgres -v ON_ERROR_STOP=1 -tA)
+
+# schema_exists: 0 when the three service schemas already hold data (a re-deploy), 1 on a fresh database.
+schema_exists() {
+  [ "$PRINT" = 0 ] || return 0
+  [ "$(dc exec -T "${PSQL[@]}" -d quillstack -c "select count(*) from information_schema.tables where table_schema in ('core','knowledge','agent')")" -gt 0 ]
+}
+table_count() { dc exec -T "${PSQL[@]}" -d "$1" -c "select count(*) from information_schema.tables where table_schema in ('core','knowledge','agent')"; }
+
+# backup TAG: pg_dump before any migration, then READ IT BACK: size, completion marker, table count, and a restore into a scratch DB.
+backup() {
+  step "backup before migrate (pg_dump, size, marker and a restore test into a scratch database)"
+  if [ "$PRINT" = 1 ]; then echo "+ pg_dump quillstack to $STATE_DIR/backups/pre-$1-<time>.sql, then restore into scratch db quillstack_restore_check and compare table counts"; return 0; fi
+  if ! schema_exists; then echo "backup: fresh database (no service schema yet), nothing to back up"; return 0; fi
+  mkdir -p "$STATE_DIR/backups"; chmod 700 "$STATE_DIR/backups"
+  local f="$STATE_DIR/backups/pre-$1-$(date -u +%Y%m%dT%H%M%SZ).sql" want got size
+  ( umask 077; dc exec -T postgres pg_dump -U postgres --clean --if-exists quillstack > "$f" ) || die "pg_dump failed"
+  size="$(wc -c < "$f" | tr -d ' ')"
+  [ "$size" -gt 1000 ] || die "backup is only $size bytes: refusing to continue"
+  grep -q 'PostgreSQL database dump complete' "$f" || die "backup has no completion marker: refusing to continue"
+  dc exec -T "${PSQL[@]}" -d postgres -c "drop database if exists quillstack_restore_check" >/dev/null
+  dc exec -T "${PSQL[@]}" -d postgres -c "create database quillstack_restore_check" >/dev/null
+  dc exec -T "${PSQL[@]}" -d quillstack_restore_check < "$f" >/dev/null || die "restore test into the scratch database failed"
+  want="$(table_count quillstack)"; got="$(table_count quillstack_restore_check)"
+  dc exec -T "${PSQL[@]}" -d postgres -c "drop database quillstack_restore_check" >/dev/null
+  [ "$want" = "$got" ] || die "restore test table count $got differs from live $want"
+  printf '%s\n' "$f" > "$STATE_DIR/last_backup"
+  echo "backup ok: $f ($size bytes, $got service tables restored into a scratch db and dropped)"
+}
+
+restore_backup() {
+  local f; f="$(cat "$STATE_DIR/last_backup" 2>/dev/null || true)"
+  [ -n "$f" ] && [ -f "$f" ] || die "--restore-db: no backup recorded in $STATE_DIR/last_backup"
+  step "restore database from $f (app services stopped first)"
+  compose stop agent_a agent_b core knowledge
+  [ "$PRINT" = 1 ] && { echo "+ psql quillstack < $f"; return 0; }
+  dc exec -T "${PSQL[@]}" -d quillstack < "$f" >/dev/null || die "database restore failed; the backup file is kept at $f"
+  echo "restore ok"
+}
+
 migrate_and_seed() {
   step "migrate_core migrate_knowledge migrate_agent (owner roles, order core, knowledge, agent)"
   for job in migrate_core migrate_knowledge migrate_agent; do compose run --rm --no-deps "$job"; done
@@ -176,30 +261,61 @@ migrate_and_seed() {
   compose run --rm --no-deps ingest_knowledge
 }
 
+# inflight_gate: no live turn may be open when the switch starts. Waits up to INFLIGHT_WAIT_S (default 90), then aborts.
+inflight_gate() {
+  step "in-flight check before the switch (agent.turns running and not past deadline)"
+  if [ "$PRINT" = 1 ]; then echo "+ psql: count running turns; wait up to \${INFLIGHT_WAIT_S:-90} s, abort if any remain"; return 0; fi
+  local waited=0 max="${INFLIGHT_WAIT_S:-90}" n
+  while :; do
+    if [ "$(dc exec -T "${PSQL[@]}" -d quillstack -c "select to_regclass('agent.turns') is not null")" = t ]; then
+      n="$(dc exec -T "${PSQL[@]}" -d quillstack -c "select count(*) from agent.turns where status='running' and deadline_at > now()")"
+    else n=0; fi
+    echo "in-flight turns: $n (running tag: $(cat "$STATE_DIR/good" 2>/dev/null || echo none))"
+    [ "$n" = 0 ] && return 0
+    [ "$waited" -lt "$max" ] || die "$n turn(s) still running after ${max}s: not switching. Retry later (no deploy during a Loom take)."
+    sleep 5; waited=$((waited + 5))
+  done
+}
+
 rolling_restart() {
-  step "rolling restart: core and knowledge, then agent_a, then agent_b, then web and caddy"
+  step "rolling restart: core and knowledge, then agent_a, then agent_b, then web, then caddy (recreated so Caddyfile changes apply)"
   wait_note
   compose up -d --no-deps --wait --wait-timeout 180 --force-recreate core knowledge
   compose up -d --no-deps --wait --wait-timeout 180 --force-recreate agent_a
   compose up -d --no-deps --wait --wait-timeout 180 --force-recreate agent_b
   compose up -d --no-deps --wait --wait-timeout 180 web
-  compose up -d --no-deps --wait --wait-timeout 180 caddy
+  compose up -d --no-deps --wait --wait-timeout 180 --force-recreate caddy
 }
 
 bring_up() {
-  step "build images on this host"
-  compose build
+  step "build images on this host (including the seed and ingest job images)"
+  compose --profile seed --profile jobs build
   step "postgres and redis"
   compose up -d --no-deps --wait --wait-timeout 180 postgres redis
+  backup "${TAG:-local}"
   migrate_and_seed
+  inflight_gate
   rolling_restart
 }
 
-record() { # record NEW_TAG: current becomes previous, NEW_TAG becomes current (after a green smoke)
-  [ "$PRINT" = 0 ] || { echo "+ (record $1 as current; the old current becomes previous in $STATE_DIR)"; return 0; }
+# State: good = last tag with a green smoke. rollback_to = what `rollback` restores. pending = an `up` that has not finished.
+st_get() { cat "$STATE_DIR/$1" 2>/dev/null | tr -d '[:space:]' || true; }
+
+begin_up() { # begin_up TAG: save the rollback point BEFORE any change
+  [ "$PRINT" = 0 ] || { echo "+ (save rollback point: current good tag from $STATE_DIR/good; mark $1 pending)"; return 0; }
   mkdir -p "$STATE_DIR"
-  if [ -f "$STATE_DIR/current" ] && [ "$(cat "$STATE_DIR/current")" != "$1" ]; then cp "$STATE_DIR/current" "$STATE_DIR/previous"; fi
-  printf '%s\n' "$1" > "$STATE_DIR/current"
+  local g; g="$(st_get good)"
+  if [ -n "$g" ]; then printf '%s\n' "$g" > "$STATE_DIR/rollback_to"; else rm -f "$STATE_DIR/rollback_to"; fi
+  printf '%s\n' "$1" > "$STATE_DIR/pending"
+  echo "rollback point: ${g:-none (first deploy)}"
+}
+
+mark_good() { # mark_good TAG: only after a green smoke
+  [ "$PRINT" = 0 ] || { echo "+ (mark $1 good; the old good tag becomes the rollback point)"; return 0; }
+  local g; g="$(st_get good)"
+  if [ -n "$g" ] && [ "$g" != "$1" ]; then printf '%s\n' "$g" > "$STATE_DIR/rollback_to"; fi
+  printf '%s\n' "$1" > "$STATE_DIR/good"
+  rm -f "$STATE_DIR/pending"
 }
 
 cd "$ROOT"
@@ -209,34 +325,50 @@ case "$CMD" in
     missing=""
     for n in $(names "$HERE/required-env.txt"); do [ -n "$(printenv "$n" || true)" ] || missing="$missing $n"; done
     [ -z "$missing" ] || die "missing or empty GitHub secrets / variables:$missing"
+    bad=""
+    for n in $(names "$HERE/required-env.txt") $(names "$HERE/optional-env.txt"); do
+      v="$(printenv "$n" || true)"
+      case "$v" in *"'"*|*$'\n'*) bad="$bad $n" ;; esac
+    done
+    [ -z "$bad" ] || die "values with a single quote or newline are not allowed (Compose env-file parsing):$bad"
     tmp="$(umask 077; mktemp "$OUT.XXXXXX")"
     for n in $(names "$HERE/required-env.txt") $(names "$HERE/optional-env.txt"); do
       v="$(printenv "$n" || true)"
-      [ -z "$v" ] || printf '%s=%s\n' "$n" "$v" >> "$tmp"
+      [ -z "$v" ] || printf "%s='%s'\n" "$n" "$v" >> "$tmp"
     done
     chmod 600 "$tmp"; mv "$tmp" "$OUT"
-    echo "wrote $OUT (mode 600, $(wc -l < "$OUT" | tr -d ' ') variables; values not shown)" ;;
+    echo "wrote $OUT (mode 600, $(wc -l < "$OUT" | tr -d ' ') variables, single-quoted; values not shown)" ;;
   check) preflight ;;
-  smoke) preflight; smoke ;;
+  smoke) preflight; if ! ( smoke ); then die "smoke FAILED"; fi ;;
   up)
     preflight
+    begin_up "${TAG:-local}"
     checkout_tag "${TAG:-local}"
     bring_up
-    smoke || { echo "deploy: smoke FAILED for ${TAG:-local}; roll back with: scripts/deploy/deploy.sh rollback" >&2; exit 1; }
-    record "${TAG:-local}" ;;
+    if ! ( smoke ); then
+      echo "deploy: smoke FAILED for ${TAG:-local}. Roll back: scripts/deploy/deploy.sh rollback (add --restore-db to also restore the pre-migrate backup)" >&2
+      exit 1
+    fi
+    mark_good "${TAG:-local}" ;;
   rollback)
     preflight
-    [ -f "$STATE_DIR/previous" ] || die "no previous tag recorded in $STATE_DIR/previous: nothing to roll back to"
-    prev="$(tr -d '[:space:]' < "$STATE_DIR/previous")"
+    [ -f "$STATE_DIR/rollback_to" ] || die "no rollback tag recorded in $STATE_DIR/rollback_to (the first deploy has none): nothing to roll back to"
+    prev="$(st_get rollback_to)"
+    echo "rolling back to the last good tag: $prev (pending: $(st_get pending || true))"
     checkout_tag "$prev"
-    step "rollback build and rolling restart (migrations are forward-only, see DEPLOY.md)"
-    compose build
+    step "rollback build"
+    compose --profile seed --profile jobs build
+    [ "$RESTORE_DB" = 0 ] || restore_backup
     rolling_restart
-    smoke
-    [ "$PRINT" = 1 ] || { cp "$STATE_DIR/current" "$STATE_DIR/rolled_back_from"; printf '%s\n' "$prev" > "$STATE_DIR/current"; } ;;
+    if ! ( smoke ); then die "smoke FAILED after rollback to $prev"; fi
+    if [ "$PRINT" = 0 ]; then
+      failed="$(st_get pending)"; [ -z "$failed" ] || printf '%s\n' "$failed" > "$STATE_DIR/rolled_back_from"
+      printf '%s\n' "$prev" > "$STATE_DIR/good"; rm -f "$STATE_DIR/pending"
+    fi ;;
   reseed)
     preflight
     step "reseed: wipe and reseed core demo data (audit history is kept)"
+    compose --profile seed build seed_core
     compose run --rm --no-deps -e DEMO_RESEED=true seed_core python -m core.seeds --reseed
-    smoke ;;
+    if ! ( smoke ); then die "smoke FAILED after reseed"; fi ;;
 esac

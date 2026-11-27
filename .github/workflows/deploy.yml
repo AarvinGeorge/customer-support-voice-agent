@@ -1,7 +1,8 @@
 # What: manual VM deploy of a tag (CS-E-08.S4.T2; scripts/deploy/DEPLOY.md). Runs ONLY from the Actions tab (workflow_dispatch); never on push.
 # Use when: the owner has provisioned the VM and added the secrets below, then wants to ship a tag.
 # Inputs: `tag` (an existing git tag). Secrets: VM_HOST, VM_USER, VM_SSH_KEY, VM_KNOWN_HOSTS, VM_PATH (repo checkout on the VM),
-#   the 25 names in scripts/deploy/required-env.txt, plus SITE_ADDRESS and SITE_ORIGIN (as secrets or repository variables).
+#   the 25 names in scripts/deploy/required-env.txt, SITE_ADDRESS and SITE_ORIGIN (secrets), and repository variables
+#   DEMO_FAULTS_ENABLED and FEATURE_A4 (true or false, required: no silent default on the VM) plus the optional ones in optional-env.txt.
 # Output: a green run means the deploy script's smoke passed on the VM. Side effects: renders .env on the runner, copies it to the VM
 #   (mode 600), runs scripts/deploy/deploy.sh up on the VM. Fails first, naming the secret, when any is missing.
 # Role: optional convenience; the runbook's manual SSH steps do the same thing.
@@ -82,6 +83,14 @@ jobs:
           SITE_ORIGIN: ${{ secrets.SITE_ORIGIN }}
           EDGE_SUBNET: ${{ vars.EDGE_SUBNET }}
           FORWARDED_ALLOW_IPS: ${{ vars.FORWARDED_ALLOW_IPS }}
+          DEMO_FAULTS_ENABLED: ${{ vars.DEMO_FAULTS_ENABLED }}
+          FEATURE_A4: ${{ vars.FEATURE_A4 }}
+          LANGSMITH_TRACING: ${{ vars.LANGSMITH_TRACING }}
+          LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT }}
+          LANGSMITH_ENDPOINT: ${{ vars.LANGSMITH_ENDPOINT }}
+          REDIS_URL: ${{ vars.REDIS_URL }}
+          CORE_URL: ${{ vars.CORE_URL }}
+          KNOWLEDGE_URL: ${{ vars.KNOWLEDGE_URL }}
         run: |
           set -euo pipefail
           scripts/deploy/deploy.sh render-env --out "$RUNNER_TEMP/vm.env"
@@ -101,5 +110,8 @@ jobs:
           printf '%s\n' "$VM_SSH_KEY" > ~/.ssh/id_deploy
           printf '%s\n' "$VM_KNOWN_HOSTS" > ~/.ssh/known_hosts
           ssh_opts=(-i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes -o BatchMode=yes)
+          # Keep the old .env (rollback needs the config that matched the old tag), then fetch and check out the tag FIRST so the
+          # deploy script that runs is the tag's own, not the previous release's.
+          ssh "${ssh_opts[@]}" "$VM_USER@$VM_HOST" "cd '$VM_PATH' && { [ ! -f .env ] || cp -p .env .env.previous; } && git fetch --tags --prune origin && git checkout --detach 'refs/tags/$TAG'"
           scp "${ssh_opts[@]}" "$RUNNER_TEMP/vm.env" "$VM_USER@$VM_HOST:$VM_PATH/.env"
           ssh "${ssh_opts[@]}" "$VM_USER@$VM_HOST" "chmod 600 '$VM_PATH/.env' && cd '$VM_PATH' && scripts/deploy/deploy.sh up --tag '$TAG'"
