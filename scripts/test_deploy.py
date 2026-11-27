@@ -76,7 +76,9 @@ def run(args: list[str], env: dict[str, str], tmp: Path, env_file: bool = True) 
         f.write_text("".join(f"{k}={v}\n" for k, v in env.items()))
         f.chmod(0o600)
     seed_releases(tmp)
-    clean = {"PATH": os.environ["PATH"], "HOME": str(tmp)}
+    # Stub docker, git and gh first on PATH even in --print mode: a refusal or cleanup path must never reach a real stack
+    # (standing rule after a test took down the owner's cs-demo stack).
+    clean = {"PATH": stub_env(tmp)["PATH"], "HOME": str(tmp), "STUB_LOG": str(tmp / "stub.log"), "REV": REV}
     return subprocess.run(["bash", str(SCRIPT), "--env-file", str(f), "--state-dir", str(tmp / "state"), "--print", *args], env=clean,
                           capture_output=True, text=True, cwd=ROOT, timeout=60)
 
@@ -658,6 +660,17 @@ def test_rollback_restore_db_runs_with_the_failed_release_images_then_switches(t
     assert lines[stop].startswith(f"AGENT_IMAGE={ref('v3', 'agent')}")
     first_restart = next(i for i, ln in enumerate(lines) if "--force-recreate" in ln)
     assert first_restart > stop and lines[first_restart].startswith(f"AGENT_IMAGE={ref('v2', 'agent')}")
+
+
+def test_print_mode_calls_no_docker(tmp_path: Path) -> None:
+    """What: --print up, rollback and rollback --restore-db make no docker call at all (the stub on PATH logs every call).
+    Use when: pytest. Inputs: tmp. Output: assert. Side effects: tmp state. Role: --print runs nothing, shown by measurement."""
+    _restore_state(tmp_path)
+    for args in (["up", "--tag", "v1"], ["rollback"], ["rollback", "--restore-db"]):
+        p = run(args, good_env(), tmp_path)
+        assert p.returncode == 0, (args, p.stderr)
+    log = tmp_path / "stub.log"
+    assert not log.exists() or not [ln for ln in log.read_text().splitlines() if ln.startswith(("docker ", "git ", "gh "))]
 
 
 def test_rollback_without_the_previous_manifest_fails(tmp_path: Path) -> None:
