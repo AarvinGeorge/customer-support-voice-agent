@@ -11,7 +11,8 @@ UNSUPPORTED_INPUT_LINE.
 Side effects: wire_app sets app.state.ingress and app.state.voice.ingress; reads models.yaml; nothing connects.
 Role: wiring only. The turn body here is the minimal step 14 path (turn message, TurnControl, the SSE adapter);
 CS-E-03.S7.T5 and T8 (TurnRunner: repair, memory refresh, structured input) replace it through the
-`body_factory` seam of build_ingress, and CS-E-03.S7.T9 (PIN scan) slots in before the thread write.
+`body_factory` seam of build_ingress. CS-E-03.S7.T9: Ingress runs the step 9a PIN scan before any body, and
+the typed-PIN refusal (TypedPinRefusal) is wired here.
 """
 from __future__ import annotations
 
@@ -30,6 +31,7 @@ from agent.clients.core_agent import CoreAgentClient
 from agent.clients.knowledge import KnowledgeClient
 from agent.ingress import AgentBody, CallKeys, Ingress, IngressInput, MergeTranscript, PgTurnStore, RedisTurnLock, \
     TurnLock, TurnRow, TurnStore
+from agent.pin_guard import AwaitingFlag, PgAwaitingFlag, TypedPinRefusal
 from agent.prompt import TurnContext, build_turn_message
 from agent.settings import Settings
 from agent.sse import TurnOutcome, TurnStream, stream_agent_turn
@@ -124,13 +126,15 @@ def build_agent_runtime(cfg: Settings, *, http: httpx.AsyncClient, checkpointer:
 
 def build_ingress(agent: Any, *, store: TurnStore, lock: TurnLock, served_by: str, call_keys: CallKeys | None = None,
                   merge_transcript: MergeTranscript | None = None,
-                  body_factory: Callable[[Any], AgentBody] = AgentTurnBody, **extra: Any) -> Ingress:
+                  body_factory: Callable[[Any], AgentBody] = AgentTurnBody, flags: AwaitingFlag | None = None,
+                  **extra: Any) -> Ingress:
     """What: the one Ingress for chat and voice. Use when: wire_app; tests with memory stores.
     Inputs: agent, turn store, turn lock, replica name, voice call keys, transcript merger, body factory (seam for
-    TurnRunner), extra Ingress keyword arguments (for example trajectory, CS-E-03.S8.T8). Output: Ingress.
+    TurnRunner), awaiting-verification writer for the typed-PIN refusal (CS-E-03.S7.T9), extra Ingress keyword
+    arguments (for example trajectory, CS-E-03.S8.T8). Output: Ingress.
     Side effects: none. Role: wiring."""
     return Ingress(store, lock, served_by=served_by, run_agent=body_factory(agent), call_keys=call_keys,
-                   merge_transcript=merge_transcript, **extra)
+                   merge_transcript=merge_transcript, refuse_typed_pin=TypedPinRefusal(agent, flags), **extra)
 
 
 def wire_app(app: FastAPI, cfg: Settings) -> Ingress | None:
@@ -158,7 +162,8 @@ def wire_app(app: FastAPI, cfg: Settings) -> Ingress | None:
     extra = {"trajectory": state.trajectory} if getattr(state, "trajectory", None) is not None else {}
     ingress = build_ingress(runtime.agent, store=PgTurnStore(state.pg_pool), lock=RedisTurnLock(state.redis),
                             served_by=cfg.served_by, call_keys=RedisCallKeys(state.redis),
-                            merge_transcript=TranscriptMerger(PgVoiceStore(state.pg_pool)), **extra)
+                            merge_transcript=TranscriptMerger(PgVoiceStore(state.pg_pool)),
+                            flags=PgAwaitingFlag(state.pg_pool), **extra)
     state.ingress = ingress
     if getattr(state, "voice", None) is not None:
         state.voice.ingress = ingress

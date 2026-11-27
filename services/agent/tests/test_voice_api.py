@@ -412,19 +412,7 @@ def test_merged_text_escapes_wrapper_tags() -> None:
 
 # ---- fix round 1 (review PR #2) ----
 
-def _pin_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """What: stand-in for the s11.1 free-text PIN scanner inside contracts.redact.scan_text (CS-E-03.S7.T9).
-    Use when: proving voice text reaches the contracts redact hook. Inputs: monkeypatch. Output: none.
-    Side effects: patches contracts.redact.scan_text for one test. Role: probe of the hook, not the rule."""
-    import re
-
-    import contracts.redact as cr
-    real = cr.scan_text
-    monkeypatch.setattr(cr, "scan_text", lambda text, ctx: re.sub(r"\b\d{4}\b", "[PIN]", real(text, ctx)))
-
-
-async def test_posted_transcript_text_is_redacted_before_storage(monkeypatch: pytest.MonkeyPatch) -> None:
-    _pin_scanner(monkeypatch)
+async def test_posted_transcript_text_is_redacted_before_storage() -> None:
     w = World()
     w.voice_session()
     body = {"voice_session_id": "vs-1",
@@ -436,8 +424,7 @@ async def test_posted_transcript_text_is_redacted_before_storage(monkeypatch: py
     assert "4821" not in row.text and "[PIN]" in row.text
 
 
-async def test_covered_voice_item_is_redacted_before_storage(monkeypatch: pytest.MonkeyPatch) -> None:
-    _pin_scanner(monkeypatch)
+async def test_covered_voice_item_is_redacted_before_storage() -> None:
     w = World()
     w.voice_session()
     async with w.client() as c:
@@ -448,8 +435,6 @@ async def test_covered_voice_item_is_redacted_before_storage(monkeypatch: pytest
     assert "p***@acme.com" in row.text and "[PIN]" in row.text
 
 
-@pytest.mark.xfail(strict=True, reason="tripwire: the s11.1 free-text PIN scanner lands in CS-E-03.S7.T9; when it "
-                                       "does this XPASSes and fails, so delete this marker then")
 async def test_real_scanner_masks_a_spoken_pin_in_a_transcript() -> None:
     w = World()
     w.voice_session()

@@ -8,8 +8,9 @@ Output: IngressError (HTTP error) or IngressStream (SSE stream plus the backgrou
 Side effects: rows in agent.turns, user_turns, lock:turn:{sid} in Redis, the turn task.
 Role: plain code before and after the model (doc 07 s2.4). Voice (CS-E-05.S3.T2): the step 7 call-key dedupe
 (optional CallKeys) and the step 12 transcript merge (optional merge_transcript) are hooks here; step 3 (voice
-session match and expiry) runs in the voice/ask route (agent.voice). Not here yet, by plan: rate limits
-(CS-E-07.S2.T1), admission semaphore (designed only), PIN scan (CS-E-03.S7.T9), repair and memory
+session match and expiry) runs in the voice/ask route (agent.voice). Step 9a (PIN scan and the typed-PIN refusal,
+CS-E-03.S7.T9) runs first in the turn task, through agent.pin_guard. Not here yet, by plan: rate limits
+(CS-E-07.S2.T1), admission semaphore (designed only), repair and memory
 (CS-E-03.S7.T5), structured input (CS-E-03.S7.T8), tickets on the deadline and limit paths (CS-E-03.S4.T1).
 """
 from __future__ import annotations
@@ -32,6 +33,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.utils.uuid import uuid7
 from pydantic import ValidationError
 
+from agent.pin_guard import refuse_without_thread, scan_input, session_redact_context
 from agent.sse import TurnMeta, TurnOutcome, TurnStream, start_turn
 
 log = logging.getLogger("agent.ingress")
@@ -215,19 +217,21 @@ class Ingress:
     """What: the callable ingress entry. Use when: one instance per app; handle() per request.
     Inputs: store, lock, replica name, agent body, deadlines and reserve (overridable for tests), clock,
     call keys (voice step 7 dedupe; production RedisCallKeys), merge_transcript (step 12; production
-    agent.voice.TranscriptMerger).
+    agent.voice.TranscriptMerger), refuse_typed_pin (step 9a refusal body; production agent.pin_guard.TypedPinRefusal,
+    default: event and fixed line without a thread write).
     Output: handle(). Side effects: see module. Role: doc 07 s2.4 orchestration."""
 
     def __init__(self, store: TurnStore, lock: TurnLock, *, served_by: str, run_agent: AgentBody,
                  turn_deadline_s: dict[str, float] | None = None, reserve_s: float = limits.ESCALATION_RESERVE_S,
                  now: Callable[[], datetime] = lambda: datetime.now(UTC), call_keys: CallKeys | None = None,
-                 merge_transcript: MergeTranscript | None = None) -> None:
+                 merge_transcript: MergeTranscript | None = None, refuse_typed_pin: AgentBody | None = None) -> None:
         """What: wire dependencies. Use when: app start or tests. Inputs: see class. Output: none.
         Side effects: none. Role: constructor."""
         self.store, self.lock, self.served_by, self.run_agent = store, lock, served_by, run_agent
         self.deadline_s = turn_deadline_s or TURN_DEADLINE_S
         self.reserve_s, self.now = reserve_s, now
         self.call_keys, self.merge_transcript = call_keys, merge_transcript
+        self.refuse_typed_pin: AgentBody = refuse_typed_pin or refuse_without_thread
 
     async def handle(self, inp: IngressInput) -> IngressError | IngressStream:
         """What: run steps 1, 4, 6, 7, 8, 9 and start the turn task (14 to 16). A resend that finds its own
@@ -269,7 +273,7 @@ class Ingress:
                     return TurnOutcome.fixed(CAP_LINE, end_reason="cap_reached")
 
                 return IngressStream(stream, start_turn(stream, cap_body, write_final=_noop, after=release))
-            return await self._start(inp, release)
+            return await self._start(inp, session, release)
         except BaseException:
             await self.lock.release(inp.session_id, token)
             raise
@@ -317,9 +321,10 @@ class Ingress:
         return await self.store.find_turn(inp.session_id, inp.client_turn_id,
                                           inp.realtime_call_id if inp.mode == "voice" else None)
 
-    async def _start(self, inp: IngressInput, release: Callable[[TurnOutcome], Awaitable[None]]) -> IngressStream | IngressError:
-        """What: step 9 (row, count, stream) and the deadline-bound turn task.
-        Use when: handle, under the lock. Inputs: input, release callback. Output: stream or 409.
+    async def _start(self, inp: IngressInput, session: SessionRow,
+                     release: Callable[[TurnOutcome], Awaitable[None]]) -> IngressStream | IngressError:
+        """What: step 9 (row, count, stream) and the deadline-bound turn task (step 9a first inside it).
+        Use when: handle, under the lock. Inputs: input, session row, release callback. Output: stream or 409.
         Side effects: insert, count, task. Role: helper."""
         started = self.now()
         budget = self.deadline_s[inp.mode]
@@ -336,12 +341,16 @@ class Ingress:
         loop_budget = max(budget - self.reserve_s, 0.0)  # the reserve is kept for the escalation ticket
 
         async def body(s: TurnStream) -> TurnOutcome:
-            """What: the agent loop under asyncio.timeout. Use when: the turn task. Inputs: stream.
-            Output: outcome (deadline outcome on timeout). Side effects: model and tools. Role: step 14."""
+            """What: step 9a (PIN scan; a credential-looking chat message is refused), then the agent loop under
+            asyncio.timeout. Use when: the turn task. Inputs: stream.
+            Output: outcome (deadline outcome on timeout). Side effects: model and tools. Role: steps 9a to 14."""
+            scanned = scan_input(inp, session_redact_context(session))  # only redacted text travels further
             cm = asyncio.timeout(loop_budget)
             try:
                 async with cm:
-                    return await self.run_agent(s, await self._merge(inp, row), row)
+                    if scanned.refuse:
+                        return await self.refuse_typed_pin(s, scanned.inp, row)
+                    return await self.run_agent(s, await self._merge(scanned.inp, row), row)
             except TimeoutError:
                 if not cm.expired():  # an inner timeout (httpx, wait_for) is an error, not the deadline
                     raise
