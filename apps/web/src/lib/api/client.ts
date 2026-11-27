@@ -22,6 +22,14 @@ type ClassListMatchesUnion = [ErrorBody["class"]] extends [(typeof ERROR_CLASSES
     ? true
     : never
   : never;
+/**
+ * What: the value that forces the drift check to be evaluated.
+ * Use when: the type checker runs; never read at runtime.
+ * Inputs: none.
+ * Output: `true`.
+ * Side effects: none.
+ * Role: anchor for ClassListMatchesUnion, a type error here means the lists differ.
+ */
 export const CLASS_LIST_MATCHES_UNION: ClassListMatchesUnion = true;
 
 /**

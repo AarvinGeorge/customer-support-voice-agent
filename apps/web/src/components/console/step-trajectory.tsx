@@ -44,7 +44,7 @@ import { cn } from "@/lib/utils";
  * Side effects: none.
  * Role: icon table.
  */
-const ICONS: Readonly<Record<StepIcon, LucideIcon>> = Object.freeze({
+export const ICONS: Readonly<Record<StepIcon, LucideIcon>> = Object.freeze({
   verify: ShieldCheck,
   account: UserRound,
   billing: Receipt,
@@ -66,7 +66,7 @@ const ICONS: Readonly<Record<StepIcon, LucideIcon>> = Object.freeze({
  * Side effects: none.
  * Role: token mapping (DESIGN.md state colors; ember only for the running step).
  */
-const TONE_TEXT: Readonly<Record<TrailTone, string>> = Object.freeze({
+export const TONE_TEXT: Readonly<Record<TrailTone, string>> = Object.freeze({
   muted: "text-muted",
   ember: "text-ember",
   success: "text-success",
@@ -127,7 +127,7 @@ function useElapsed(active: boolean): number {
  * Side effects: none.
  * Role: visual reinforcement only (DESIGN.md Words First Rule).
  */
-function GateMeterBar({ meter }: { meter: GateMeter }) {
+export function GateMeterBar({ meter }: { meter: GateMeter }) {
   /** What: a 0 to 1 value as a clamped CSS percent. Use when: positioning. Inputs: n. Output: "41%". Side effects: none. Role: helper. */
   const pct = (n: number) => `${Math.min(Math.max(n, 0), 1) * 100}%`;
   return (

@@ -46,5 +46,7 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "-q -m 'not real'"
-markers = ["real: makes real provider calls (deselect with -m 'not real')"]
+# pg tests need the Compose Postgres: scripts/pg_tests.sh (CI job "pg tests") runs them with -m pg.
+addopts = "-q -m 'not real and not pg'"
+markers = ["real: makes real provider calls (deselect with -m 'not real')",
+           "pg: needs the Compose Postgres (agent_app role, AGENT_PG_TEST_URL); deselected by default"]

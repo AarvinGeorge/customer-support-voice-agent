@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -25,13 +26,16 @@ from typing import Any, Awaitable, Callable, Protocol
 from contracts import limits
 from contracts.agent_api import TurnRequest
 from contracts.errors import ErrorBody, ErrorEnvelope
+from contracts.redact import RedactContext
 from contracts.events import FinalAnswer, Usage
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.utils.uuid import uuid7
 from pydantic import ValidationError
 
+from agent.deadline import TurnBudgetExhausted
 from agent.sse import TurnMeta, TurnOutcome, TurnStream, start_turn
+from agent.turn_control import TurnControl, bind_turn_control
 
 log = logging.getLogger("agent.ingress")
 
@@ -108,6 +112,7 @@ class TurnStore(Protocol):
     async def insert_turn(self, row: TurnRow) -> None: ...
     async def count_turn(self, session_id: str) -> None: ...
     async def finish_turn(self, turn_id: str, outcome: TurnOutcome, ended_at: datetime) -> None: ...
+    async def mark_events_incomplete(self, turn_ids: set[str]) -> None: ...
 
 
 class TurnLock(Protocol):
@@ -129,9 +134,11 @@ class CallKeys(Protocol):
 @dataclass(frozen=True)
 class IngressInput:
     """What: one turn request after auth and body parsing. Use when: Ingress.handle.
-    Inputs: session, visitor, client turn id, mode, input kind, redacted text, realtime call id, raw body
+    Inputs: session, visitor, client turn id, mode, input kind, redacted text, realtime call id, raw body, the
+    gated demo fault
     (TurnRequest or VoiceAskRequest); merged_transcript is set by ingress at step 12 (the wrapped
-    <voice_transcript> user message for the agent body to place before this turn's message, or None).
+    <voice_transcript> user message for the agent body to place before this turn's message, or None);
+    redact_context is the session's scanner context (doc 07 s11.1 conditions) for text that ingress hooks store.
     Output: value. Side effects: none. Role: the shared entry shape for chat and voice."""
 
     session_id: str
@@ -142,7 +149,9 @@ class IngressInput:
     text: str | None = None
     realtime_call_id: str | None = None
     body: Any = None
+    demo_fault: str | None = None  # already gated by demo_fault_from_header (doc 07 s10), request-scoped
     merged_transcript: str | None = None
+    redact_context: RedactContext | None = None
 
 
 @dataclass(frozen=True)
@@ -212,16 +221,17 @@ class Ingress:
     """What: the callable ingress entry. Use when: one instance per app; handle() per request.
     Inputs: store, lock, replica name, agent body, deadlines and reserve (overridable for tests), clock,
     call keys (voice step 7 dedupe; production RedisCallKeys), merge_transcript (step 12; production
-    agent.voice.TranscriptMerger).
+    agent.voice.TranscriptMerger), trajectory writer (app.state.trajectory, or None: events are not persisted).
     Output: handle(). Side effects: see module. Role: doc 07 s2.4 orchestration."""
 
     def __init__(self, store: TurnStore, lock: TurnLock, *, served_by: str, run_agent: AgentBody,
                  turn_deadline_s: dict[str, float] | None = None, reserve_s: float = limits.ESCALATION_RESERVE_S,
                  now: Callable[[], datetime] = lambda: datetime.now(UTC), call_keys: CallKeys | None = None,
-                 merge_transcript: MergeTranscript | None = None) -> None:
+                 merge_transcript: MergeTranscript | None = None, trajectory: Any = None) -> None:
         """What: wire dependencies. Use when: app start or tests. Inputs: see class. Output: none.
         Side effects: none. Role: constructor."""
         self.store, self.lock, self.served_by, self.run_agent = store, lock, served_by, run_agent
+        self.trajectory = trajectory
         self.deadline_s = turn_deadline_s or TURN_DEADLINE_S
         self.reserve_s, self.now = reserve_s, now
         self.call_keys, self.merge_transcript = call_keys, merge_transcript
@@ -329,18 +339,26 @@ class Ingress:
             await release(TurnOutcome.fixed("", end_reason="error"))
             return _conflict()
         await self.store.count_turn(inp.session_id)
-        stream = TurnStream(TurnMeta(inp.session_id, row.turn_id, inp.mode, self.served_by, inp.input_kind))
+        stream = TurnStream(TurnMeta(inp.session_id, row.turn_id, inp.mode, self.served_by, inp.input_kind),
+                            sink=self.trajectory.add if self.trajectory is not None else None)  # doc 07 s12 turn_events
         loop_budget = max(budget - self.reserve_s, 0.0)  # the reserve is kept for the escalation ticket
+        deadline_mono = time.monotonic() + budget  # TurnControl.deadline: clamps take the reserve off this
 
         async def body(s: TurnStream) -> TurnOutcome:
-            """What: the agent loop under asyncio.timeout. Use when: the turn task. Inputs: stream.
-            Output: outcome (deadline outcome on timeout). Side effects: model and tools. Role: step 14."""
+            """What: the agent loop under asyncio.timeout, with the turn's one TurnControl bound (deadline = the 45 s
+            or 20 s turn deadline, so every clamp subtracts the 3 s reserve from it; the request's demo fault).
+            Use when: the turn task. Inputs: stream.
+            Output: outcome (deadline outcome on timeout or on a call skipped by the clamp). Side effects: model
+            and tools; binds TURN_CONTROL in this task. Role: step 14; doc 07 s8.2 deadline path."""
+            control = TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
+                                  deadline=deadline_mono, demo_fault=inp.demo_fault, events=s)
+            bind_turn_control(control)  # the turn task's own context; the only .set() (spike 15)
             cm = asyncio.timeout(loop_budget)
             try:
                 async with cm:
                     return await self.run_agent(s, await self._merge(inp, row), row)
-            except TimeoutError:
-                if not cm.expired():  # an inner timeout (httpx, wait_for) is an error, not the deadline
+            except (TimeoutError, TurnBudgetExhausted) as exc:
+                if isinstance(exc, TimeoutError) and not cm.expired():  # an inner timeout is an error, not the deadline
                     raise
                 err = ErrorBody.model_validate({"class": "turn_deadline_exceeded", "code": "TURN_DEADLINE",
                                                 "message": DEADLINE_MESSAGE, "retryable": True, "changed": None,
@@ -420,7 +438,7 @@ class RedisTurnLock:
 class PgTurnStore:
     """What: TurnStore over the agent_app psycopg pool (schema agent).
     Use when: production. Inputs: psycopg AsyncConnectionPool. Output: TurnStore methods.
-    Side effects: SQL on agent.sessions and agent.turns. Role: storage adapter."""
+    Side effects: SQL on agent.sessions and agent.turns (including events_complete). Role: storage adapter."""
 
     def __init__(self, pool: Any) -> None:
         """What: keep the pool. Use when: app start. Inputs: pool. Output: none. Side effects: none. Role: constructor."""
@@ -498,3 +516,13 @@ class PgTurnStore:
                 (outcome.status, outcome.end_reason, ended_at, json.dumps(outcome.final.model_dump(mode="json")),
                  json.dumps(outcome.usage.model_dump(mode="json")), json.dumps(error) if error else None,
                  outcome.model_used, outcome.fallback_used, turn_id))
+
+    async def mark_events_incomplete(self, turn_ids: set[str]) -> None:
+        """What: events_complete = false for turns whose turn_events rows were dropped.
+        Use when: TrajectoryWriter(on_incomplete=...). Inputs: turn ids. Output: none.
+        Side effects: one UPDATE on this store's pool (not the writer's). Role: doc 07 s12 events_complete."""
+        ids = [i for i in turn_ids if i]
+        if not ids:
+            return
+        async with self.pool.connection() as conn:
+            await conn.execute("UPDATE agent.turns SET events_complete = false WHERE turn_id = ANY(%s::uuid[])", (ids,))
