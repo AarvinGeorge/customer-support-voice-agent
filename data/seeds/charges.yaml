@@ -1,0 +1,29 @@
+# What: seeded billing history. days_ago is whole local days before the seeding day, at `time` New York, so
+#   refund windows stay valid on demo day whenever the seeds are (re)loaded (L1 s3 "relative to today").
+# Use when: core/seeds/seed.py. invoice: true gives invoice_number INV-<year>-<last 4 digits of the id>
+#   ("invoice ending 0412"). refunded_days_ago is set only on status refunded and must match history.yaml.
+# Role: each rule trigger in triggers.yaml points at one charge here. Source: L1 s4, s5 A1; doc 07 s3.2 ChargeView.
+charges:
+  # Priya, Pro monthly 12 seats x $8 = $96. S1 refunds the duplicate (0412); its twin is 0411.
+  - {id: CH-00000355, account_id: QS-10423, days_ago: 65, time: "09:00", amount_cents: 9600, status: paid, invoice: true, description: "Pro plan, 12 seats, monthly"}
+  - {id: CH-00000388, account_id: QS-10423, days_ago: 35, time: "09:00", amount_cents: 9600, status: paid, invoice: true, description: "Pro plan, 12 seats, monthly"}
+  - {id: CH-00000411, account_id: QS-10423, days_ago: 5,  time: "09:00", amount_cents: 9600, status: paid, invoice: true, description: "Pro plan, 12 seats, monthly"}
+  - {id: CH-00000412, account_id: QS-10423, days_ago: 5,  time: "09:02", amount_cents: 9600, status: paid, invoice: true, description: "Pro plan, 12 seats, monthly"}
+  # S2 (voice): a second, smaller charge to ask about (G4 re-cut). A refund after S1's would be a second refund in 90 days.
+  - {id: CH-00000413, account_id: QS-10423, days_ago: 3,  time: "14:30", amount_cents: 4800, status: paid, invoice: true, description: "Extra seats add-on (6 seats)"}
+  # Northwind (Business, invoiced annually)
+  - {id: CH-00000901, account_id: QS-20318, days_ago: 12, time: "10:00", amount_cents: 1152000, status: paid, invoice: true, description: "Business plan, 60 seats, annual"}
+  - {id: CH-00000902, account_id: QS-20318, days_ago: 45, time: "10:00", amount_cents: 48000, status: paid, invoice: true, description: "Seat true-up (3 seats)"}
+  # Delta Freight (past_due): a paid month and the failed one that made it overdue
+  - {id: CH-00000503, account_id: QS-50234, days_ago: 38, time: "09:00", amount_cents: 9600, status: paid, invoice: true, description: "Pro plan, 12 seats, monthly"}
+  - {id: CH-00000504, account_id: QS-50234, days_ago: 8,  time: "09:00", amount_cents: 9600, status: failed, invoice: true, description: "Pro plan, 12 seats, monthly (card declined)"}
+  # Orion (Enterprise, contract)
+  - {id: CH-00000601, account_id: QS-60845, days_ago: 6,  time: "11:00", amount_cents: 2400000, status: paid, invoice: true, description: "Enterprise contract, quarterly"}
+  # Kestrel (Pro): one charge per Pro rule, each on its own condition
+  - {id: CH-00000701, account_id: QS-70156, days_ago: 18, time: "09:00", amount_cents: 9600,  status: paid,   invoice: true, description: "Pro plan, 10 seats, monthly"}
+  - {id: CH-00000702, account_id: QS-70156, days_ago: 4,  time: "09:00", amount_cents: 24000, status: paid,   invoice: true, description: "Pro plan, 30 seats, annual upgrade"}
+  - {id: CH-00000703, account_id: QS-70156, days_ago: 25, time: "09:00", amount_cents: 9600,  status: paid,   invoice: true, description: "Pro plan, 10 seats, monthly"}
+  - {id: CH-00000704, account_id: QS-70156, days_ago: 9,  time: "09:00", amount_cents: 9600,  status: failed, invoice: true, description: "Pro plan, 10 seats, monthly (card declined)"}
+  # Lumen Books (Pro): one refund already done 38 days ago, then a new charge
+  - {id: CH-00000801, account_id: QS-80267, days_ago: 40, time: "09:00", amount_cents: 9600, status: refunded, refunded_days_ago: 38, invoice: true, description: "Pro plan, 12 seats, monthly"}
+  - {id: CH-00000802, account_id: QS-80267, days_ago: 3,  time: "09:00", amount_cents: 9600, status: paid, invoice: true, description: "Pro plan, 12 seats, monthly"}
