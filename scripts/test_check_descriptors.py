@@ -329,3 +329,33 @@ def test_a_block_that_mentions_a_glob_inside_its_text_is_still_one_block() -> No
     block = _ts_block().replace(" * Use when: y.", " * Use when: any fetch to `/api/*` fails.")
     src = _ts_block() + 'import { a } from "a";\n\n' + block + "export function f(): void {}\n"
     assert cd.check_ts(src, "a.ts") == []
+
+
+# ---------------------------------------------------------------- fix round 2 (re-review N1)
+
+IMP = 'import { a } from "a";\n'
+
+
+def test_label_text_may_start_with_a_slash_or_a_star() -> None:
+    """What: labels whose text starts with `/` or `*` (route paths, `*args`) are complete, in Python and in JSDoc; a
+    label with no text is still a gap. Use when: pytest. Inputs: none. Output: assert. Side effects: none.
+    Role: re-review N1 (the four false gaps found on main)."""
+    py = ('"""What: /healthz, /readyz and more. Use when: /readyz. Inputs: *args. Output: none. '
+          'Side effects: none. Role: route paths."""\n')
+    assert cd.check_python(py, "a.py") == []
+    block = "/**\n * What: /healthz probe.\n * Use when: /readyz.\n * Inputs: *args.\n * Output: none.\n * Side effects: none.\n * Role: z.\n */\n"
+    assert cd.check_ts(block + IMP, "a.ts") == []
+    one = "/** What: /a. Use when: /b. Inputs: *c. Output: none. Side effects: none. Role: /z. */\n"
+    assert cd.check_ts(one + IMP, "a.ts") == []
+
+
+def test_truly_empty_labels_are_still_gaps_in_jsdoc() -> None:
+    """What: a JSDoc whose last label has only the line prefix or the closing `*/` after it is a gap; so is a label
+    followed straight by another label. Use when: pytest. Inputs: none. Output: assert. Side effects: none.
+    Role: the star is a line prefix, not content (re-review N1)."""
+    block = "/**\n * What: x.\n * Use when: y.\n * Inputs: n.\n * Output: n.\n * Side effects: n.\n * Role:\n */\n"
+    assert cd.check_ts(block + IMP, "a.ts")[0].problem == "labels: Role:"
+    one = "/** What: x. Use when: y. Inputs: n. Output: n. Side effects: n. Role: */\n"
+    assert cd.check_ts(one + IMP, "a.ts")[0].problem == "labels: Role:"
+    py = '"""What: Use when: y. Inputs: n. Output: n. Side effects: n. Role: z."""\n'
+    assert cd.check_python(py, "a.py")[0].problem == "labels: What:"

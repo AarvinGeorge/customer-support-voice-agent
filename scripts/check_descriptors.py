@@ -56,9 +56,12 @@ def _labels_problem(text: str | None) -> str | None:
     Side effects: none. Role: the single rule of the gate."""
     if text is None:
         return "missing"
+    if text.lstrip().startswith("/*"):  # JSDoc: the comment markers and the leading `*` of each line are not content
+        text = "\n".join(re.sub(r"^\s*(?:/\*+|\*(?!/))?\s?", "", ln) for ln in text.splitlines())
+        text = re.sub(r"\s*\*/\s*$", "", text)
     any_label = "|".join(re.escape(label) for label in LABELS)
     missing = [label for label in LABELS
-               if not re.search(r"(?<![\w])" + re.escape(label) + rf"\s*(?!(?:{any_label}))[^\s*/]", text)]
+               if not re.search(r"(?<![\w])" + re.escape(label) + rf"\s*(?!(?:{any_label}))\S", text)]
     if len(missing) == len(LABELS):
         return "missing"
     return f"labels: {', '.join(missing)}" if missing else None
