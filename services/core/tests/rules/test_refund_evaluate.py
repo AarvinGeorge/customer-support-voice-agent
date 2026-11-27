@@ -57,7 +57,7 @@ class Row:
     tier: str = "pro"
     status: str = "active"
     role: str = "owner"
-    charge: ChargeFacts = field(default_factory=lambda: charge_on(5))
+    charge: ChargeFacts | None = field(default_factory=lambda: charge_on(5))
     prior: tuple[PriorRefund, ...] = ()
     followup: str | None = None
 
@@ -79,6 +79,16 @@ ROWS: list[Row] = [
     # TRIAL_NOTHING_TO_REFUND
     Row("trialing-pro", DECLINED, (RC.TRIAL_NOTHING_TO_REFUND,), status="trialing"),
     Row("trialing-business", DECLINED, (RC.TRIAL_NOTHING_TO_REFUND,), tier="business", status="trialing"),
+    # no charge resolved (review I1): account-level declines work without one
+    Row("no-charge-member", DECLINED, (RC.ROLE_NOT_PERMITTED,), role="member", charge=None),
+    Row("no-charge-free", DECLINED, (RC.FREE_NOTHING_CHARGED,), tier="free", charge=None),
+    Row("no-charge-trialing", DECLINED, (RC.TRIAL_NOTHING_TO_REFUND,), status="trialing", charge=None),
+    Row("no-charge-past-due", DECLINED, (RC.PAST_DUE,), status="past_due", charge=None, followup="billing"),
+    Row("no-charge-pro-is-not-refundable", DECLINED, (RC.CHARGE_NOT_REFUNDABLE,), charge=None),
+    Row("no-charge-business-is-not-refundable", DECLINED, (RC.CHARGE_NOT_REFUNDABLE,), tier="business", charge=None),
+    Row("no-charge-enterprise-is-not-refundable", DECLINED, (RC.CHARGE_NOT_REFUNDABLE,), tier="enterprise", charge=None),
+    Row("zero-amount-charge", DECLINED, (RC.CHARGE_NOT_REFUNDABLE,), charge=charge_on(5, amount=0)),
+    Row("negative-amount-charge", DECLINED, (RC.CHARGE_NOT_REFUNDABLE,), charge=charge_on(5, amount=-500)),
     # PAST_DUE first for every tier, with the billing follow-up flag
     Row("past-due-pro", DECLINED, (RC.PAST_DUE,), status="past_due", followup="billing"),
     Row("past-due-business", DECLINED, (RC.PAST_DUE,), tier="business", status="past_due", followup="billing"),
@@ -186,6 +196,7 @@ def test_decision_text_and_refs(row: Row) -> None:
         assert ev.readback is None and ev.params == {}
     else:
         assert ev.message is None and ev.readback is not None
+        assert row.charge is not None
         assert ev.params == {"charge_id": row.charge.charge_id, "amount_cents": row.charge.amount_cents}
     if ev.outcome is AUTO:
         assert ev.readback is not None
@@ -307,6 +318,22 @@ def test_limits_come_from_policy_not_code() -> None:
     assert run(Row("x", AUTO, (), prior=(prior_refund(31),)), custom).reason_codes == (RC.PRO_WITHIN_LIMITS,)
     assert run(Row("x", AUTO, (), prior=(prior_refund(30),)), custom).reason_codes == (
         RC.PRO_SECOND_IN_REPEAT_WINDOW,)
+
+
+def test_unknown_tier_raises_instead_of_defaulting_to_pro() -> None:
+    """What: a tier outside the four raises ValueError (review M1). Use when: pytest runs. Inputs: none.
+    Output: none. Side effects: none. Role: the most permissive path is never the default."""
+    with pytest.raises(ValueError, match="tier"):
+        run(Row("x", AUTO, (), tier="team"))
+
+
+def test_missing_policy_limit_raises() -> None:
+    """What: a policy without the Pro window raises ValueError instead of treating it as 0 days (review M3).
+    Use when: pytest runs. Inputs: none. Output: none. Side effects: none. Role: fail loudly on bad config."""
+    raw = yaml.safe_load(POLICY_PATH.read_text())
+    del raw["actions"]["refund"]["tiers"]["pro"]["window_days"]
+    with pytest.raises(ValueError, match="window"):
+        run(Row("x", AUTO, ()), PolicyConfig.model_validate(raw))
 
 
 def test_charge_facts_are_frozen() -> None:

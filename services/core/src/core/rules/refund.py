@@ -4,7 +4,8 @@ Inputs: account tier and contract status, caller role, one charge, the account's
 the PolicyConfig and an aware `now`. Output: RefundEvaluation (outcome, ordered reason codes, policy
 refs, customer-safe message, read-back text, frozen params, billing follow-up flag).
 Side effects: none (no database, no clock, no logging).
-Role: the single place refund rules live. Every limit is read from policy.yaml; the order of checks is
+Role: the single place refund rules live. Every number (windows, cap, repeat window) is read from policy.yaml; the
+tier shape (who is auto, approval only or human only) is code, as the L1 A1 table; the order of checks is
 role, tier Free, trial, past_due, charge state, then tier rules (draft C s2.4)."""
 from __future__ import annotations
 
@@ -71,7 +72,8 @@ class PriorRefund:
 class RefundEvaluation:
     """What: the result of evaluate. Use when: prepare builds a PrepareResult or a pending row.
     Inputs: set by evaluate. Output: frozen record. Side effects: none.
-    Role: outcome and reason_codes (primary first) drive the wire decision; params are frozen for the
+    Role: policy_decision is the wire decision (branch on it: Enterprise human_only is needs_approval there);
+    outcome adds the human_only distinction. outcome and reason_codes (primary first) drive the decision; params are frozen for the
     commit re-check; followup_ticket_queue tells core to open the past-due billing ticket."""
 
     outcome: Outcome
@@ -91,6 +93,15 @@ def _business_date(moment: datetime, tz: ZoneInfo) -> date:
     if moment.tzinfo is None:
         raise ValueError("evaluate needs aware datetimes (naive given)")
     return moment.astimezone(tz).date()
+
+
+def _required(value: int | None, name: str) -> int:
+    """What: a policy limit that must be present. Use when: reading a window or cap. Inputs: value, its name.
+    Output: the value. Side effects: raises ValueError naming the missing key. Role: bad config fails loudly,
+    never as a silent 0."""
+    if value is None:
+        raise ValueError(f"policy refund limit is missing: {name}")
+    return value
 
 
 def _dollars(cents: int) -> str:
@@ -125,12 +136,13 @@ def _verdict(policy: PolicyConfig, codes: tuple[ReasonCode, ...], outcome: Outco
     return RefundEvaluation(outcome, codes, primary.decision, refs, readback=readback, params=params)
 
 
-def evaluate(*, tier: Tier, contract_status: ContractStatus, role: Role, charge: ChargeFacts,
+def evaluate(*, tier: Tier, contract_status: ContractStatus, role: Role, charge: ChargeFacts | None,
              prior_refunds: tuple[PriorRefund, ...], policy: PolicyConfig,
              now: datetime) -> RefundEvaluation:
     """What: decide a refund for one charge by the L1 A1 rules, all limits from policy.yaml.
     Use when: prepare and the commit or submit re-check (same function, so they cannot disagree).
-    Inputs: tier, contract_status, role, the charge, the account's completed refunds, PolicyConfig, aware now.
+    Inputs: tier, contract_status, role, the charge (None when none was resolved: the role, Free, trialing and
+    past_due declines still work, any later rule returns CHARGE_NOT_REFUNDABLE), the account's completed refunds, PolicyConfig, aware now.
     Output: RefundEvaluation; Pro within limits is allow_auto_with_confirm, Pro late or over cap or
     second in 90 days and every Business refund inside 30 days is needs_approval, Enterprise is
     human_only, everything else is declined. Order: role, Free, trialing, past_due (first for every
@@ -139,7 +151,6 @@ def evaluate(*, tier: Tier, contract_status: ContractStatus, role: Role, charge:
     Role: the rule engine for A1; ages are business-date days, boundaries inclusive."""
     tz = ZoneInfo(policy.timezone)
     today = _business_date(now, tz)
-    charge_date = _business_date(charge.charged_at, tz)
     cfg = policy.actions.refund
     codes = ReasonCode
 
@@ -157,11 +168,14 @@ def evaluate(*, tier: Tier, contract_status: ContractStatus, role: Role, charge:
     if contract_status in cfg.blocked_statuses:  # past_due; trialing is caught above with its own code
         return declined(codes.PAST_DUE, followup=True)
 
+    if charge is None:  # no charge resolved: nothing to refund (the account-level checks above need none)
+        return declined(codes.CHARGE_NOT_REFUNDABLE)
+    charge_date = _business_date(charge.charged_at, tz)
     already = charge.status == "refunded" or any(p.charge_id == charge.charge_id for p in prior_refunds)
     if already:
         return declined(codes.ALREADY_REFUNDED)
     age = (today - charge_date).days
-    if charge.status != "paid" or age < 0:
+    if charge.status != "paid" or age < 0 or charge.amount_cents <= 0:
         return declined(codes.CHARGE_NOT_REFUNDABLE)
 
     def verdict(outcome: Outcome, *reasons: ReasonCode) -> RefundEvaluation:
@@ -173,13 +187,17 @@ def evaluate(*, tier: Tier, contract_status: ContractStatus, role: Role, charge:
         return verdict(Outcome.HUMAN_ONLY, codes.ENTERPRISE_HUMAN_DECIDES)
 
     if tier == "business":
-        window = cfg.tiers.business.window_days or 0
+        window = _required(cfg.tiers.business.window_days, "business window_days")
         if age <= window:
             return verdict(Outcome.NEEDS_APPROVAL, codes.BUSINESS_APPROVAL_REQUIRED)
         return declined(codes.OUTSIDE_WINDOW, window=window, age=age)
 
+    if tier != "pro":
+        raise ValueError(f"unknown tier for refund evaluation: {tier!r}")
     pro = cfg.tiers.pro
-    window, late, cap = pro.window_days or 0, pro.late_band_days or 0, pro.auto_cap_cents or 0
+    window = _required(pro.window_days, "pro window_days")
+    late = _required(pro.late_band_days, "pro late_band_days")
+    cap = _required(pro.auto_cap_cents, "pro auto_cap_cents")
     if age > window + late:
         return declined(codes.PRO_PAST_LATE_BAND, window=window, late=late, age=age)
     reasons: list[ReasonCode] = []
