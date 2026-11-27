@@ -238,3 +238,20 @@ def test_hook_commands_that_cannot_start_or_time_out_are_hook_errors() -> None:
         before, _ = make_hooks("reseed", None, None, run=fn)
         with pytest.raises(HookError):
             before(case_by_id("G-01"))
+
+
+def test_a_callable_reseed_runs_and_its_errors_are_hook_errors() -> None:
+    """What: make_hooks accepts the guarded reseed as a callable; a ReseedError becomes a HookError (the case errors).
+    Use when: CI. Inputs: none. Output: none. Side effects: none. Role: the golden CLI's guarded reseed."""
+    from evals.reseed import ReseedRefused
+    calls: list[str] = []
+    before, _ = make_hooks(lambda: calls.append("reseed"), None, None)
+    before(case_by_id("G-01"))
+    assert calls == ["reseed"]
+
+    def refuse() -> None:
+        """What: a refused reseed. Use when: this test. Inputs: none. Output: none. Side effects: raises. Role: fake."""
+        raise ReseedRefused("COMPOSE_PROJECT_NAME must name the stack under test")
+    before_bad, _ = make_hooks(refuse, None, None)
+    with pytest.raises(HookError, match="COMPOSE_PROJECT_NAME"):
+        before_bad(case_by_id("G-01"))

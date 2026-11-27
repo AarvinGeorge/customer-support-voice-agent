@@ -13,10 +13,8 @@ directory for the trimmed SSE streams and rows) and EVALS_E2E_RESEED=0 to skip t
 Output: pytest results. Side effects: real HTTP turns (Anthropic and OpenAI calls through the agent), one core reseed through
 docker compose before each case (as the golden CLI does), SELECTs, optional JSON files. Role: the S5 acceptance test.
 
-Reseed guard (the reseed TRUNCATEs core tables): before each reseed, reseed_command refuses unless COMPOSE_PROJECT_NAME
-is a lane name (`cs-...`, never one naming production), DEMO_FAULTS_ENABLED=true, the checkout has no `.deploy` (the
-VM marker: deploy.sh's state dir), EVALS_AGENT_URL is loopback with a port, and that project's Caddy publishes that
-port. The reseed is pinned with `-p`, and afterwards the `reseed` audit row in EVALS_CORE_DB_URL must be newer.
+Reseed guard (the reseed TRUNCATEs core tables): every reseed goes through evals.reseed.guarded_reseed, shared with
+the golden CLI; it refuses unless the target is provably the stack under test (see that module).
 
 Command (from the repo root, stack up with DEMO_FAULTS_ENABLED=true, seeded and ingested; see the S5 report):
     export COMPOSE_PROJECT_NAME=cs-a5 COMPOSE_FILE=compose.yaml:compose.override.yaml:infra/compose.pgtest.yaml \\
@@ -29,11 +27,9 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -43,6 +39,7 @@ from evals import graders
 from evals.agent_client import AgentClient
 from evals.cases import ROOT, load_cases, load_personas
 from evals.model import CaseRun
+from evals.reseed import guarded_reseed
 from evals.runner import run_case
 from evals.store import PgStore, _connect
 
@@ -51,47 +48,6 @@ pytestmark = [pytest.mark.e2e,
 
 NOTHING_CHANGED = re.compile(r"nothing was changed", re.I)
 TICKET_ENDING = re.compile(r"ticket,? ending (\d{4})\b", re.I)
-RESEED_ARGS = ["--profile", "seed", "run", "--rm", "-e", "DEMO_RESEED=true", "seed_core",
-               "python", "-m", "core.seeds", "--reseed"]
-LANE_PROJECT = re.compile(r"^cs-[a-z0-9]+(?:-[a-z0-9]+)*$")
-LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
-
-
-class ReseedRefused(RuntimeError):
-    """What: the reseed target is not provably the stack under test. Use when: reseed_command refuses.
-    Inputs: message. Output: exception. Side effects: none. Role: the reseed TRUNCATEs core; refuse rather than guess."""
-
-
-def reseed_command(env: Mapping[str, str], agent_url: str, root: Path,
-                   run: Callable[..., Any] = subprocess.run) -> list[str]:
-    """What: the reseed command pinned to the stack under test, after checking that it is that stack.
-    Use when: before every reseed. Inputs: env, EVALS_AGENT_URL, repo root, a subprocess.run (faked in tests).
-    Output: the docker compose argv with `-p <project>`. Side effects: one read-only `docker compose port` call,
-    only after the env checks pass. Role: review I-1; raises ReseedRefused with the reason."""
-    project = env.get("COMPOSE_PROJECT_NAME", "")
-    if not project:
-        raise ReseedRefused("COMPOSE_PROJECT_NAME must name the stack under test (for example cs-a5)")
-    if not LANE_PROJECT.match(project):
-        raise ReseedRefused(f"COMPOSE_PROJECT_NAME={project!r} is not a lane stack name (cs-...)")
-    if "prod" in project:
-        raise ReseedRefused(f"COMPOSE_PROJECT_NAME={project!r} names production; never reseed it")
-    if env.get("DEMO_FAULTS_ENABLED", "").lower() != "true":
-        raise ReseedRefused("DEMO_FAULTS_ENABLED=true must be set for the stack under test")
-    if (root / ".deploy").exists():
-        raise ReseedRefused(f"{root / '.deploy'} exists: this checkout is a deploy target (the VM); never reseed it")
-    url = urlsplit(agent_url)
-    if url.scheme != "http" or url.hostname not in LOOPBACK or url.port is None:
-        raise ReseedRefused(f"EVALS_AGENT_URL={agent_url!r} must be http on loopback with the stack's EDGE_PORT")
-    r = run(["docker", "compose", "-p", project, "port", "caddy", "80"], cwd=root, capture_output=True, text=True,
-            timeout=60)
-    published = (r.stdout or "").strip().splitlines()
-    ports = {p.rsplit(":", 1)[-1] for p in published if p.rsplit(":", 1)[0] in {"127.0.0.1", "[::1]", "::1"}}
-    if r.returncode != 0 or str(url.port) not in ports:
-        raise ReseedRefused(f"project {project} does not serve EVALS_AGENT_URL on loopback port {url.port} "
-                            f"(its Caddy publishes {published or 'nothing'})")
-    return ["docker", "compose", "-p", project, *RESEED_ARGS]
-
-
 def _env(name: str) -> str:
     """What: a required env value. Use when: fixtures start. Inputs: name. Output: value. Side effects: none.
     Role: fail loudly (never skip) when EVALS_E2E=1 but the stack is not described."""
@@ -122,34 +78,14 @@ def stack() -> Iterator[dict[str, Any]]:
         http.close()
 
 
-def _last_reseed_ts(core_db: str) -> Any:
-    """What: the newest `reseed` audit row's ts in the graded core database. Use when: around each reseed.
-    Inputs: core URL. Output: ts or None. Side effects: one SELECT on a read-only connection.
-    Role: proves the reseeded database is the one the tests read."""
-    conn = _connect(core_db)
-    try:
-        conn.read_only = True
-        row = conn.execute("SELECT max(ts) AS ts FROM audit_events WHERE event = 'reseed'").fetchone()
-        return None if row is None else row["ts"]
-    finally:
-        conn.close()
-
-
 def _reseed(stack: dict[str, Any]) -> None:
-    """What: reseed core with the DEMO_RESEED CLI, unless EVALS_E2E_RESEED=0, after reseed_command's guard.
-    Use when: before each case. Inputs: stack (agent_url, core_db), env. Output: none; raises ReseedRefused or
-    AssertionError. Side effects: one guarded docker compose run (TRUNCATE in that project's core), two SELECTs.
+    """What: the shared guarded reseed (evals.reseed), unless EVALS_E2E_RESEED=0. Use when: before each case.
+    Inputs: stack (agent_url, core_db), env. Output: none; raises ReseedRefused or ReseedError.
+    Side effects: one guarded docker compose run (TRUNCATE in that project's core), two SELECTs.
     Role: each script starts clean; verified tickets merge by account and category (doc 07 s7), so without it
     G-11's failure ticket merges into G-10's open ticket and G-11's session shows none."""
-    if os.environ.get("EVALS_E2E_RESEED", "1") == "0":
-        return
-    cmd = reseed_command(os.environ, stack["agent_url"], ROOT)
-    before = _last_reseed_ts(stack["core_db"])
-    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300)
-    assert r.returncode == 0, f"reseed failed: {r.stderr[-300:]}"
-    after = _last_reseed_ts(stack["core_db"])
-    assert after is not None and (before is None or after > before), \
-        "the reseed did not reach the database in EVALS_CORE_DB_URL: it and COMPOSE_PROJECT_NAME name different stacks"
+    if os.environ.get("EVALS_E2E_RESEED", "1") != "0":
+        guarded_reseed(os.environ, stack["agent_url"], stack["core_db"], ROOT)
 
 
 def _fallback_badges(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -160,7 +96,8 @@ def _fallback_badges(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     model_steps = [e for e in events if e.get("type") == "step.completed" and e.get("model")]
     assert fb and len(fb) == len(model_steps), (fb, model_steps)
     assert all(e.get("reason") == "fault_llm_429" for e in fb), fb
-    assert all(str(m["model"]).startswith(str(b.get("to_model"))) for b, m in zip(fb, model_steps)), (fb, model_steps)
+    assert all(b.get("to_model") and str(m["model"]).startswith(str(b["to_model"]))
+               for b, m in zip(fb, model_steps)), (fb, model_steps)
     return fb
 
 
