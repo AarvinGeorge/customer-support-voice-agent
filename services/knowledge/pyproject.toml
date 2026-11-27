@@ -22,3 +22,6 @@ quillstack-contracts = { path = "../../packages/contracts", editable = false }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# `pg` tests need a Compose Postgres: run them with ../../scripts/knowledge_pg_test.sh (CI skips them).
+addopts = "-m 'not pg'"
+markers = ["pg: needs a real Postgres with pgvector (scripts/knowledge_pg_test.sh); no network, fixture vectors"]
