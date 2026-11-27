@@ -73,7 +73,8 @@ class Tickets:
 class Harness:
     """What: one agent (same thread across turns) with search_kb against a fake knowledge service, a scripted
     model and a Gate 2 verifier. Use when: each test. Inputs: verifier, model replies (default: search then
-    DRAFT), ticket hook, knowledge SearchResponse (default search_body("pass")). Output: run(). Side effects: memory only. Role: test wiring."""
+    DRAFT), ticket hook, knowledge SearchResponse (default search_body("pass")). Output: run().
+    Side effects: memory only. Role: test wiring."""
 
     def __init__(self, ver: GroundingVerifier | None, replies: list[AIMessage] | None = None,
                  tickets: Tickets | None = None, body: dict[str, Any] | None = None) -> None:
@@ -83,7 +84,8 @@ class Harness:
         core_app.state.verified.add(SID)
         core = CoreAgentClient("http://core:8000", "agent-tok", http=httpx.AsyncClient(
             transport=httpx.ASGITransport(app=core_app)))
-        kn = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body or search_body("pass"))))
+        reply = body or search_body("pass")
+        kn = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=reply)))
         tools = build_tools(core, KnowledgeClient("http://knowledge:8000", "kn-tok", http=kn))
         search = AIMessage("", tool_calls=[{"name": "search_kb", "args": {"query": "refund window"}, "id": "c1",
                                             "type": "tool_call"}])

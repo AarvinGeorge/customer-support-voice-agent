@@ -10,8 +10,8 @@ Inputs: the knowledge SearchResponse JSON, the checkpointed weak_streak, the bou
 the scope_classifier role (data/models.yaml).
 Output: retrieval_decision, apply_retrieval_gate, retrieval_unavailable, run_scope_check, next_weak_streak,
 ScopeClassifier, GateStep, start_gate_step, last_user_text, GATE_TAGS; matches_policy, needs_grounding,
-turn_messages, evidence_text, verifier_input, enforce_code_rules, GroundingVerifier, GroundingResult, parse_verifier_reply, citations_for, CLARIFY_LINE,
-CHECKING_POLICY_LINE.
+turn_messages, evidence_text, verifier_input, enforce_code_rules, GroundingVerifier, GroundingResult,
+parse_verifier_reply, citations_for, CLARIFY_LINE, CHECKING_POLICY_LINE.
 Side effects: emits step.started, gate and step.completed on the turn stream; sets TurnControl.route; the scope
 classifier (2 s) and the verifier (3 s) each make one model call, 0 retries, tagged internal:gate and nostream.
 Role: Gate 1 lives in code, never in the prompt. An error (or any verdict this code does not know) routes to
