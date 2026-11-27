@@ -190,3 +190,12 @@ async def test_c_the_session_awaiting_flag_reaches_the_turn_control_through_ingr
     w = World(model=model, verified=False, awaiting_verification=awaiting)
     await w.send(text="Okay.")
     assert model.flags == [awaiting]
+
+
+def test_c_agent_capabilities_state_what_the_agent_can_do_once_verified():
+    # Live, owner sequence "Okay." after the card (19:23 UTC): "Once it's done, I can look at your refund request and
+    # the overdue invoice." had no source: the capabilities text never said what verification unlocks.
+    from agent.gates import AGENT_CAPABILITIES
+
+    assert "Once the customer is verified, it can read their account, charges, invoices and tickets" in AGENT_CAPABILITIES
+    assert "It never sees what the customer types into the verification card." in AGENT_CAPABILITIES

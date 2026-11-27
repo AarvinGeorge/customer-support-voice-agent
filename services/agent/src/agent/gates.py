@@ -322,7 +322,7 @@ VERIFIER_PROMPT = (
     "claims either.\n"
     "2. For each claim set supported to true only if the evidence states it. source_id is the sid of the <source> "
     "block that supports it, copied exactly from the <citable_ids> list, or null. account_context is the verified "
-    "customer and their account as our system holds them; fixed_line:... is a line our system already said in this "
+    "customer and their account as our system holds them; fixed_line@... is a line our system already said in this "
     "conversation; agent_capabilities is what this support agent can do, such as opening a ticket for our support "
     "team; kind=\"doc\" is a help article section; a sid like list_charges@2 is a result from our system, and "
     "current=\"true\" marks the newest result of that tool, so an older one may be out of date and never supports "
@@ -400,8 +400,10 @@ CAPABILITIES_SOURCE_ID = "agent_capabilities"
 AGENT_CAPABILITIES = ("This support agent can open a ticket for the Quillstack support team in any conversation, and "
                       "a person on that team follows the ticket up. It can verify the customer in a secure card, "
                       "search the help articles, and prepare an account change that runs only after the customer's "
-                      "yes. It cannot itself approve a refund, credit, discount or exception, and it cannot promise "
-                      "when the team will reply.")
+                      "yes. It never sees what the customer types into the verification card. Once the customer is "
+                      "verified, it can read their account, charges, invoices and tickets "
+                      "and look into their request. It cannot itself approve a refund, credit, discount or exception, "
+                      "and it cannot promise when the team will reply.")
 SESSION_SOURCE_ID = "session_state"
 FIXED_LINE_PREFIXES = ("route-", "ingress-")  # RouterMiddleware and ingress lines (agent.structured.pending ids)
 FIXED_LINES_MAX = 3
@@ -538,7 +540,9 @@ def session_evidence(values: dict[str, Any], messages: list[BaseMessage],
     0. agent_capabilities: the fixed AGENT_CAPABILITIES text, always;
     1. account_context: the code-held verified context, only when the thread is verified; session_state, always:
        verified or not, waiting for verification, the card on screen, tickets opened this session (D-071 part 1);
-    2. fixed_line:<message id>: the last FIXED_LINES_MAX lines our code wrote to the thread (route and ingress);
+    2. fixed_line@<n>: the last FIXED_LINES_MAX lines our code wrote to the thread (route and ingress), n counting
+       from the newest (1); the message id is in the provenance, so the sid set stays small and stable (structured
+       output grammars are cached per schema);
     3. tool results in the checkpoint within the last GATE2_EVIDENCE_USER_TURNS user turns that _carried allows:
        a core result as one block, sid "<tool>@<n>" (n counts that tool's results in the window, oldest 1), with
        current="true" on the newest of each tool; a search_kb result as one block per relevant chunk rendered from
@@ -560,8 +564,9 @@ def session_evidence(values: dict[str, Any], messages: list[BaseMessage],
     code.append(_source_block(SESSION_SOURCE_ID, "session_state", session_state_text(values, messages, control)))
     provenance[SESSION_SOURCE_ID] = {"kind": "session_state"}
     fixed = [m for m in messages if isinstance(m, AIMessage) and str(m.id or "").startswith(FIXED_LINE_PREFIXES)]
-    for m in fixed[-FIXED_LINES_MAX:]:
-        sid = f"fixed_line:{m.id}"
+    last = fixed[-FIXED_LINES_MAX:]
+    for k, m in enumerate(last):
+        sid = f"fixed_line@{len(last) - k}"  # 1 is the newest
         code.append(_source_block(sid, "fixed_line", str(m.content)))
         provenance[sid] = {"kind": "fixed_line", "message_id": str(m.id)}
     window = evidence_window(messages)

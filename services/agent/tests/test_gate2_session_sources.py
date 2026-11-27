@@ -317,3 +317,14 @@ def test_the_verifier_prompt_describes_session_evidence_and_the_sid_rule():
     assert "had in this conversation" in VERIFIER_PROMPT and "in this turn" not in VERIFIER_PROMPT  # M2
     assert "copied exactly from the <citable_ids> list" in VERIFIER_PROMPT  # I1
     assert 'current=\"true\" marks the newest result' in VERIFIER_PROMPT  # I4
+
+
+def test_fixed_line_sids_are_stable_and_the_message_id_is_in_the_provenance():
+    # Structured output compiles a grammar per schema; sids that carry turn ids would make every schema new.
+    lines = [AIMessage(f"line {i}", id=f"route-turn-{i}") for i in range(4)]
+    thread: list[Any] = []
+    for m in lines:
+        thread += [HumanMessage("q"), m]
+    ev = session_evidence({}, [*thread, HumanMessage("now")])
+    assert {i for i in ev.ids if i.startswith("fixed_line")} == {"fixed_line@1", "fixed_line@2", "fixed_line@3"}
+    assert ev.provenance["fixed_line@1"]["message_id"] == "route-turn-3"
