@@ -1,7 +1,7 @@
 # What: the CI gate for every pull request and every push to main (CS-E-01.S5.T1; doc 06 s10; doc 07 s1.4, s15.1 row 5).
 # Use when: GitHub runs it automatically. Make the jobs below required checks in branch protection (owner gap G1).
 # Inputs: the repo. Needs no secrets (tests use fakes; nothing here calls a provider).
-# Output: one green or red check per job: python (ruff, pyright, pytest per project incl. infra), repo tests, web, gitleaks, contracts-sync, import-guard, compose.
+# Output: one green or red check per job: python (ruff, pyright, pytest per project incl. infra), repo tests, web, gitleaks, contracts-sync, import-guard, compose, pg tests.
 # Side effects: none beyond the run itself. Role: the merge gate. Every run step starts with `set -euo pipefail`.
 name: ci
 
@@ -210,3 +210,20 @@ jobs:
           # Static topology proof (core and knowledge off the edge network, env scoping, grace period); reads .env.
           cp .env.example .env
           python3 infra/tests/check_topology.py
+
+  pg-tests:
+    name: pg tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.22"
+      - name: Postgres-backed tests (pytest -m pg) for core and knowledge
+        run: |
+          set -euo pipefail
+          # Starts the Compose pgvector Postgres with dummy random passwords (generated inside the script, no secrets),
+          # builds the schemas with the migrate jobs, then runs each service's `pg` tests. No provider is called
+          # (fixture vectors). Fails if a pg test fails, errors, or is skipped. See scripts/pg_tests.sh.
+          scripts/pg_tests.sh
