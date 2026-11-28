@@ -38,8 +38,6 @@ router.grounding_failed.no_ticket: I couldn't confirm that answer against our po
 router.grounding_failed.ticket: I couldn't confirm that answer against our policies, so I won't guess. I've opened a ticket for our team, ticket ending eight two one three.
 router.limit_reached.no_ticket: I couldn't finish that within the steps I'm allowed for one message. I couldn't open a ticket just now. If you contact us, please quote reference zero A one F.
 router.limit_reached.ticket: I couldn't finish that within the steps I'm allowed for one message. I've opened a ticket for our team, ticket ending eight two one three.
-router.needs_commitment.no_ticket: That needs a decision from our team, so I won't promise it here. I couldn't open a ticket just now. If you contact us, please quote reference zero A one F.
-router.needs_commitment.ticket: That needs a decision from our team, so I won't promise it here. I've opened a ticket for our team, ticket ending eight two one three.
 router.not_in_docs.no_ticket: Our help articles don't cover that. I couldn't open a ticket just now. If you contact us, please quote reference zero A one F.
 router.not_in_docs.ticket: Our help articles don't cover that. I've opened a ticket for our team, ticket ending eight two one three.
 router.retrieval_unavailable.no_ticket: I couldn't search our help articles just now, so I won't guess. I couldn't open a ticket just now. If you contact us, please quote reference zero A one F.

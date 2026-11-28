@@ -119,5 +119,4 @@ class GroundingMiddleware(AgentMiddleware):
         if self.open_ticket is not None and control.route is not None and control.route.ticket is None:
             control.route.ticket = record_hook_ticket(control, await self.open_ticket(control))
         line = route_message(control)  # with no hook, agent.escalation opens the ticket after the loop
-        next_failures = 0 if reason == "grounding_failed" else failures
-        return {"messages": [removal, line], "grounding_failures": next_failures, "jump_to": "end"}
+        return {"messages": [removal, line], "grounding_failures": 0, "jump_to": "end"}  # reason is grounding_failed

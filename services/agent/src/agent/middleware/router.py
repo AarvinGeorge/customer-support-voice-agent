@@ -42,7 +42,6 @@ ESCALATION_LEADS: dict[str, str] = {
     "retrieval_unavailable": "I couldn't search our help articles just now, so I won't guess.",
     "tool_failure": "Our systems didn't respond, so nothing was changed.",
     "grounding_failed": "I couldn't confirm that answer against our policies, so I won't guess.",
-    "needs_commitment": "That needs a decision from our team, so I won't promise it here.",
     "limit_reached": "I couldn't finish that within the steps I'm allowed for one message.",
     "deadline": "I couldn't finish that in time.",
 }

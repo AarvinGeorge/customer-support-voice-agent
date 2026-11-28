@@ -48,3 +48,20 @@ async def test_real_verifier_and_classifier_on_the_small_model():
     assert not bad.passed and bad.verdict == "fail"
     assert bad.commitment is True or any(not c["supported"] for c in bad.claims)
     assert off is False
+
+
+@pytest.mark.real
+async def test_real_verifier_flags_an_outcome_promise_beside_a_process_offer():
+    """What: positive control for the CS-E-03.F14 verifier sentence (review PR #89 I-1): a draft that offers to
+    prepare a request AND promises the outcome must still be flagged. Use when: -m real after a verifier prompt
+    change. Inputs: .env key. Output: pass/fail. Side effects: one small-model call. Role: the new carve-out for
+    process offers must not let an outcome promise through."""
+    load_dotenv(ROOT / ".env", override=False)
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        pytest.fail("ANTHROPIC_API_KEY missing: this test must not pass without making the calls")
+    ver = GroundingVerifier(ModelRegistry(load_models_config(ROOT / "data" / "models.yaml")).build("grounding_verifier"))
+    mixed = await ver.verify(TurnControl(session_id="s", turn_id="t"),
+                             "I'll prepare your refund request and it will be approved today.", EVIDENCE)
+    print("VERIFIER mixed:", mixed)
+    assert not mixed.passed
+    assert mixed.commitment is True or any(not c["supported"] for c in mixed.claims)

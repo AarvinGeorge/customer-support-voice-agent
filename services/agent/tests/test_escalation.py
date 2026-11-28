@@ -133,7 +133,6 @@ class _Gate2(AgentMiddleware):
 
 @pytest.mark.parametrize("reason,lead", [
     ("grounding_failed", "I couldn't confirm that answer against our policies, so I won't guess."),
-    ("needs_commitment", "That needs a decision from our team, so I won't promise it here."),
 ])
 async def test_gate2_hook_removes_the_draft_and_opens_exactly_one_ticket(monkeypatch: pytest.MonkeyPatch,
                                                                          reason: str, lead: str) -> None:
@@ -147,8 +146,6 @@ async def test_gate2_hook_removes_the_draft_and_opens_exactly_one_ticket(monkeyp
     thread = (await w.values())["messages"]
     assert all(m.id != "draft-1" for m in thread) and thread[-2].content == outcome.final.text
     assert str(thread[-1].id).startswith("record-")
-    if reason == "needs_commitment":
-        assert ticket_bodies(w)[0][0]["category"] == "commitment"
 
 
 async def test_same_tool_failing_twice_opens_one_ticket_and_says_what_did_not_change() -> None:

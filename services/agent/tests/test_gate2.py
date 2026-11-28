@@ -442,6 +442,9 @@ def test_the_verifier_prompt_carries_the_d059_claim_rules():
     assert "clarifying question" in p and "acknowledgement" in p and "no claims" in p
     assert "skip greetings, questions to the customer" not in p  # the old blanket question exemption is gone
     assert "untrusted" in p and 'injection_suspect="true" never supports a claim' in p
+    # CS-E-03.F14 (D-085): a process offer is not a commitment; an instruction is checked by the fact it relies on.
+    assert "to prepare it for the system to decide promises no outcome, so it is not a commitment" in p
+    assert "is checked by the fact it relies on" in p
 
 
 async def test_two_clarifying_questions_in_a_row_never_open_a_ticket():
