@@ -330,7 +330,7 @@ def g_trajectory(ctx: Ctx) -> list[Check]:
 
 def g_turns(ctx: Ctx) -> list[Check]:
     """What: per-turn expectations (end_reason, end_reason_any, forbidden_tools, cites_any, says, verification_card, verification_result, grounding,
-    gate2_ran: the reply had a Gate 2 pass or fail, D-083).
+    gate2_ran: the reply had a Gate 2 pass or fail, D-083; retrieval_verdict: the turn's last Gate 1 verdict, D-089).
     Use when: a turn has a non-empty expect.
     Inputs: ctx. Output: one check per such turn, named turn.N. Side effects: none. Role: step-by-step script checks."""
     out: list[Check] = []
@@ -408,6 +408,15 @@ def g_turns(ctx: Ctx) -> list[Check]:
                     src = exp["grounding"].get("from_source")
                     if src and not any(c.get("supported") and c.get("source_id") == src for c in g.get("claims") or []):
                         bad.append(f"no supported claim rests on source {src}")
+        if "retrieval_verdict" in exp:
+            ev = ctx.turn_events(t)
+            if ev is None:
+                err = True
+                bad.append("stored events missing")
+            else:
+                g1 = [e.get("verdict") for e in ev if e.get("type") == "gate" and e.get("gate") == "retrieval"]
+                if not g1 or g1[-1] != exp["retrieval_verdict"]:
+                    bad.append(f"Gate 1 verdict {g1[-1] if g1 else 'none ran'}, expected {exp['retrieval_verdict']}")
         if exp.get("gate2_ran"):
             ev = ctx.turn_events(t)
             if ev is None:

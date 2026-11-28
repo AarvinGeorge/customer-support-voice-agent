@@ -254,31 +254,40 @@ def test_g16_turn2_accepts_a_card_pointer_answer_but_not_a_ticket_or_a_bare_answ
     assert "turn.2" in failing(grade("G-16", tick))  # a ticket call is still forbidden
 
 
-def g22_run(first: str = "weak", second: str = "pass", cited: str = "sso-login-troubleshooting#error-codes/e-sso-401", **over: Any) -> CaseRun:
-    """What: a run that satisfies G-22 (a weak but answered refund turn, then an unrelated SSO error question answered). Use when: a
-    test mutates one thing. Inputs: Gate 1 verdicts of turn 1 and turn 2, the chunk turn 2 cites, make_run overrides. Output: CaseRun. Side effects: none.
-    Role: the happy baseline for D-089's moved-on side."""
-    refund, export = ["refund-policy#how-refunds-work"], [cited]
+def g22_run(first: str = "weak", second: str = "pass", cited: str = "sso-login-troubleshooting#error-codes/e-sso-401",
+            first_end: str = "clarify", **over: Any) -> CaseRun:
+    """What: a run that satisfies G-22 (a weak export question that leaves the question open, then an unrelated SSO error
+    question answered). Use when: a test mutates one thing. Inputs: Gate 1 verdicts of turn 1 and turn 2, the chunk turn 2 cites,
+    turn 1's end_reason, make_run overrides. Output: CaseRun. Side effects: none. Role: the happy baseline for D-089's moved-on side."""
+    exp = ["import-export-retention#exporting-content"]
     t = [turn(0, "verification", [], end_reason="verified"),
-         turn(1, "text", [*step("search_kb"), gate(first, "clarify" if first == "weak" else "answer", refund), GROUND],
-              text="Refunds reach your card in 5 to 10 business days.", citations=refund),
-         turn(2, "text", [*step("search_kb"), gate(second, "answer" if second == "pass" else "escalate", export), GROUND],
-              text="E-SSO-401 means the identity provider rejected the login.", citations=export)]
+         turn(1, "text", [*step("search_kb"), gate(first, "clarify" if first == "weak" else "answer", exp), GROUND],
+              end_reason=first_end, text="Do you want to export a workspace or a single page?"),
+         turn(2, "text", [*step("search_kb"), gate(second, "answer" if second == "pass" else "escalate", [cited]), GROUND],
+              text="E-SSO-401 means the identity provider rejected the login.", citations=[cited])]
     return make_run("G-22", t, **over)
 
 
 def test_g22_d089_moved_on_passes_and_each_mutation_fails_its_own_check() -> None:
     g = grade("G-22", g22_run())
     assert g.verdict == "pass", [(c.name, c.detail) for c in g.checks if c.status != "pass"]
-    assert probe(g, "weak_retrieval_answered") is True
-    assert probe(grade("G-22", g22_run("pass")), "weak_retrieval_answered") is False  # turn 1 passed Gate 1: D-089 not exercised
+    assert grade("G-22", g22_run(first_end="answered")).verdict == "pass"  # weak and answered (D-066) leaves the question open too
+    assert "turn.1" in failing(grade("G-22", g22_run("pass", first_end="answered")))  # Gate 1 passed: nothing was left open, the case tests nothing
     ticket = {"id": "t", "queue": "technical", "category": "not_in_docs", "stage": "open", "priority": "P4", "origin": "code"}
     assert {"final_state.tickets", "forbidden:unneeded_ticket"} <= set(failing(grade("G-22", g22_run(tickets=[ticket]))))  # a ticket
     run = g22_run(second="weak")
     run.turns[2].events[-1]["end_reason"] = "escalated"
-    bad = failing(grade("G-22", run))
-    assert {"turn.2", "gate"} <= set(bad)  # the old question re-searched, weak, escalated: the new question was dropped
+    assert {"turn.2", "gate"} <= set(failing(grade("G-22", run)))  # the old question re-searched, weak, escalated: the new one dropped
     run = g22_run()
     run.turns[2].events[-1]["end_reason"] = "clarify"
     assert "turn.2" in failing(grade("G-22", run))  # a second clarifying question instead of the answer
-    assert "turn.2" in failing(grade("G-22", g22_run(cited="refund-policy#how-refunds-work")))  # answered the old subject, not the new one
+    assert "turn.2" in failing(grade("G-22", g22_run(cited="refund-policy#how-refunds-work")))  # answered the old subject
+
+
+def test_retrieval_verdict_turn_expect_fails_when_that_turn_ran_no_gate_1() -> None:
+    """The turn expect `retrieval_verdict` (needed by G-22: the schema had no per-turn Gate 1 check)."""
+    run = g22_run()
+    assert run.data is not None
+    tid = run.turns[1].turn_id
+    run.data.events = [e for e in run.data.events if not (e["turn_id"] == tid and e.get("type") == "gate" and e.get("gate") == "retrieval")]
+    assert "turn.1" in failing(grade("G-22", run))  # no search, so the question was never left open
