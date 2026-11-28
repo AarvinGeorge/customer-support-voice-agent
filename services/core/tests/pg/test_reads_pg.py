@@ -54,7 +54,7 @@ def build_world(c: psycopg.Connection) -> SimpleNamespace:
     sfx = random.randrange(100, 900)
     w.owner, w.member, w.other = f"U-{sfx}1", f"U-{sfx}2", f"U-{sfx}3"
     c.execute("INSERT INTO accounts (id, name, tier, contract_status, seats, billing_email) "
-              "VALUES (%s,'Acme','pro','active',5,'priya@acme.com'),(%s,'Globex','business','active',50,'g@globex.com')",
+              "VALUES (%s,'Acme','pro','active',5,'natasha@acme.com'),(%s,'Globex','business','active',50,'g@globex.com')",
               (w.a, w.b))
     for uid, acct, name, role, prefs in ((w.owner, w.a, "Natasha", "owner", {"weekly_digest": False}),
                                          (w.member, w.a, "Steve", "member", {}), (w.other, w.b, "Gina", "owner", {})):
@@ -181,7 +181,7 @@ def test_context_for_an_owner(world):
     assert b["claims"]["user_id"] == world.owner and b["claims"]["role"] == "owner"
     assert b["profile"] == {"account_id": world.a, "account_name": "Acme", "display_name": "Natasha", "role": "owner",
                             "tier": "pro", "contract_status": "active", "grace_until": None, "seats": 5,
-                            "billing_email_masked": "p***@acme.com", "notification_prefs": {"weekly_digest": False}}
+                            "billing_email_masked": "n***@acme.com", "notification_prefs": {"weekly_digest": False}}
     assert [t["ticket_id"] for t in b["open_tickets"]] == [world.t_pending, world.t_member, world.t_old]
     assert b["open_tickets"][0]["stage"] == "pending_approval"
     assert [(a["action_type"], a["amount_cents"]) for a in b["recent_actions"]] == [("notification_prefs", None), ("refund", 9600)]
@@ -340,4 +340,4 @@ def test_get_account_summary_works_against_the_real_core_route(world):
     profile = asyncio.run(client.get_profile(control))
     assert profile == {"account_id": world.a, "account_name": "Acme", "display_name": "Natasha", "role": "owner",
                        "tier": "pro", "contract_status": "active", "grace_until": None, "seats": 5,
-                       "billing_email_masked": "p***@acme.com", "notification_prefs": {"weekly_digest": False}}
+                       "billing_email_masked": "n***@acme.com", "notification_prefs": {"weekly_digest": False}}

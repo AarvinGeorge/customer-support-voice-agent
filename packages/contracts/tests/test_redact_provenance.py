@@ -33,9 +33,9 @@ def test_system_data_keeps_code_generated_ids_and_lines() -> None:
 
 def test_system_data_still_applies_the_field_rules() -> None:
     out = redact_system({"verification": {"account_id": "QS-10423", "pin": "4821", "step_up_pin": "7302"},
-                         "note": "mail priya@acme.com"})
+                         "note": "mail natasha@acme.com"})
     assert out["verification"] == {"account_id": "QS-10423", "pin": PIN_TOKEN, "step_up_pin": PIN_TOKEN}
-    assert out["note"] == "mail p***@acme.com"
+    assert out["note"] == "mail n***@acme.com"
 
 
 def test_system_data_scans_customer_frames_as_a_second_net() -> None:
@@ -142,7 +142,7 @@ def test_langsmith_keeps_system_ids_and_hides_framed_customer_pins() -> None:
     payload = {"messages": [[{"type": "human", "content": "<customer_message>\nQS-10423 4821\n</customer_message>"},
                              {"type": "ai", "content": "Your ticket ending 8352 is open."}, serialized_ai,
                              {"type": "tool", "content": '{"short_id":"8352"}'}]],
-               "pin": "7302", "email": "priya@acme.com"}
+               "pin": "7302", "email": "natasha@acme.com"}
     out = repr(hide_for_langsmith(payload))
-    assert "4821" not in out and "7302" not in out and "priya@acme.com" not in out
+    assert "4821" not in out and "7302" not in out and "natasha@acme.com" not in out
     assert "QS-10423" in out and "Your ticket ending 8352" in out and CODE_LINE in out and '"short_id":"8352"' in out

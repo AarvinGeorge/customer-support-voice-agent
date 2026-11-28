@@ -41,7 +41,7 @@ CLAIMS = Claims(verified=True, session_id=SESSION_ID, user_id="U-0001", display_
 
 PROFILE = Profile(account_id=ACCOUNT_ID, account_name="Acme Analytics", display_name="Natasha Romanoff",
                   role="owner", tier="pro", contract_status="active", grace_until=None, seats=12,
-                  billing_email_masked="p***@acme.com",
+                  billing_email_masked="n***@acme.com",
                   notification_prefs={"product_updates": True, "billing_notices": True,
                                       "incident_alerts": True, "weekly_digest": False})
 

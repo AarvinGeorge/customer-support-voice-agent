@@ -417,11 +417,11 @@ async def test_posted_transcript_text_is_redacted_before_storage() -> None:
     w = World()
     w.voice_session()
     body = {"voice_session_id": "vs-1",
-            "items": items(("item_u5", "user", "my email is priya@acme.com and my PIN is 4821"))}
+            "items": items(("item_u5", "user", "my email is natasha@acme.com and my PIN is 4821"))}
     async with w.client() as c:
         assert (await c.post(f"/api/sessions/{SID}/transcript", json=body)).status_code == 204
     (row,) = w.vstore.items
-    assert "priya@acme.com" not in row.text and "p***@acme.com" in row.text
+    assert "natasha@acme.com" not in row.text and "n***@acme.com" in row.text
     assert not leaks(row.text, "4821") and "[PIN]" in row.text
 
 
@@ -430,10 +430,10 @@ async def test_covered_voice_item_is_redacted_before_storage() -> None:
     w.voice_session()
     async with w.client() as c:
         events_of(await c.post(f"/api/sessions/{SID}/voice/ask", json=ask(
-            user_item_id="item_u9", user_transcript="send it to priya@acme.com, PIN 4821")))
+            user_item_id="item_u9", user_transcript="send it to natasha@acme.com, PIN 4821")))
     (row,) = [i for i in w.vstore.items if i.realtime_item_id == "item_u9"]
-    assert "priya@acme.com" not in row.text and not leaks(row.text, "4821")
-    assert "p***@acme.com" in row.text and "[PIN]" in row.text
+    assert "natasha@acme.com" not in row.text and not leaks(row.text, "4821")
+    assert "n***@acme.com" in row.text and "[PIN]" in row.text
 
 
 async def test_real_scanner_masks_a_spoken_pin_in_a_transcript() -> None:

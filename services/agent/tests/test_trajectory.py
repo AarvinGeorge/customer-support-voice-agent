@@ -124,7 +124,7 @@ def test_event_row_maps_columns_and_redacts_the_payload(monkeypatch):
     assert (turn_id, seq, session_id, type_, step_id) == (TID, 1, SID, "step.started", f"{TID}:1")
     assert ts == raw["ts"]
     body = payload.obj  # psycopg Jsonb wrapper
-    assert body["args_redacted"] == {"email": "p***@acme.com", "pin": "[PIN]"}
+    assert body["args_redacted"] == {"email": "n***@acme.com", "pin": "[PIN]"}
     assert "pat.lee" not in str(body) and not leaks(str(body["args_redacted"]), "4821")
     assert "482100" in body["ts"]  # the frozen unlucky timestamp is in the row, and the PIN probe ignores it
 
