@@ -82,7 +82,7 @@ async def test_the_trace_of_the_verifier_call_keeps_our_numbers() -> None:
 
 
 async def test_card_verification_never_puts_the_pin_in_our_records() -> None:
-    w = World([AIMessage("Thanks Priya, your ticket ending 8213 is open.")], verified=False)
+    w = World([AIMessage("Thanks Natasha, your ticket ending 8213 is open.")], verified=False)
     body = {"account_id": "QS-10423", "pin": ex.STUB_PIN}
     assert leaks(json.dumps(body), ex.STUB_PIN)  # positive control: the probe finds the PIN where it is
     outcome, events = await w.send(verification=body)

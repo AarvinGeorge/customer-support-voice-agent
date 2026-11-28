@@ -70,8 +70,8 @@ def test_session_state_under_ours_fields_keeps_our_numbers() -> None:
 def test_a_labelled_message_still_scans_its_customer_frame() -> None:
     framed = f"<customer_message>\n{CANARY}\n</customer_message>\n{EVIDENCE}"
     for msg in _shapes(framed, ours_id("turn")):
-        out = json.dumps(hide_for_langsmith({"messages": [[msg]], "pin": "4821", "email": "priya@acme.example"}))
-        assert "4821" not in out and "priya@acme.example" not in out
+        out = json.dumps(hide_for_langsmith({"messages": [[msg]], "pin": "4821", "email": "natasha@acme.example"}))
+        assert "4821" not in out and "natasha@acme.example" not in out
         assert "U-2041" in out and "ticket ending 5124" in out and "invoice ending 0412" in out
 
 
