@@ -228,3 +228,27 @@ def test_g16_a_ticket_claim_without_session_state_support_fails() -> None:
     assert "turn.4" in failing(grade("G-16", make_run("G-16", t)))  # a ticket claim not tied to session_state (the false Yes)
     t[4] = turn(4, "voice", [GROUND], text="Yes, I created a ticket for you.", input=VOICE)  # no claim list at all
     assert "turn.4" in failing(grade("G-16", make_run("G-16", t)))
+
+
+def g16_with_turn2(end_reason: str, text: str, parts: list[dict[str, Any]] | None = None) -> CaseRun:
+    """What: G-16's happy run with turn 2 replaced. Use when: the D-082 turn 2 tests. Inputs: end_reason, final text,
+    partial events. Output: CaseRun. Side effects: none. Role: helper."""
+    t = [turn(0, "text", [CARD], text="Hello, how can I help?"),
+         turn(1, "voice", [], text="I don't know who you are yet.", input=VOICE),
+         turn(2, "voice", parts or [], end_reason=end_reason, text=text, input=VOICE),
+         turn(3, "voice", [], text="Use the secure card when you are ready.", input=VOICE),
+         turn(4, "voice", [GROUND_STATE], text="No, I have not created a ticket for you.", input=VOICE)]
+    return make_run("G-16", t)
+
+
+def test_g16_turn2_accepts_a_card_pointer_answer_but_not_a_ticket_or_a_bare_answer() -> None:
+    """D-082: after the code-offered card, turn 2 passes on verification_requested OR on answered with a card pointer;
+    still no ticket and no refund prepare. A bare answer that does not point to the card, or any other end, fails."""
+    ask = g16_with_turn2("verification_requested", "Please verify.", [*step("request_verification"), VERIFY_REQ])
+    assert "turn.2" not in failing(grade("G-16", ask))  # the original path still passes
+    point = g16_with_turn2("answered", "Please use the verification card above to continue.")
+    assert "turn.2" not in failing(grade("G-16", point))  # D-082: answered, pointing to the card on screen
+    assert "turn.2" in failing(grade("G-16", g16_with_turn2("answered", "Sorry, I cannot help with that.")))  # no pointer
+    assert "turn.2" in failing(grade("G-16", g16_with_turn2("clarify", "Please use the verification card above.")))  # other end
+    tick = g16_with_turn2("answered", "Please use the verification card above.", step("create_ticket"))
+    assert "turn.2" in failing(grade("G-16", tick))  # a ticket call is still forbidden
