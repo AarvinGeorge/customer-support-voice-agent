@@ -207,9 +207,10 @@ class AskSupportAgentArgs(StrictModel):
 ASK_SUPPORT_AGENT_TOOL: dict[str, Any] = {
     "type": "function",
     "name": "ask_support_agent",
-    "description": ("Ask the Quillstack support agent. Use for anything about Quillstack, the customer's "
-                    "account, billing, policies, tickets or actions, and whenever the customer answers a "
-                    "question the agent asked (for example yes or no). Verification happens only in the secure card on "
+    "description": ("Ask the Quillstack support agent. Send it every customer question or request, whatever the "
+                    "topic, and every answer to a question the agent asked (for example yes or no). The agent "
+                    "decides scope, policy and identity; speak the say text it returns. Only pure conversational "
+                    "glue (a greeting, thanks or goodbye) needs no call. Verification happens only in the secure card on "
                     "the customer's screen: never ask the customer for a PIN, and never ask them to say one."),
     "parameters": {
         "type": "object", "additionalProperties": False, "required": ["question"],
