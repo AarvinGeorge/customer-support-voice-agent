@@ -246,13 +246,65 @@ async def test_argument_error_from_tool_node_is_reported_not_counted_as_failure(
 
 # --- prepares per turn -------------------------------------------------------------------------------------
 
-async def test_one_prepare_per_turn():
+@pytest.mark.parametrize("decision", ["allowed", "needs_approval"])
+async def test_one_accepted_prepare_per_turn(decision):
+    """D-079: a prepare core accepted (a pending action stored) blocks a second prepare in the same turn."""
     c = control()
-    h = Script(ok({"decision": "declined", "reason_codes": ["X"], "policy_refs": []}, name="prepare_refund"))
+    h = Script(ok({"decision": decision, "reason_codes": ["X"], "policy_refs": []}, name="prepare_refund"))
     await guard.awrap_tool_call(req("prepare_refund", V1, call_id="p1", reason="other", note=""), h)
     msg = await guard.awrap_tool_call(req("prepare_refund", V1, call_id="p2", reason="other", note=""), h)
     assert h.calls == 1 and payload(msg, "prepare_refund") == {"status": "one_action_at_a_time"}
     assert c.prepares == 1 and c.tool_calls == 1
+
+
+async def test_a_rejected_ambiguous_prepare_does_not_count_and_the_correct_prepare_runs():
+    """D-079 (golden G-05 on PR #80): core's 4xx stored nothing, so the retry with the right charge id runs."""
+    c = control()
+    rejected = ToolCallError("client_error", status=409, code="AMBIGUOUS_REFERENCE", message="More than one charge",
+                             changed=False)
+    first = await guard.awrap_tool_call(req("prepare_refund", V2, call_id="p1", on="2026-11-15", reason="other",
+                                            note=""), Script(rejected))
+    assert payload(first, "prepare_refund")["code"] == "AMBIGUOUS_REFERENCE"
+    assert c.prepares == 0 and c.tool_calls == 1  # the call still counts toward the total tool limit
+    good = Script(ok({"decision": "needs_approval", "reason_codes": ["BUSINESS_APPROVAL_REQUIRED"],
+                      "policy_refs": []}, name="prepare_refund", call_id="p2"))
+    second = await guard.awrap_tool_call(req("prepare_refund", V2, call_id="p2", charge_id="CH-00000901",
+                                             reason="other", note=""), good)
+    assert good.calls == 1 and second.status != "error"
+    assert c.prepares == 1 and c.tool_calls == 2
+    third = await guard.awrap_tool_call(req("prepare_refund", V2, call_id="p3", reason="other", note=""), good)
+    assert good.calls == 1 and payload(third, "prepare_refund") == {"status": "one_action_at_a_time"}
+
+
+async def test_a_declined_prepare_does_not_count():
+    """D-079: a declined result stores no pending action, so it does not spend the one accepted prepare."""
+    c = control()
+    h = Script(ok({"decision": "declined", "reason_codes": ["X"], "policy_refs": []}, name="prepare_refund"),
+               ok({"decision": "allowed", "reason_codes": ["Y"], "policy_refs": []}, name="prepare_refund"))
+    await guard.awrap_tool_call(req("prepare_refund", V1, call_id="p1", reason="other", note=""), h)
+    assert c.prepares == 0
+    msg = await guard.awrap_tool_call(req("prepare_refund", V1, call_id="p2", reason="other", note=""), h)
+    assert h.calls == 2 and msg.status != "error" and c.prepares == 1
+
+
+async def test_a_failed_prepare_still_counts():
+    """A timeout or 5xx may have stored an action (changed unknown), so it keeps the slot (D-079 covers rejects)."""
+    c = control()
+    h = Script(unavailable())
+    await guard.awrap_tool_call(req("prepare_refund", V1, call_id="p1", reason="other", note=""), h)
+    msg = await guard.awrap_tool_call(req("prepare_refund", V1, call_id="p2", reason="other", note=""), h)
+    assert payload(msg, "prepare_refund") == {"status": "one_action_at_a_time"} and c.prepares == 1
+
+
+async def test_rejected_prepare_retries_stay_bounded_by_the_tool_limit():
+    """D-079: rejects do not count as prepares, but every executed call counts toward the total limit."""
+    from contracts import limits
+    c = control()
+    rejected = ToolCallError("client_error", status=409, code="AMBIGUOUS_REFERENCE", message="x", changed=False)
+    h = Script(rejected)
+    for i in range(limits.TOOL_CALLS_PER_TURN + 2):
+        await guard.awrap_tool_call(req("prepare_refund", V1, call_id=f"p{i}", reason="other", note=""), h)
+    assert h.calls == limits.TOOL_CALLS_PER_TURN and c.prepares == 0
 
 
 async def test_prepare_step_carries_the_rule():

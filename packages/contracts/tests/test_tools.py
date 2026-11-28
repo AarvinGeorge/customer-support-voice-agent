@@ -1,12 +1,17 @@
 """What: tests for model tool schemas, visibility sets and ask_support_agent (doc 07 s5, s6.6).
 Use when: CI. Inputs: none. Output: pass or fail. Side effects: none.
 Role: guards the "rules in code" tool surface."""
+import re
+from pathlib import Path
+
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from contracts.tools import (
     ASK_SUPPORT_AGENT_TOOL,
     TOOL_ARGS,
+    TOOL_DESCRIPTIONS,
     VISIBILITY,
     FunctionCallOutput,
     PrepareRefundArgs,
@@ -99,3 +104,45 @@ def test_parameters_carry_no_descriptor_docstring():
     for spec in tool_schemas():
         assert "description" not in spec["parameters"], spec["name"]
         assert "Side effects" not in str(spec["parameters"]), spec["name"]
+
+
+# CS-E-03.F8 and F7: tool descriptions are model-facing instructions, so they must not carry a business rule
+# (core and the retrieval gates own those) and must send refunds and questions to the tools that decide.
+_POLICY = yaml.safe_load((Path(__file__).resolve().parents[3] / "data" / "policy.yaml").read_text())
+
+
+def _policy_terms(text):
+    """What: policy.yaml role, tier and blocked-status names (and spaced forms) found in text.
+    Use when: description rule checks. Inputs: text. Output: sorted matches. Side effects: none. Role: test helper."""
+    words = [*_POLICY["roles"]["all_roles"], *_POLICY["tiers"], *_POLICY["actions"]["refund"]["blocked_statuses"]]
+    forms = {f for w in words for f in (w, w.replace("_", " "))}
+    return sorted(f for f in forms if re.search(rf"\b{re.escape(f)}s?\b", text, re.IGNORECASE))
+
+
+def test_policy_terms_helper_can_fail():
+    """What: positive control for the helper. Use when: CI. Inputs: none. Output: assertion. Side effects: none.
+    Role: an empty match below is meaningful only if a planted rule is found."""
+    assert _policy_terms("members cannot refund an enterprise invoice") == ["enterprise", "member"]
+
+
+@pytest.mark.parametrize("name", sorted(TOOL_DESCRIPTIONS))
+def test_tool_description_holds_no_business_rule(name):
+    """What: no description names a role, tier or blocked status, or a number. Use when: CI. Inputs: tool name.
+    Output: assertion. Side effects: none. Role: eligibility lives in core's rule engine, not in tool text."""
+    desc = TOOL_DESCRIPTIONS[name]
+    assert _policy_terms(desc) == [], name
+    assert not re.search(r"\d", desc), name
+
+
+def test_prepare_refund_description_says_it_decides_and_returns_the_policy():
+    """What: the description sends every refund request here and says the result carries the decision and policy.
+    Use when: CI. Inputs: none. Output: assertion. Side effects: none. Role: F8 (model declined without calling it)."""
+    low = TOOL_DESCRIPTIONS["prepare_refund"].lower()
+    assert "every refund request" in low and "eligib" in low and "policy" in low
+
+
+def test_search_kb_description_says_search_first():
+    """What: the description sends every question that is not small talk or an account lookup to search first.
+    Use when: CI. Inputs: none. Output: assertion. Side effects: none. Role: F7 (off-topic answered unsearched)."""
+    low = TOOL_DESCRIPTIONS["search_kb"].lower()
+    assert "small talk" in low and "account" in low and "first" in low
