@@ -557,6 +557,9 @@ def _plain(obj: Any) -> Any:
 # Provenance labels our code writes at the source (CS-E-02.F14 fix round 1, default deny). A customer can author
 # neither a message id nor a state key, so these labels cannot be forged from customer text.
 OURS_ID_PREFIX = "ours:"
+# The kinds the three code sites write (agent.prompt, agent.turn_body, agent.gates); the reader accepts no other.
+OURS_KINDS = frozenset({"turn", "voice_transcript", "gate2_evidence"})
+_OURS_ID_RE = re.compile(rf"{OURS_ID_PREFIX}(?:{'|'.join(sorted(OURS_KINDS))}):[a-p]{{32}}")
 # Agent state fields that hold code-held records (agent.state.SupportState; a test there keeps this list complete).
 OURS_FIELDS = frozenset({"verified", "claims_snapshot", "context_snapshot", "pending", "weak_streak",
                          "grounding_failures", "last_turn_delivered"})
@@ -571,8 +574,12 @@ def ours_id(kind: str) -> str:
     Use when: building a HumanMessage whose text code composes (the turn message, the merged voice transcript, the
     Gate 2 verifier input). Inputs: a short kind name. Output: id. Side effects: none.
     Role: the explicit provenance label hide_for_langsmith reads; unique, so the thread never merges two messages.
-    The random part has letters only, so an id can never look like (or be searched as) a PIN."""
+    The random part has letters only, so an id can never look like (or be searched as) a PIN. Raises ValueError for
+    a kind outside OURS_KINDS (the reader would not accept it)."""
     from uuid import uuid4
+
+    if kind not in OURS_KINDS:
+        raise ValueError(f"unknown ours kind {kind!r}")
 
     return f"{OURS_ID_PREFIX}{kind}:{uuid4().hex.translate(_NO_DIGITS)}"
 
@@ -593,36 +600,49 @@ def _message_kind(obj: Mapping[Any, Any]) -> str | None:
         names.append(ident[-1])
     if not any(isinstance(n, str) and (n in _SYSTEM_KINDS or n in _HUMAN_KINDS) for n in names):
         return None
-    if isinstance(msg_id, str) and msg_id.startswith(OURS_ID_PREFIX):
-        return "ours"
-    return "system" if any(isinstance(n, str) and n in _SYSTEM_KINDS for n in names) else "human"
+    if any(isinstance(n, str) and n in _SYSTEM_KINDS for n in names):
+        return "system"
+    body = kwargs if isinstance(kwargs, Mapping) else obj
+    if isinstance(msg_id, str) and _OURS_ID_RE.fullmatch(msg_id) and isinstance(body.get("content"), str):
+        return "ours"  # review-pr91 r1 M5: only the exact id and message shape the code sites write
+    return "human"
 
 
-def _trace(obj: Any) -> Any:
+def _unlabeled(obj: Any) -> Any:
+    """What: redaction of text with no provenance label: the full scan with the default context, then the frame scan
+    on its result (in that order: the reverse makes the frame scan's [PIN] read as a cue word and masks our ids).
+    Use when: _trace, for unlabeled human messages and every other unlabeled string. Inputs: data. Output: a redacted
+    copy. Side effects: none; raises TypeError on an object it cannot inspect.
+    Role: review-pr91 r1 I3: both nets run, so a bare number inside a frame is masked as on main (D-078)."""
+    return redact_system(redact(obj, _TRACE_CONTEXT))
+
+
+def _trace(obj: Any, state: bool = True) -> Any:
     """What: redact a trace payload by provenance, default deny (D-078): text our code labelled "ours" (a message
     with an ours_id, a value under an OURS_FIELDS key) and model, tool and system messages are system data
     (redact_system: frames scanned, numbers kept); every other string, including any unlabeled human message in or
     outside a frame, gets the full scan with the default context. PIN fields are replaced everywhere.
-    Use when: hide_for_langsmith. Inputs: payload. Output: a redacted copy. Side effects: none; raises TypeError on an
-    object it cannot inspect.
+    Use when: hide_for_langsmith. Inputs: payload; state: whether this mapping is a state (the payload root, or the
+    value of a "state" key), the only places an OURS_FIELDS key is read as a label. Output: a redacted copy.
+    Side effects: none; raises TypeError on an object it cannot inspect.
     Role: CS-E-02.F14: our records keep their numbers because they say so at the source, never because of the
     message role or the payload shape; a missing label only over-masks."""
     if isinstance(obj, BaseModel):
-        return _trace(obj.model_dump(mode="python"))
+        return _trace(obj.model_dump(mode="python"), state)
     if is_dataclass(obj) and not isinstance(obj, type):
-        return _trace(asdict(obj))
+        return _trace(asdict(obj), state)
     if isinstance(obj, Mapping):
         kind = _message_kind(obj)
         if kind in ("ours", "system"):
             return redact_system(obj)
         if kind == "human":
-            return redact(obj, _TRACE_CONTEXT)
+            return _unlabeled(obj)
         return {k: (PIN_TOKEN if isinstance(k, str) and k.lower() in PIN_FIELD_NAMES and v is not None
-                    else redact_system(v) if k in OURS_FIELDS else _trace(v))
+                    else redact_system(v) if state and k in OURS_FIELDS else _trace(v, k == "state"))
                 for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return type(obj)(_trace(v) for v in obj)
-    return redact(obj, _TRACE_CONTEXT)
+        return type(obj)(_trace(v, False) for v in obj)
+    return _unlabeled(obj)
 
 
 def hide_for_langsmith(payload: Any) -> dict[str, Any]:

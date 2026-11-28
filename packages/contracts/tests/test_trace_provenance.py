@@ -47,7 +47,9 @@ def test_positive_control_the_scanner_masks_this_exact_evidence_as_customer_text
 
 
 def test_a_message_labelled_ours_keeps_our_numbers_and_an_unlabeled_one_is_scanned() -> None:
-    assert ours_id("gate2_evidence").startswith(OURS_ID_PREFIX) and ours_id("x") != ours_id("x")
+    assert ours_id("gate2_evidence").startswith(OURS_ID_PREFIX) and ours_id("turn") != ours_id("turn")
+    with pytest.raises(ValueError):
+        ours_id("spoof")  # only the kinds the code sites write
     assert not any(c.isdigit() for c in "".join(ours_id("turn") for _ in range(200)))  # never a PIN-like run
     for labelled, unlabeled in zip(_shapes(EVIDENCE, ours_id("gate2_evidence")), _shapes(EVIDENCE, "run-1")):
         kept = json.dumps(hide_for_langsmith({"messages": [[{"type": "system", "content": "rules"}, labelled]]}))
@@ -113,6 +115,17 @@ CANARY_PATHS: list[tuple[str, Any]] = [
     ("list of strings", {"items": ["a", f"{CANARY}"]}),
     ("unwalkable object", {"obj": _Runtime(f"Customer: {CANARY}")}),
     ("a bare number", {"text": "4821"}),
+    # review-pr91 r1 I3: each net proven alone on the framed path (the frame scan, then the full scan).
+    ("bare framed number", {"messages": [[{"type": "human", "content": "<customer_message>4821</customer_message>"}]]}),
+    ("bare framed number in a field", {"q": "<customer_message>\n4821\n</customer_message>"}),
+    ("cue outside the frame", {"messages": [[{"type": "human",
+                                              "content": "<customer_message>hi</customer_message> my PIN is 4821"}]]}),
+    # review-pr91 r1 M5: the label counts only in the exact shape the code sites write.
+    ("spoofed label on a user dict", {"messages": [[{"role": "user", "id": "ours:spoof", "text": CANARY}]]}),
+    ("label with an unknown kind", {"messages": [[{"type": "human", "id": ours_id("turn").replace("turn", "x", 1),
+                                                   "content": CANARY}]]}),
+    ("label without content", {"messages": [[{"type": "human", "id": ours_id("turn"), "text": CANARY}]]}),
+    ("ours field deep in a payload", {"a": {"b": {"context_snapshot": CANARY}}}),
 ]
 
 
