@@ -1,6 +1,10 @@
-.env
-.env.*
-!.env.example
+# Secrets at any depth (a nested .env would otherwise reach an image through COPY of its directory), and deploy state
+# (pg_dump backups under .deploy/backups). Checked by inspecting a built image: build-log/reports/ghcr-promote.md.
+**/.env
+**/.env.*
+.deploy
+**/.deploy
+**/.tmp
 .git
 .claude
 **/node_modules

@@ -139,6 +139,20 @@ export function VoiceLine({ state, label, caption, error }: { state: string; lab
 }
 
 /**
+ * What: the display-only signed-in hint: the persona a landing row's Start named (D-076).
+ * Use when: ConsoleRoute matched ?as= against the persona list.
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: pre-fills the verification card's Account ID and titles it "Verify as <name>". Never sent
+ *   to the server; the PIN is still required and core verify alone establishes identity.
+ */
+export interface VerifyHint {
+  name: string;
+  accountId: string;
+}
+
+/**
  * What: props of ConsoleShell.
  * Use when: typing the component.
  * Inputs: none (type).
@@ -146,7 +160,7 @@ export function VoiceLine({ state, label, caption, error }: { state: string; lab
  * Side effects: none.
  * Role: `store` defaults to the app singleton; tests and the replay route pass their own.
  *   `langsmithProjectUrl` defaults to the public config value; `demoControls` fills the drawer's
- *   Demo controls slot (CS-E-07.S1.T4).
+ *   Demo controls slot (CS-E-07.S1.T4). `hint` pre-fills the verification card (D-076).
  */
 export interface ConsoleShellProps {
   sessionId: string | null;
@@ -154,6 +168,10 @@ export interface ConsoleShellProps {
   onNewConversation?: () => void;
   langsmithProjectUrl?: string;
   demoControls?: ReactNode;
+  /** The display-only signed-in hint, or null for the signed-out journey. */
+  hint?: VerifyHint | null;
+  /** A lasting line above the conversation (the route's failed session start, with Try again). */
+  notice?: ReactNode;
   /** A stand-in voice controller (tests, the dev replay); the default is useVoice for the session. */
   voice?: VoiceController;
 }
@@ -172,6 +190,8 @@ export function ConsoleShell({
   onNewConversation,
   langsmithProjectUrl = publicConfig.langsmithProjectUrl,
   demoControls,
+  hint: hintProp = null,
+  notice = null,
   voice: voiceOverride,
 }: ConsoleShellProps) {
   const thread = useStore(store, (s) => s.thread);
@@ -189,19 +209,30 @@ export function ConsoleShell({
   // Adjusting state while rendering when a value changed, instead of an effect (react.dev, "You
   // Might Not Need an Effect": Adjusting some state when a prop changes). A turn starting clears
   // the note; a new notice id announces the wait once, from retry_after_s (not the ticking clock).
-  const [seen, setSeen] = useState<{ busy: boolean; limitId: number | null; sessionId: string | null }>({ busy: false, limitId: null, sessionId });
-  const [account, setAccount] = useState("");
+  // A verified session has its identity; the hint no longer names anyone (review PR #81 M-2).
+  const hint = person === null ? hintProp : null;
+  const hintId = hint?.accountId ?? null;
+  const [seen, setSeen] = useState<{ busy: boolean; limitId: number | null; sessionId: string | null; hintId: string | null }>({
+    busy: false,
+    limitId: null,
+    sessionId,
+    hintId,
+  });
+  const [account, setAccount] = useState(hintId ?? "");
   const [pickedTurnId, setPickedTurnId] = useState<string | null>(null);
-  if (seen.busy !== busy || seen.limitId !== limitId || seen.sessionId !== sessionId) {
-    setSeen({ busy, limitId, sessionId });
+  if (seen.busy !== busy || seen.limitId !== limitId || seen.sessionId !== sessionId || seen.hintId !== hintId) {
+    setSeen({ busy, limitId, sessionId, hintId });
     if (busy && !seen.busy) setLimitNote("");
     if (limitId !== null && limitId !== seen.limitId) {
       setLimitNote(limitS !== null && limitS > 0 ? `You can send again in about ${limitS} second${limitS === 1 ? "" : "s"}.` : "Sending is paused for a moment.");
     }
     // A new session starts clean: the typed Account ID and the picked turn belong to the old one.
     if (seen.sessionId !== sessionId) {
-      setAccount("");
+      setAccount(hintId ?? "");
       setPickedTurnId(null);
+    } else if (seen.hintId !== hintId && account === "") {
+      // The hint resolves after the persona list loads; it pre-fills only an empty field.
+      setAccount(hintId ?? "");
     }
   }
   const secondsLeft = useSecondsLeft(limit?.untilMs ?? null, clearLimit);
@@ -287,7 +318,8 @@ export function ConsoleShell({
    * What: sends one turn: a chat message, or a card's verification or confirm body.
    * Use when: the input bar submits, or a card is pressed.
    * Inputs: the TurnRequest without client_turn_id (exactly one of text, verification, confirm).
-   * Output: a promise that settles when the turn ends (resolves on success and on failure).
+   * Output: a promise that settles when the turn ends: true when the server completed the turn
+   *   (turn.completed arrived), false on any failure or without a session (it never rejects).
    * Side effects: one streamed request with a fresh client_turn_id; failures land on the turn
    *   (failed phase) or in connection.error (shown by CS-E-04.S5.T3), so the rejection is
    *   swallowed here. Without a session nothing is sent.
@@ -295,15 +327,15 @@ export function ConsoleShell({
    *   only for the request (doc 07 s11).
    */
   const run = useCallback(
-    (part: Omit<TurnRequest, "client_turn_id">): Promise<void> => {
-      if (sessionId === null) return Promise.resolve();
+    (part: Omit<TurnRequest, "client_turn_id">): Promise<boolean> => {
+      if (sessionId === null) return Promise.resolve(false);
       const ctrl = new AbortController();
       inflight.current = ctrl;
       return store
         .getState()
         .sendTurn(sessionId, { client_turn_id: crypto.randomUUID(), ...part }, { signal: ctrl.signal })
-        .then(() => undefined)
-        .catch(() => undefined)
+        .then(() => true)
+        .catch(() => false)
         .finally(() => {
           if (inflight.current === ctrl) inflight.current = null;
         });
@@ -324,15 +356,22 @@ export function ConsoleShell({
   const cards: CardActions = useMemo(
     () => ({
       disabled: busy || locked !== null,
+      // "Verify as <name>" only while the field still holds the hinted account id.
+      verifyAs: hint !== null && account.trim().toUpperCase() === hint.accountId.toUpperCase() ? hint.name : null,
       account,
       setAccount,
       pinRef,
       verify: (verification: VerificationInput) => run({ verification }).finally(() => refocus("verify")),
-      noPin: () => run({ verification: { no_pin: true } }).finally(() => store.getState().dismissVerification()),
+      // The card closes only after the server completed the no_pin turn; a turn that never ran
+      // (429, 503, network) keeps it open next to the error (review rereview-pr78-r1 N-1).
+      noPin: () =>
+        run({ verification: { no_pin: true } }).then((completed) => {
+          if (completed) store.getState().dismissVerification();
+        }),
       decide: (confirm: ConfirmInput) => run({ confirm }).finally(() => refocus("decide")),
       offerTicket: () => run({ ticket_offer: { accept: true } }).finally(() => refocus("decide")),
     }),
-    [busy, locked, run, account, refocus, store],
+    [busy, locked, run, account, refocus, store, hint],
   );
 
   /**
@@ -390,6 +429,7 @@ export function ConsoleShell({
         <div className="flex flex-1">
         <main className="mx-auto flex w-full min-w-0 max-w-[45rem] flex-1 flex-col px-4 pt-10 pb-6 sm:px-0">
           <div className="flex flex-1 flex-col">
+            {notice}
             <ConversationLog
               thread={thread}
               conversation={conversation}

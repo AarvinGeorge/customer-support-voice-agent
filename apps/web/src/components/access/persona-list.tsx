@@ -1,18 +1,21 @@
 "use client";
 /**
- * What: the persona table: person and role, "Try this" line with scenario tags, plan and status,
- *   account ID, PIN with copy, and Start. Stacks into labelled rows on narrow screens.
+ * What: the persona table, a reference sheet: person and role, "Try this" line with scenario tags,
+ *   plan and status, account ID, PIN with copy, and a Start link that opens the console in a new
+ *   tab with the persona's account id as a display-only hint (D-076). Stacks into labelled rows on
+ *   narrow screens.
  * Use when: access is granted and GET /api/demo/personas returned the list.
- * Inputs: { personas, onStart, startingIndex, startDisabled }.
+ * Inputs: { personas }.
  * Output: a list with one row per persona (Figma "Landing: choose a persona": a table, not a card grid).
  * Side effects: the copy button writes the PIN to the clipboard.
  * Role: persona chooser.
  */
 import type { Persona } from "@contracts/contracts";
-import { Check, ChevronRight, Copy } from "lucide-react";
+import { ArrowUpRight, Check, Copy } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
+import { consoleStartPath } from "@/lib/api/access";
 import { cn } from "@/lib/utils";
 
 /**
@@ -164,28 +167,22 @@ function PinCopy({ pin, personName }: { pin: string; personName: string }) {
 /**
  * What: the persona list component.
  * Use when: rendered by Landing after access is granted.
- * Inputs: personas; onStart(index); startingIndex (the row whose Start is pending, or null);
- *   startDisabled (true during a 429 countdown).
+ * Inputs: personas.
  * Output: JSX list.
- * Side effects: clipboard writes from PinCopy.
- * Role: persona chooser.
+ * Side effects: clipboard writes from PinCopy; a Start link opens a new tab (the console there
+ *   creates a fresh session).
+ * Role: persona reference sheet and signed-in journey entry.
  */
-export function PersonaList({
-  personas,
-  onStart,
-  startingIndex,
-  startDisabled,
-}: {
-  personas: readonly Persona[];
-  onStart: (index: number) => void;
-  startingIndex: number | null;
-  startDisabled: boolean;
-}) {
+export function PersonaList({ personas }: { personas: readonly Persona[] }) {
   const baseId = useId();
+  const newTabId = `${baseId}-new-tab`;
   const recommended = recommendedIndex(personas);
 
   return (
     <div className="overflow-hidden rounded-lg border border-rule bg-raised">
+      <span id={newTabId} hidden>
+        The console opens with this account ID filled in. You still enter the PIN.
+      </span>
       <HeaderRow />
       <ul className="divide-y divide-rule">
         {personas.map((p, i) => {
@@ -235,17 +232,17 @@ export function PersonaList({
               </div>
 
               <div className="flex items-end justify-end md:items-center">
-                <Button
-                  variant={isRecommended ? "primary" : "quiet"}
-                  size="sm"
-                  className="h-9 px-3.5"
-                  onClick={() => onStart(i)}
-                  disabled={startDisabled || startingIndex !== null}
-                  aria-label={`Start as ${p.name}`}
+                <a
+                  href={consoleStartPath(p.account_id)}
+                  target="_blank"
+                  rel="noopener"
+                  aria-label={`Start as ${p.name} (opens in a new tab)`}
+                  aria-describedby={newTabId}
+                  className={buttonVariants({ variant: isRecommended ? "primary" : "quiet", size: "sm", className: "h-9 px-3.5" })}
                 >
-                  {startingIndex === i ? "Starting" : isRecommended ? `Start as ${firstName}` : "Start"}
-                  <ChevronRight aria-hidden className="size-3.5" />
-                </Button>
+                  {isRecommended ? `Start as ${firstName}` : "Start"}
+                  <ArrowUpRight aria-hidden data-icon="new-tab" className="size-3.5" />
+                </a>
               </div>
             </li>
           );

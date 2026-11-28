@@ -14,10 +14,12 @@
 commit_status() {
   local sha="${1:-}" state="${2:-}" context="${3:-}" desc="${4:-}"
   local repo="${COMMIT_STATUS_REPO:-AarvinGeorge/customer-support-voice-agent}"
-  case "$sha" in *[!0-9a-f]*|'') echo "commit_status: sha must be 40 lowercase hex, got '$sha'" >&2; return 2 ;; esac
+  # Explicit character lists, not ranges: [0-9a-f] is locale-dependent and let uppercase through (re-review N4).
+  case "$sha" in *[!0123456789abcdef]*|'') echo "commit_status: sha must be 40 lowercase hex, got '$sha'" >&2; return 2 ;; esac
   [ "${#sha}" -eq 40 ] || { echo "commit_status: sha must be 40 hex, got '$sha'" >&2; return 2; }
   case "$state" in pending|success|failure|error) ;; *) echo "commit_status: bad state '$state'" >&2; return 2 ;; esac
-  [ -n "$context" ] || { echo "commit_status: empty context" >&2; return 2; }
+  case "$context" in *[!\ ]*) ;; *) echo "commit_status: empty or blank context" >&2; return 2 ;; esac
+  case "$repo" in */*/*|/*|*/|*..*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-]*) echo "commit_status: bad repo '$repo' (owner/name)" >&2; return 2 ;; */*) ;; *) echo "commit_status: bad repo '$repo' (owner/name)" >&2; return 2 ;; esac
   desc="${desc:0:140}"
   echo "status $state $context on $sha: $desc"
   if [ "${COMMIT_STATUS_NO_POST:-}" = 1 ]; then echo "commit_status: COMMIT_STATUS_NO_POST=1, not posted"; return 0; fi

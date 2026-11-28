@@ -1,8 +1,11 @@
 # What: the CI gate for every pull request and every push to main (CS-E-01.S5.T1; doc 06 s10; doc 07 s1.4, s15.1 row 5).
-# Use when: GitHub runs it automatically. Make the jobs below required checks in branch protection (owner gap G1).
+# Use when: GitHub runs it automatically (the merge gate). Backup (D-068): if Actions cannot run, scripts/ci_gate.sh runs
+#   the same checks locally on the PR merged onto main and posts the `local-ci` status.
 # Inputs: the repo. Needs no secrets (tests use fakes; nothing here calls a provider).
 # Output: one green or red check per job: python (ruff, pyright, pytest per project incl. infra), repo tests, web, gitleaks, contracts-sync, import-guard, descriptors, compose, pg tests.
-# Side effects: none beyond the run itself. Role: the merge gate. Every run step starts with `set -euo pipefail`.
+# Side effects: none beyond the run itself. Role: the merge gate. ONE source of truth (D-068): every job only sets up the
+#   toolchain and runs `scripts/ci_local.sh <job>`; the commands, versions and skip rules live in that script.
+#   Images are built after this gate passes on main, by .github/workflows/images.yml (D-072), never here.
 name: ci
 
 on:
@@ -24,120 +27,43 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # pyright_target: what pyright checks (empty = the whole project, tests included, all hard).
-        include:
-          - {project: packages/contracts, pyright_target: ""}
-          - {project: services/agent, pyright_target: ""}
-          - {project: services/core, pyright_target: ""}
-          - {project: services/knowledge, pyright_target: ""}
-          - {project: scripts, pyright_target: ""}
-          - {project: evals, pyright_target: ""}
-          - {project: infra, pyright_target: ""}
-    env:
-      REQUIRE_ARTICLES: "1"  # the policy article tests fail instead of skipping (packages/contracts tests, PR #7)
-    defaults:
-      run:
-        shell: bash
-        working-directory: ${{ matrix.project }}
+        # Must equal PYTHON_PROJECTS in scripts/ci_local.sh (scripts/test_ci_local.py checks it). Per-project rules
+        # (pyright with psycopg for infra, ruff on the root tests/ in the scripts job) live in ci_local.sh.
+        project: [packages/contracts, services/agent, services/core, services/knowledge, scripts, evals, infra]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.8.22"
-      - name: Sync dependencies
+      - name: ruff, pyright, pytest (scripts/ci_local.sh)
         run: |
           set -euo pipefail
-          if [ -f pyproject.toml ]; then uv sync --frozen; else echo "no pyproject.toml here (stdlib scripts), nothing to sync"; fi
-      - name: ruff
-        run: |
-          set -euo pipefail
-          uvx ruff@0.9.10 check .
-          if [ "${{ matrix.project }}" = "scripts" ]; then uvx ruff@0.9.10 check ../tests; fi  # root tests/ has no project of its own
-      - name: pyright
-        run: |
-          set -euo pipefail
-          if [ -f pyproject.toml ]; then
-            uv run --frozen --with pyright==1.1.405 pyright ${{ matrix.pyright_target }}
-          else
-            # infra/migrate.py imports psycopg (the service images carry it), so pyright gets the same version the services lock.
-            uv run --no-project --with "psycopg[binary]==3.3.9" --with pyright==1.1.405 pyright .
-          fi
-      - name: pytest
-        run: |
-          set -euo pipefail
-          # No quiet branches: a project without tests fails, and so does any skipped test (a skip is a green run
-          # that tested nothing; same rule as scripts/pg_tests.sh). Deselected markers (pg, real, e2e) are not skips.
-          # No -q here: some projects already set -q in addopts and two -q drop the summary line the checks below read.
-          out="$(mktemp)"
-          if [ ! -f pyproject.toml ]; then
-            uv run --no-project --with pytest==8.3.5 --with pyyaml pytest -rs . 2>&1 | tee "$out"
-          elif [ -d tests ]; then
-            uv run --frozen --with pytest pytest -rs 2>&1 | tee "$out"
-          else
-            echo "::error title=${{ matrix.project }}::no tests/ directory: every project in this matrix must have tests"
-            exit 1
-          fi
-          if grep -qE '[0-9]+ (skipped|xfailed|xpassed)' "$out"; then echo "::error title=${{ matrix.project }}::pytest skipped tests (or xfail) tests: they must run or be deselected by marker"; exit 1; fi
-          if ! grep -qE '[0-9]+ passed' "$out"; then echo "::error title=${{ matrix.project }}::pytest passed nothing"; exit 1; fi
+          scripts/ci_local.sh "python:${{ matrix.project }}"
 
   repo-tests:
     name: repo tests (tests/ and keys)
     runs-on: ubuntu-latest
-    env:
-      REQUIRE_ARTICLES: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.8.22"
-      - name: Root tests (need the contracts package) and scripts/test_keys.py
+      - name: Root tests and scripts/test_keys.py (scripts/ci_local.sh)
         run: |
           set -euo pipefail
-          out="$(mktemp)"
-          uv run --no-project --with pytest==8.3.5 --with pyyaml --with ./packages/contracts pytest -q -rs tests scripts/test_keys.py 2>&1 | tee "$out"
-          if grep -qE '[0-9]+ (skipped|xfailed|xpassed)' "$out"; then echo "::error::pytest skipped (or xfail) tests: they must run"; exit 1; fi
-          if ! grep -qE '[0-9]+ passed' "$out"; then echo "::error::pytest passed nothing"; exit 1; fi
+          scripts/ci_local.sh repo-tests
 
   web:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-        working-directory: apps/web
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Enable pnpm via corepack
+      - name: install, lint, vitest, build, typecheck, bundle test (scripts/ci_local.sh)
         run: |
           set -euo pipefail
-          corepack enable
-          pnpm --version
-      - name: Install
-        run: |
-          set -euo pipefail
-          pnpm install --frozen-lockfile
-      - name: Lint
-        run: |
-          set -euo pipefail
-          pnpm lint
-      - name: Unit tests (vitest)
-        run: |
-          set -euo pipefail
-          pnpm test
-      - name: Build
-        run: |
-          set -euo pipefail
-          pnpm build
-      - name: Typecheck
-        run: |
-          set -euo pipefail
-          pnpm typecheck
-      - name: Bundle test
-        run: |
-          set -euo pipefail
-          pnpm test:bundle
+          scripts/ci_local.sh web
 
   gitleaks:
     runs-on: ubuntu-latest
@@ -145,34 +71,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Scan history and tree
+      - name: Scan history and tree (scripts/ci_local.sh, pinned gitleaks 8.28.0)
         run: |
           set -euo pipefail
-          curl -sSfL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz
-          echo "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb  gitleaks.tar.gz" | sha256sum -c -
-          tar -xzf gitleaks.tar.gz gitleaks
-          ./gitleaks detect --source . --redact --verbose --exit-code 1
+          scripts/ci_local.sh gitleaks
 
   contracts-sync:
     name: contracts sync
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-        working-directory: packages/contracts
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.8.22"
-      - name: Regenerate fixtures and TypeScript, then require no diff
+      - name: Regenerate fixtures and TypeScript, then require no diff (scripts/ci_local.sh)
         run: |
           set -euo pipefail
-          uv sync --frozen
-          uv run --frozen python scripts/build_fixtures.py
-          uv run --frozen python scripts/gen_ts.py
-          git diff --exit-code -- . || { echo "Generated contract files are stale: run build_fixtures.py and gen_ts.py and commit the result"; exit 1; }
-          if [ -n "$(git status --porcelain -- .)" ]; then git status --short -- .; echo "Untracked generated files"; exit 1; fi
+          scripts/ci_local.sh contracts-sync
 
   import-guard:
     name: import guard
@@ -182,11 +97,10 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.8.22"
-      - name: No commit or ops client import in agent tool modules
+      - name: No commit or ops client import in agent tool modules (scripts/ci_local.sh)
         run: |
           set -euo pipefail
-          uv run --no-project --with pytest==8.3.5 pytest -q scripts/test_import_guard.py
-          python3 scripts/check_import_guard.py
+          scripts/ci_local.sh import-guard
 
   descriptors:
     name: descriptors
@@ -195,32 +109,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # the check needs the merge base with origin/main
-      - name: Every module, class and function in every tracked .py/.ts/.tsx file has the six D-015 labels (tests and spikes need the module descriptor only)
+      - name: Every module, class and function in changed .py/.ts/.tsx files has the six D-015 labels (scripts/ci_local.sh)
+        env:
+          # Pull request: base origin/main. Push to main: the previous commit (a merge commit's first parent, so the whole PR).
+          CI_DESCRIPTORS_BASE: ${{ github.event_name == 'pull_request' && 'origin/main' || 'HEAD^' }}
         run: |
           set -euo pipefail
-          # Changed files only (D-015). On a pull request the base is origin/main; on a push to main it is the previous
-          # commit (a merge commit's first parent, so the whole PR). Full-repo check below.
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            python3 scripts/check_descriptors.py --base origin/main
-          else
-            python3 scripts/check_descriptors.py --base HEAD^
-          fi
-          # Full repo is at 0 gaps (backfill), so keep it strict: any gap anywhere fails the job.
-          python3 scripts/check_descriptors.py --all
+          scripts/ci_local.sh descriptors
 
   compose:
     name: compose config
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate both stack forms
+      - name: Validate both stack forms and the static topology (scripts/ci_local.sh)
         run: |
           set -euo pipefail
-          docker compose --env-file .env.example config -q
-          docker compose --env-file .env.example -f compose.yaml config -q
-          # Static topology proof (core and knowledge off the edge network, env scoping, grace period); reads .env.
-          cp .env.example .env
-          python3 infra/tests/check_topology.py
+          scripts/ci_local.sh compose
 
   pg-tests:
     name: pg tests
@@ -231,14 +136,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.8.22"
-      - name: Postgres-backed tests (pytest -m pg) for core, knowledge and agent
+      - name: Postgres-backed tests and deploy backup and restore (scripts/ci_local.sh)
         run: |
           set -euo pipefail
-          # Starts the Compose pgvector Postgres with dummy random passwords (generated inside the script, no secrets),
-          # builds the schemas with the migrate jobs, then runs each service's `pg` tests. No provider is called
-          # (fixture vectors). Fails if a pg test fails, errors, or is skipped. See scripts/pg_tests.sh.
-          scripts/pg_tests.sh
-      - name: Deploy backup and restore against a real Postgres (add-a-table, corrupt and wrong-release cases)
-        run: |
-          set -euo pipefail
-          scripts/deploy/restore_pg_test.sh
+          scripts/ci_local.sh pg-tests

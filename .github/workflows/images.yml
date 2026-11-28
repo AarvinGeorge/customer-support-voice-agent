@@ -1,0 +1,120 @@
+# What: build once (D-072). After `ci` passes on a push to main, build agent, core, knowledge and web from that exact commit,
+#   label them, push them to GHCR by commit sha, read every digest back and upload images-<sha>.json, the only digests a
+#   release may name (.github/workflows/release.yml).
+# Use when: GitHub runs it on `workflow_run` (ci completed on main); by hand (workflow_dispatch with a sha) only to rebuild a
+#   commit whose ci run on main is green but has no images (for example a run that was replaced in the queue).
+# Inputs: the commit the green ci run tested (workflow_run head_sha, or the dispatch sha, re-checked: on main and ci green).
+#   Repository variables LANGSMITH_PROJECT and LANGSMITH_PROJECT_URL (public build arguments of the web image, required).
+# Output: ghcr.io/aarvingeorge/customer-support-voice-agent/<image>:<sha> and the artifact images-<sha> (90 days).
+# Side effects: pushes four images to GHCR with this run's GITHUB_TOKEN (packages: write, contents: read, actions: read).
+# Role: the publish stage after the gate. ci.yml stays gate-only (D-068: every ci job only calls scripts/ci_local.sh, no `if`);
+#   bake reads compose.yaml's build sections, so CI builds exactly what local Compose builds; the migrate, seed and ingest jobs
+#   share these four images (scripts/deploy/compose.release.yaml).
+name: images
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit on main with a green ci run to build images for (40-character sha)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.event.workflow_run.head_sha || inputs.sha }}
+  cancel-in-progress: false
+
+jobs:
+  images:
+    name: images (build once, push to GHCR)
+    # Only a ci run that passed, for a push to main (never a pull request's code with a write token).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      actions: read   # the dispatch path re-checks the ci run
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha || inputs.sha }}   # the tested commit; GITHUB_SHA is main's tip on workflow_run
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+      - name: The commit is on main and its ci run on main is green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full 40-character commit sha, got $SHA"; exit 1; }
+          git fetch -q origin main
+          git merge-base --is-ancestor "$SHA" origin/main || { echo "::error::$SHA is not on main"; exit 1; }
+          [ "$(git rev-parse HEAD)" = "$SHA" ] || { echo "::error::checkout is not $SHA"; exit 1; }
+          run_id="$(gh run list --workflow ci.yml --branch main --event push --commit "$SHA" --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          [ -n "$run_id" ] || { echo "::error::no green ci run on main for $SHA"; exit 1; }
+          echo "building $SHA, gated by ci run $run_id"
+      - name: Require the web image's public build arguments (an empty drawer link must never reach a release)
+        env:
+          LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT }}
+          LANGSMITH_PROJECT_URL: ${{ vars.LANGSMITH_PROJECT_URL }}
+        run: |
+          set -euo pipefail
+          # Baked into the web image at build time (apps/web/Dockerfile); only a new build can change them (DEPLOY.md section 0).
+          problem=""
+          [ -n "${LANGSMITH_PROJECT:-}" ] || problem="$problem repository variable LANGSMITH_PROJECT is empty;"
+          case "${LANGSMITH_PROJECT_URL:-}" in https://?*) ;; *) problem="$problem repository variable LANGSMITH_PROJECT_URL is empty or not https://;" ;; esac
+          if [ -n "$problem" ]; then echo "::error title=web build arguments::$problem set them (gh variable set ...) and re-run: a release image would ship an empty trace link"; exit 1; fi
+          echo "web build arguments set"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
+      - name: Log in to GHCR with this run's token (expires with the job)
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build agent, core, knowledge and web once with OCI labels and push
+        env:
+          LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT }}          # public build args of the web image (no secret)
+          LANGSMITH_PROJECT_URL: ${{ vars.LANGSMITH_PROJECT_URL }}
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
+          sets=()
+          for pair in agent:agent_a core:core knowledge:knowledge web:web; do
+            img="${pair%%:*}"; target="${pair##*:}"
+            sets+=(--set "$target.tags=$repo/$img:$SHA" --set "$target.labels.org.opencontainers.image.title=$img")
+          done
+          docker buildx bake -f compose.yaml "${sets[@]}" \
+            --set "*.labels.org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --set "*.labels.org.opencontainers.image.revision=$SHA" \
+            --push --metadata-file "$RUNNER_TEMP/bake-meta.json" agent_a core knowledge web
+          python3 scripts/deploy/release_manifest.py images --bake-metadata "$RUNNER_TEMP/bake-meta.json" --revision "$SHA" \
+            --repo "$repo" --name "$SHA" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --out "images-$SHA.json"
+          cat "images-$SHA.json"
+      - name: Read back every pushed digest from GHCR (labels included)
+        run: |
+          set -euo pipefail
+          for ref in $(python3 -c 'import json,sys; [print(v["ref"]) for v in json.load(open(sys.argv[1]))["images"].values()]' "images-$SHA.json"); do
+            docker buildx imagetools inspect "$ref" --format '{{json .Image}}' > "$RUNNER_TEMP/img.json"
+            python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d=d.get("linux/amd64", d); l=d["config"]["Labels"]; assert l["org.opencontainers.image.revision"]==sys.argv[2], l; print(sys.argv[3], "revision", l["org.opencontainers.image.revision"], "source", l["org.opencontainers.image.source"])' "$RUNNER_TEMP/img.json" "$SHA" "$ref"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ env.SHA }}
+          path: images-${{ env.SHA }}.json
+          if-no-files-found: error
+          retention-days: 90

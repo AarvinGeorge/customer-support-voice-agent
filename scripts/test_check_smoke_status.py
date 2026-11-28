@@ -251,7 +251,7 @@ def _smoke_repo(tmp: Path) -> tuple[Path, dict[str, str], Path]:
     Output: (repo, env, calls log). Side effects: files and git in tmp. Role: fixture (no docker, no model call)."""
     repo = tmp / "repo"
     (repo / "scripts" / "lib").mkdir(parents=True)
-    for rel in ("scripts/live_smoke.sh", "scripts/lib/commit_status.sh"):
+    for rel in ("scripts/live_smoke.sh", "scripts/lib/commit_status.sh", "scripts/lib/compose_owner.sh"):
         (repo / rel).write_text((ROOT / rel).read_text())
     (repo / "scripts" / "migrate.sh").write_text("#!/bin/sh\nexit 0\n")
     for f in ("live_smoke.sh", "migrate.sh"):
@@ -277,6 +277,7 @@ def _smoke_repo(tmp: Path) -> tuple[Path, dict[str, str], Path]:
     calls = tmp / "calls.log"
     env = {k: v for k, v in os.environ.items() if k not in ("COMMIT_STATUS_NO_POST", "SMOKE_OUT", "KEEP_STACK")}
     env.update(PATH=f"{bin_}:{env.get('PATH', '')}", RUN_REAL="1", CALLS=str(calls), SMOKE_OUT=str(tmp / "out"),
+               COMPOSE_OWNER_DIR=str(tmp / "owners"),
                SMOKE_CODE="0", SMOKE_DESC="PASS 5/5 cases, 19 calls, cap 25, 4 searches")
     return repo, env, calls
 

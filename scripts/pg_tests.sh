@@ -5,7 +5,9 @@
 #         (default 55432), PG_SERVICES (default "core knowledge agent"; any subset). Uses NO real keys: it writes a temporary
 #         env file of random dummy secrets, and the tests embed with fixture vectors (zero provider calls).
 # Output: pytest results per service; exit code is non-zero if any suite fails, errors, or skips a test (a skipped DB
-#         test is a green run that tested nothing). The stack and its volume are removed on exit (`down -v`).
+#         test is a green run that tested nothing); exit 2 when the project already exists (it is someone else's stack).
+#         The stack and its volume are removed on exit (`down -v`), only through compose_teardown: never a project
+#         this run did not create (scripts/lib/compose_owner.sh).
 # Side effects: builds and starts postgres plus the migrate jobs; one loopback port.
 # Role: the only automated check of Postgres-only behaviour (array casts, grants, unique indexes, HNSW scan).
 set -euo pipefail
@@ -38,7 +40,10 @@ open(out, "w").write("".join(f"{k}={v}\n" for k, v in vals.items()))
 PY
 chmod 600 "$envfile"
 dc() { docker compose --env-file "$envfile" -f compose.yaml -f infra/compose.pgtest.yaml "$@"; }
-cleanup() { dc down -v --remove-orphans >/dev/null 2>&1 || true; rm -rf "$tmp"; }
+# shellcheck source=lib/compose_owner.sh
+source scripts/lib/compose_owner.sh
+compose_claim "$COMPOSE_PROJECT_NAME" || { rm -rf "$tmp"; echo "pg_tests: refusing project $COMPOSE_PROJECT_NAME (see above); nothing started or removed" >&2; exit 2; }
+cleanup() { compose_teardown "$COMPOSE_PROJECT_NAME" dc down -v --remove-orphans || true; rm -rf "$tmp"; }
 trap cleanup EXIT
 dc up -d --wait postgres
 dc run --rm migrate_agent   # depends on migrate_knowledge and migrate_core, so all three schemas are built

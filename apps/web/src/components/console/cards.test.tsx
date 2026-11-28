@@ -46,6 +46,19 @@ afterEach(() => {
 });
 
 /**
+ * What: builds a doc 07 s1.3 error Response.
+ * Use when: the stubbed fetch refuses a turn before any stream opens.
+ * Inputs: status, class, code, message, retry_after_s.
+ * Output: a Response.
+ * Side effects: none.
+ * Role: test helper.
+ */
+function errorResponse(status: number, cls: string, code: string, message: string, retryAfter?: number): Response {
+  const error = { class: cls, code, message, retryable: true, changed: false, retry_after_s: retryAfter ?? null, fault_injected: false, trace_id: null, details: {} };
+  return new Response(JSON.stringify({ error }), { status, headers: { "content-type": "application/json" } });
+}
+
+/**
  * What: a fresh store with the events applied.
  * Use when: rendering the console with replayed data.
  * Inputs: events.
@@ -209,6 +222,41 @@ describe("verification card", () => {
     expect(Object.keys(req).sort()).toEqual(["client_turn_id", "verification"]);
     expect(req.verification).toEqual({ no_pin: true });
     await waitFor(() => expect(screen.queryByRole("region", { name: "Verify your account" })).toBeNull());
+  });
+
+  // Review rereview-pr78-r1 N-1: the card closes only when the no_pin turn completed on the
+  // server. A turn that never ran (429, 503, network failure) keeps the card and shows the error.
+  const failures: [string, () => Promise<Response>, (store: ReturnType<typeof createTurnStore>) => void][] = [
+    [
+      "429",
+      async () => errorResponse(429, "rate_limited", "SESSION_TURNS", "Too many messages for now.", 30),
+      (store) => expect(store.getState().limit?.status).toBe(429),
+    ],
+    [
+      "503",
+      async () => errorResponse(503, "admission_rejected", "AGENT_BUSY", "Support is briefly unavailable."),
+      (store) => expect(store.getState().limit?.status).toBe(503),
+    ],
+    [
+      "a network failure",
+      async () => {
+        throw new TypeError("Failed to fetch");
+      },
+      (store) => expect(store.getState().thread.some((i) => i.kind === "error")).toBe(true),
+    ],
+  ];
+  it.each(failures)("I don't have my PIN keeps the card open and shows the error when the turn fails with %s", async (_name, answer, shown) => {
+    const store = storeWith(c1);
+    const fetchMock = vi.fn(answer);
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ConsoleShell sessionId={SID} store={store} />);
+    fireEvent.click(screen.getByRole("button", { name: "I don't have my PIN" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(store.getState().connection.phase).toBe("idle"));
+    await act(async () => {});
+    shown(store);
+    expect(store.getState().conversation.awaitingVerification).not.toBeNull();
+    expect(screen.getByRole("region", { name: "Verify your account" })).toBeTruthy();
   });
 
   const results: [VerificationResultEvent["status"], Partial<VerificationResultEvent>, string][] = [

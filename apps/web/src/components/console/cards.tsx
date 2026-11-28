@@ -182,12 +182,14 @@ function useSinglePress() {
  *   keep the Account ID outside the card so a retry card shows it again (never the PIN);
  *   `pinRef` lets the shell focus the PIN of a retry card; `onSubmit` sends
  *   TurnRequest.verification and resolves when the turn settles; `onNoPin` sends the explicit
- *   "I don't have my PIN" input (D-070: no ticket, the "How to reach support" line, no model call).
+ *   "I don't have my PIN" input (D-070: no ticket, the "How to reach support" line, no model call);
+ *   `verifyAs` is the display-only hinted name (D-076): the heading reads "Verify as <name>".
  */
 export interface VerificationCardProps {
   request: VerificationRequiredEvent | null;
   state: "form" | "locked";
   disabled: boolean;
+  verifyAs?: string | null;
   account: string;
   onAccountChange: (value: string) => void;
   pinRef: RefObject<HTMLInputElement | null>;
@@ -206,7 +208,7 @@ export interface VerificationCardProps {
  *   only, 4 at most, autocomplete "one-time-code" so password managers do not offer to save it
  *   (M2); only its length is kept in state.
  */
-export function VerificationCard({ request, state, disabled, account, onAccountChange, pinRef, onSubmit, onNoPin }: VerificationCardProps) {
+export function VerificationCard({ request, state, disabled, verifyAs = null, account, onAccountChange, pinRef, onSubmit, onNoPin }: VerificationCardProps) {
   const headingId = useId();
   const accountId = useId();
   const pinId = useId();
@@ -255,7 +257,7 @@ export function VerificationCard({ request, state, disabled, account, onAccountC
     <section aria-labelledby={headingId} className={cn(CARD, "max-w-[28.75rem] gap-3.5")}>
       <h3 id={headingId} className="inline-flex items-center gap-2 text-heading text-ink">
         <Lock aria-hidden className="size-4 shrink-0" />
-        Verify your account
+        {verifyAs !== null ? `Verify as ${verifyAs}` : "Verify your account"}
       </h3>
       {state === "locked" ? (
         <p className="text-body-sm text-muted">Verification is locked for this conversation.</p>

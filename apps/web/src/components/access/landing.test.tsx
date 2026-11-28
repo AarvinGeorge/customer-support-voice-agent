@@ -5,7 +5,8 @@
  * Inputs: a fake fetch that follows doc 07 s2.2 shapes; MOCK_PERSONAS fixtures.
  * Output: vitest results.
  * Side effects: stubs global fetch and next/navigation per test.
- * Role: CS-E-04.S1.T1 acceptance tests (right code, 401, 429 countdown, Start, copy).
+ * Role: CS-E-04.S1.T1 acceptance tests (right code, 401, 429 countdown, copy) and the two
+ *   journeys of D-076 (row Start and the top Start a conversation open new tabs).
  */
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -46,12 +47,12 @@ function errorResponse(status: number, cls: string, code: string, message: strin
 /**
  * What: a fake agent for the four landing routes, with an optional 429 for /api/access.
  * Use when: each test installs it as global fetch.
- * Inputs: { accessRateLimitedFor?, sessionsRateLimitedFor?: seconds }.
+ * Inputs: { accessRateLimitedFor?: seconds }.
  * Output: { fetch mock, calls list }.
  * Side effects: none outside the returned objects.
  * Role: test double for the lane B endpoints (CS-E-04.S1.T3) not yet built.
  */
-function fakeAgent(opts: { accessRateLimitedFor?: number; sessionsRateLimitedFor?: number } = {}) {
+function fakeAgent(opts: { accessRateLimitedFor?: number } = {}) {
   let authed = false;
   const calls: { method: string; path: string; body: unknown }[] = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -74,9 +75,6 @@ function fakeAgent(opts: { accessRateLimitedFor?: number; sessionsRateLimitedFor
       return new Response(JSON.stringify(MOCK_PERSONAS), { status: 200 });
     }
     if (method === "POST" && path === "/api/sessions") {
-      if (opts.sessionsRateLimitedFor !== undefined) {
-        return errorResponse(429, "rate_limited", "IP_SESSIONS", "Too many new sessions.", opts.sessionsRateLimitedFor);
-      }
       return new Response(JSON.stringify({ session_id: "0193a7c2-0000-7000-8000-000000000001", created_at: "2026-11-27T12:00:00Z" }), {
         status: 201,
       });
@@ -174,7 +172,7 @@ describe("Landing", () => {
     expect((screen.getByRole("button", { name: /continue/i }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("Start creates a session, then opens the console with it", async () => {
+  it("each row's Start opens /console in a new tab with a display-only hint and creates no session here", async () => {
     const { fetchMock, calls } = fakeAgent();
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
@@ -183,12 +181,41 @@ describe("Landing", () => {
     await user.click(screen.getByRole("button", { name: /continue/i }));
     await screen.findByRole("heading", { name: "Choose who you are" });
 
+    for (const p of MOCK_PERSONAS) {
+      const row = screen.getByRole("listitem", { name: new RegExp(p.name) });
+      const start = within(row).getByRole("link", { name: `Start as ${p.name} (opens in a new tab)` });
+      expect(start.getAttribute("href")).toBe(`/console?as=${encodeURIComponent(p.account_id)}`);
+      expect(start.getAttribute("target")).toBe("_blank");
+      expect(start.getAttribute("rel")).toContain("noopener");
+      // Review PR #81 M-4: a visible new-tab cue (icon) next to the words.
+      expect(start.querySelector('[data-icon="new-tab"]')).not.toBeNull();
+    }
+    // The table stays a reference sheet: account ID, PIN, plan and Try this are all still there.
     const dana = screen.getByRole("listitem", { name: /Dana Okafor/ });
-    await user.click(within(dana).getByRole("button", { name: /start/i }));
+    expect(within(dana).getByText(MOCK_PERSONAS.find((p) => p.name === "Dana Okafor")!.account_id)).toBeTruthy();
+    await user.click(within(dana).getByRole("link", { name: "Start as Dana Okafor (opens in a new tab)" }));
+    expect(push).not.toHaveBeenCalled();
+    expect(calls.some((c) => c.path === "/api/sessions")).toBe(false);
+  });
 
-    await waitFor(() => expect(push).toHaveBeenCalledWith("/console?session=0193a7c2-0000-7000-8000-000000000001"));
-    const post = calls.find((c) => c.path === "/api/sessions");
-    expect(post).toEqual({ method: "POST", path: "/api/sessions", body: {} });
+  it("one Start a conversation button at the top opens /console in a new tab with no hint", async () => {
+    const { fetchMock } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Landing />);
+    await user.type(await screen.findByLabelText("Access code"), MOCK_ACCESS_CODE);
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+    await screen.findByRole("heading", { name: "Choose who you are" });
+
+    const top = screen.getAllByRole("link", { name: "Start a conversation (opens in a new tab)" });
+    expect(top).toHaveLength(1);
+    expect(top[0]!.getAttribute("href")).toBe("/console");
+    expect(top[0]!.getAttribute("target")).toBe("_blank");
+    expect(top[0]!.getAttribute("rel")).toContain("noopener");
+    expect(top[0]!.querySelector('[data-icon="new-tab"]')).not.toBeNull();
+    // It sits above the persona table.
+    const table = screen.getAllByRole("listitem")[0]!;
+    expect(top[0]!.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("the copy button copies that persona's PIN", async () => {
@@ -221,44 +248,6 @@ describe("Landing", () => {
     render(<Landing />);
     const again = await screen.findByRole("heading", { name: "Choose who you are" });
     expect(document.activeElement).not.toBe(again);
-  });
-
-  it("two Start clicks in one batch create one session", async () => {
-    const { fetchMock, calls } = fakeAgent();
-    vi.stubGlobal("fetch", fetchMock);
-    const user = userEvent.setup();
-    render(<Landing />);
-    await user.type(await screen.findByLabelText("Access code"), MOCK_ACCESS_CODE);
-    await user.click(screen.getByRole("button", { name: /continue/i }));
-    await screen.findByRole("heading", { name: "Choose who you are" });
-
-    const start = within(screen.getByRole("listitem", { name: /Sam Rivera/ })).getByRole("button", { name: /start/i });
-    act(() => {
-      start.click();
-      start.click();
-    });
-    await waitFor(() => expect(push).toHaveBeenCalledTimes(1));
-    expect(calls.filter((c) => c.path === "/api/sessions")).toHaveLength(1);
-  });
-
-  it("clears the Start rate-limit message when its countdown ends", async () => {
-    const { fetchMock } = fakeAgent({ sessionsRateLimitedFor: 2 });
-    vi.stubGlobal("fetch", fetchMock);
-    const user = userEvent.setup();
-    render(<Landing />);
-    await user.type(await screen.findByLabelText("Access code"), MOCK_ACCESS_CODE);
-    await user.click(screen.getByRole("button", { name: /continue/i }));
-    await screen.findByRole("heading", { name: "Choose who you are" });
-
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    fireEvent.click(within(screen.getByRole("listitem", { name: /Dana Okafor/ })).getByRole("button", { name: /start/i }));
-    expect(await screen.findByText(/Too many new sessions\. Try again in 2 s/)).toBeTruthy();
-    expect(push).not.toHaveBeenCalled();
-    await act(async () => {}); // let the countdown's interval subscribe before the clock moves (the text now shows before its effect runs)
-    await act(async () => {
-      vi.advanceTimersByTime(2000);
-    });
-    expect(screen.queryByText(/Too many new sessions/)).toBeNull();
   });
 
   it("shows long waits in minutes", async () => {
