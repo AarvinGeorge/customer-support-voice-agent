@@ -254,8 +254,8 @@ def test_g16_turn2_accepts_a_card_pointer_answer_but_not_a_ticket_or_a_bare_answ
     assert "turn.2" in failing(grade("G-16", tick))  # a ticket call is still forbidden
 
 
-def g22_run(first: str = "weak", second: str = "pass", cited: str = "import-export-retention#exporting-content", **over: Any) -> CaseRun:
-    """What: a run that satisfies G-22 (a weak but answered refund turn, then an unrelated export question answered). Use when: a
+def g22_run(first: str = "weak", second: str = "pass", cited: str = "sso-login-troubleshooting#error-codes/e-sso-401", **over: Any) -> CaseRun:
+    """What: a run that satisfies G-22 (a weak but answered refund turn, then an unrelated SSO error question answered). Use when: a
     test mutates one thing. Inputs: Gate 1 verdicts of turn 1 and turn 2, the chunk turn 2 cites, make_run overrides. Output: CaseRun. Side effects: none.
     Role: the happy baseline for D-089's moved-on side."""
     refund, export = ["refund-policy#how-refunds-work"], [cited]
@@ -263,7 +263,7 @@ def g22_run(first: str = "weak", second: str = "pass", cited: str = "import-expo
          turn(1, "text", [*step("search_kb"), gate(first, "clarify" if first == "weak" else "answer", refund), GROUND],
               text="Refunds reach your card in 5 to 10 business days.", citations=refund),
          turn(2, "text", [*step("search_kb"), gate(second, "answer" if second == "pass" else "escalate", export), GROUND],
-              text="Open Settings, then Export.", citations=export)]
+              text="E-SSO-401 means the identity provider rejected the login.", citations=export)]
     return make_run("G-22", t, **over)
 
 
