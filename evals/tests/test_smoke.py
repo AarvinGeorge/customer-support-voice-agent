@@ -361,3 +361,22 @@ def test_smoke_aborts_at_the_cap_with_exit_3(capsys: pytest.CaptureFixture[str])
     out = capsys.readouterr().out
     assert "ABORTED: cap 15 exceeded: 20 real model calls after S1 verify, commit, policy follow-up turn 1" in out
     assert len(w.requests) == 2  # no third turn, no later case
+
+
+ANY_TURN = {"id": "G-T", "turns": [{"kind": "text", "text": "q", "expect": {"end_reason_any": ["clarify", "answered"]}}]}
+
+
+@pytest.mark.parametrize("end", ["clarify", "answered"])
+def test_end_reason_any_allows_each_listed_end_and_a_listed_clarify(end: str) -> None:
+    """What: CS-E-02.F13: a turn that expects end_reason_any [clarify, answered] (the S4 clarifying turn under D-066)
+    passes stop and clarify for either end. Use when: pytest. Inputs: end. Output: pass/fail. Side effects: none.
+    Role: the smoke reads the same per-turn expectation the golden graders read."""
+    t = answered(parts=[*model_step(), *gate_step("grounding_gate", "pass", "answer")], end_reason=end)
+    assert failing(smoke.live_checks(ANY_TURN, [t], frozenset())) == []
+
+
+def test_end_reason_any_still_fails_an_end_outside_the_list() -> None:
+    """What: an end outside end_reason_any fails stop. Use when: pytest. Inputs: none. Output: pass/fail.
+    Side effects: none. Role: positive control for the test above."""
+    t = answered(parts=[*model_step(), *gate_step("grounding_gate", "pass", "answer")], end_reason="escalated")
+    assert "live.stop.0" in failing(smoke.live_checks(ANY_TURN, [t], frozenset()))
