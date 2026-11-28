@@ -599,3 +599,29 @@ cases:
       citations: {must_cite_any: ["refund-policy#how-refunds-work", "refund-policy#did-my-refund-go-through-and-when-will-i-see-it"]}
       path_probes: [weak_retrieval_answered]
       forbidden: [policy_invented, pin_echoed, unneeded_ticket]
+
+  - id: G-22
+    title: S1 follow-up, the customer moves on after a weak but answered turn and is not escalated
+    scenario: S1
+    split: train
+    persona: Natasha Romanoff
+    mode: chat
+    source: "D-089 (the weak streak is a Gate 1 fact; the open question closes when the customer moves on); D-066; build-log/reports/review-pr95.md I-1; import-export-retention#exporting-content"
+    notes: "Turn 1 is G-21's question, which scores just under tau_high (weak or pass by the model's query), so the case records through path_probes weak_retrieval_answered whether turn 1 really left the question open (weak_streak 1, turn_context open_question: weak_search): a run where Gate 1 passed shows D-089 was not exercised. Turn 2 is an unrelated question that the docs answer (import-export-retention#exporting-content, tier all). D-089 expects the model to judge that the customer moved on and to search for the new subject, which passes Gate 1 and closes the open question: turn 2 ends answered with a citation, no ticket, no escalation. Failure shape (PR #95 review I-1, hypothesis): the model re-searches the old refund question, it scores weak again, and code escalates and drops the new question. Variant not built: if turn 2 were also weak, D-089 escalates to a ticket (its stated trade-off, the safe direction). Split: train, because the case came from the PR #95 review."
+    turns:
+      - {kind: verification, credentials: persona}
+      - {kind: text, text: "How long does a refund take to show up on my card?", expect: {end_reason: answered, grounding: {min_claims: 1}, cites_any: ["refund-policy#how-refunds-work", "refund-policy#did-my-refund-go-through-and-when-will-i-see-it"]}}
+      - {kind: text, text: "Thanks. Separate question: how do I export everything in my workspace?", expect: {end_reason: answered, grounding: {min_claims: 1}, cites_any: ["import-export-retention#exporting-content"]}}
+    expected:
+      outcome: [answer]
+      end_reason: answered
+      final_state: {committed_refunds: 0, tickets: {count: 0}}
+      escalation_reason: null
+      gate: {retrieval_verdict_any_of: [pass], decision: answer}
+      tool_trajectory:
+        required: [search_kb]
+        allowed: [search_kb, get_account_summary, list_charges, list_tickets]
+        forbidden: [create_ticket, prepare_refund, request_verification]
+      citations: {must_cite_any: ["import-export-retention#exporting-content"]}
+      path_probes: [weak_retrieval_answered]
+      forbidden: [policy_invented, pin_echoed, unneeded_ticket]

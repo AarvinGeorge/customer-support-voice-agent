@@ -252,3 +252,33 @@ def test_g16_turn2_accepts_a_card_pointer_answer_but_not_a_ticket_or_a_bare_answ
     assert "turn.2" in failing(grade("G-16", g16_with_turn2("clarify", "Please use the verification card above.")))  # other end
     tick = g16_with_turn2("answered", "Please use the verification card above.", step("create_ticket"))
     assert "turn.2" in failing(grade("G-16", tick))  # a ticket call is still forbidden
+
+
+def g22_run(first: str = "weak", second: str = "pass", cited: str = "import-export-retention#exporting-content", **over: Any) -> CaseRun:
+    """What: a run that satisfies G-22 (a weak but answered refund turn, then an unrelated export question answered). Use when: a
+    test mutates one thing. Inputs: Gate 1 verdicts of turn 1 and turn 2, the chunk turn 2 cites, make_run overrides. Output: CaseRun. Side effects: none.
+    Role: the happy baseline for D-089's moved-on side."""
+    refund, export = ["refund-policy#how-refunds-work"], [cited]
+    t = [turn(0, "verification", [], end_reason="verified"),
+         turn(1, "text", [*step("search_kb"), gate(first, "clarify" if first == "weak" else "answer", refund), GROUND],
+              text="Refunds reach your card in 5 to 10 business days.", citations=refund),
+         turn(2, "text", [*step("search_kb"), gate(second, "answer" if second == "pass" else "escalate", export), GROUND],
+              text="Open Settings, then Export.", citations=export)]
+    return make_run("G-22", t, **over)
+
+
+def test_g22_d089_moved_on_passes_and_each_mutation_fails_its_own_check() -> None:
+    g = grade("G-22", g22_run())
+    assert g.verdict == "pass", [(c.name, c.detail) for c in g.checks if c.status != "pass"]
+    assert probe(g, "weak_retrieval_answered") is True
+    assert probe(grade("G-22", g22_run("pass")), "weak_retrieval_answered") is False  # turn 1 passed Gate 1: D-089 not exercised
+    ticket = {"id": "t", "queue": "technical", "category": "not_in_docs", "stage": "open", "priority": "P4", "origin": "code"}
+    assert {"final_state.tickets", "forbidden:unneeded_ticket"} <= set(failing(grade("G-22", g22_run(tickets=[ticket]))))  # a ticket
+    run = g22_run(second="weak")
+    run.turns[2].events[-1]["end_reason"] = "escalated"
+    bad = failing(grade("G-22", run))
+    assert {"turn.2", "gate"} <= set(bad)  # the old question re-searched, weak, escalated: the new question was dropped
+    run = g22_run()
+    run.turns[2].events[-1]["end_reason"] = "clarify"
+    assert "turn.2" in failing(grade("G-22", run))  # a second clarifying question instead of the answer
+    assert "turn.2" in failing(grade("G-22", g22_run(cited="refund-policy#how-refunds-work")))  # answered the old subject, not the new one
