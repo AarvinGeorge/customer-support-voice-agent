@@ -227,9 +227,9 @@ def test_a_different_account_in_a_verified_session_is_409_whatever_the_pin(stack
     assert wrong.json()["error"]["code"] == right.json()["error"]["code"] == "IDENTITY_CONFLICT"
     assert s.claims(sid).json() == first
     with psycopg.connect(s.owner_url, autocommit=True) as c:
-        n = c.execute("SELECT count(*) FROM verify_attempts WHERE session_id = %s AND claimed_account_id = %s",
-                      (sid, s.w.b)).fetchone()[0]
-    assert n == 0  # not a PIN oracle for the other account, and no failure toward its lock
+        row = c.execute("SELECT count(*) FROM verify_attempts WHERE session_id = %s AND claimed_account_id = %s",
+                        (sid, s.w.b)).fetchone()
+    assert row is not None and row[0] == 0  # not a PIN oracle for the other account, and no failure toward its lock
 
 
 def test_wrong_pin_in_a_verified_session_does_not_lock_the_session(stack):

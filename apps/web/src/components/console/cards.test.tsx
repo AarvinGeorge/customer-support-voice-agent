@@ -267,7 +267,7 @@ describe("verification card", () => {
     ],
     ["failed", { attempts_left: 2 }, "That account ID and PIN didn't match. 2 attempts left."],
     ["locked", {}, "For your security, verification is locked for this conversation. See How to reach support in our help center for what to do next."],
-    ["conflict", {}, "This conversation is already verified as someone else. Please start a new conversation to verify as another person."],
+    ["conflict", {}, "To help a different account, please start a new conversation."],
     ["unavailable", {}, "We couldn't reach our account system, so you aren't verified yet. Please try again in a moment."],
   ];
   it.each(results)("verification.result %s renders its customer-safe line", (status, fields, text) => {

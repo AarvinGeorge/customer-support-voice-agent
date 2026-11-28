@@ -28,7 +28,7 @@ def offer_card(stream: TurnStream, control: TurnControl, verified: bool) -> bool
     control.awaiting_verification. Role: D-074 floor (never doubles a card, never shown to a verified session)."""
     if not control.first_message or verified or stream.completed:
         return False
-    if any(e.type == "verification.required" for e in stream.events):
+    if any(getattr(e, "type", None) == "verification.required" for e in stream.events):
         return False
     if control.verify_attempts_left <= 0 or (control.requester_refusal or {}).get("verify_locked"):
         return False  # verification is locked: a card that cannot work is never offered (D-070 reach-support line)
