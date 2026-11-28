@@ -1,10 +1,13 @@
 """What: hybrid search: query normalization, embedding with a budget, vector and keyword legs, RRF fusion, response.
 Use when: POST /v1/search runs (doc 07 s4.1). Inputs: a SearchRequest, a database handle, an embedder.
 Output: a contract SearchResponse, or an ApiError 503 RETRIEVAL_UNAVAILABLE when no leg can answer.
-Side effects: one embedding call (a second only for a fast failure with at least 2.5 s left), two SQL queries in parallel.
+Side effects: one embedding call (a second only for a fast failure with at least 2.5 s left), two SQL queries in parallel,
+and with a customer message a third short read (the message's cosine on the returned chunks).
 Role: whole request hard-capped at 3.0 s (asyncio.wait_for in run_search): embedding 1.2 s (no retry after a timeout), SQL statement timeout 1 s per leg. When
 the embedding is unavailable the keyword leg still runs, so a degraded answer exists inside the budget (worst case about
-2.2 s). Gate 1 (verdicts, thresholds) lives in knowledge.gate; this module only feeds it."""
+2.2 s). Gate 1 (verdicts, thresholds) lives in knowledge.gate; this module only feeds it. Gate 1 input (CS-E-02.F11): each
+returned chunk's cosine is the higher of the query's and the customer message's (one embedding request for both), so the
+verdict does not hang on how the model worded its search; ranking stays on the query."""
 from __future__ import annotations
 
 import asyncio
@@ -71,11 +74,12 @@ def _transient(exc: Exception) -> bool:
     return status is None or status == 429 or status >= 500
 
 
-async def _embed(embedder, text: str, t0: float, trace_id: str) -> list[float] | None:
-    """What: embed the query within the budget. Use when: search starts. Inputs: embedder (or None), text, start time.
-    Output: vector, or None when unavailable. Side effects: up to two embedding calls. Role: 1.2 s timeout; retry once
-    only if at least 2.5 s of the 3.0 s budget remain when the first attempt fails (a timeout never leaves that much)
-    and the failure is transient. Warnings carry trace_id."""
+async def _embed(embedder, texts: list[str], t0: float, trace_id: str) -> list[list[float]] | None:
+    """What: embed the query (and the customer message, when given) within the budget. Use when: search starts.
+    Inputs: embedder (or None), one or two texts, start time. Output: one vector per text, or None when unavailable.
+    Side effects: up to two embedding requests (each carries every text). Role: 1.2 s timeout; retry once only if at
+    least 2.5 s of the 3.0 s budget remain when the first attempt fails (a timeout never leaves that much) and the
+    failure is transient. One text uses aembed_one, more use aembed_many (one request). Warnings carry trace_id."""
     if embedder is None:
         return None
     for attempt in (1, 2):
@@ -84,7 +88,9 @@ async def _embed(embedder, text: str, t0: float, trace_id: str) -> list[float] |
         if timeout <= 0:
             return None
         try:
-            return await asyncio.wait_for(embedder.aembed_one(text, timeout), timeout + 0.05)
+            if len(texts) == 1:
+                return [await asyncio.wait_for(embedder.aembed_one(texts[0], timeout), timeout + 0.05)]
+            return list(await asyncio.wait_for(embedder.aembed_many(texts, timeout), timeout + 0.05))
         except (EmbeddingError, asyncio.TimeoutError) as exc:
             log.warning("trace_id=%s embedding attempt %d failed: %s", trace_id, attempt, type(exc).__name__)
             if attempt == 2 or not _transient(exc) or TOTAL_BUDGET_S - (time.monotonic() - t0) < RETRY_MIN_REMAINING_S:
@@ -103,11 +109,16 @@ async def _leg(fn, trace_id: str, *args) -> list[dict] | None:
         return None
 
 
-def _chunk(r: dict, vector_ok: bool, codes: list[str], tau_low: float = DEFAULT_TAU_LOW) -> Chunk:
+def _chunk(r: dict, vector_ok: bool, codes: list[str], tau_low: float = DEFAULT_TAU_LOW,
+           message_cosine: float | None = None) -> Chunk:
     """What: build a contract Chunk from a fused row. Use when: assembling the response. Inputs: row, whether the
-    vector leg worked, detected codes, tau_low. Output: Chunk with scores, relevant flag and a citation carrying source_url.
-    Side effects: none. Role: relevant = cosine at or above tau_low (the calibration's, else the 0.30 default), or it carries a detected code."""
+    vector leg worked, detected codes, tau_low, the customer message's cosine on this chunk (or None).
+    Output: Chunk with scores, relevant flag and a citation carrying source_url. Side effects: none.
+    Role: cosine = the Gate 1 score of the chunk: the query's cosine, or the message's when higher (CS-E-02.F11);
+    relevant = that cosine at or above tau_low (the calibration's, else the 0.30 default), or it carries a detected code."""
     cosine = float(r["cosine"]) if vector_ok else 0.0
+    if vector_ok and message_cosine is not None:
+        cosine = max(cosine, message_cosine)
     carries = bool(set(codes) & set(r["error_codes"]))
     path = r["section_path"]
     return Chunk(
@@ -172,8 +183,12 @@ async def _run_search(req: SearchRequest, db, embedder, request_id: str, trace_i
         if c not in text:
             text = f"{text} {c}"
     tiers = ["all"] if req.tier == "public" else ["all", req.tier]
+    message = normalize_query(req.customer_message, vocab).text if req.customer_message else ""
+    texts = [text, message] if message and message != text else [text]
 
-    qvec = await _embed(embedder, text, t0, trace_id)
+    vecs = await _embed(embedder, texts, t0, trace_id)
+    qvec = vecs[0] if vecs else None
+    mvec = vecs[1] if vecs and len(vecs) > 1 else None
     t_embed = time.monotonic()
     vec_task = _leg(db.vector_leg, trace_id, qvec, tiers, LEG_LIMIT) if qvec is not None else None
     kw_task = _leg(db.keyword_leg, trace_id, text, codes, tiers, qvec, LEG_LIMIT)
@@ -186,8 +201,16 @@ async def _run_search(req: SearchRequest, db, embedder, request_id: str, trace_i
                        retryable=True, retry_after_s=2)
 
     fused = fuse(vec_rows or [], kw_rows or [], req.k, codes)
+    msg_cos: dict[str, float] = {}
+    if mvec is not None and vec_rows is not None and fused:
+        got = await _leg(db.cosines, trace_id, mvec, [r["chunk_id"] for r in fused])  # best effort: None on failure
+        msg_cos = got if isinstance(got, dict) else {}
     tau_low = calibration.tau_low if calibration else DEFAULT_TAU_LOW
-    chunks = [_chunk(r, vec_rows is not None, codes, tau_low) for r in fused]
+    chunks = [_chunk(r, vec_rows is not None, codes, tau_low, msg_cos.get(r["chunk_id"])) for r in fused]
+    if mvec is not None:
+        log.info("trace_id=%s gate1 input query_top=%s message_top=%s", trace_id,
+                 max((float(r["cosine"]) for r in fused), default=None) if vec_rows is not None else None,
+                 max(msg_cos.values(), default=None))
     carried = {c for ch in chunks for c in ch.error_codes}
     code_match = bool(set(codes) & carried)
     vector_failed = qvec is None or vec_rows is None

@@ -577,6 +577,7 @@ export interface SearchRequest {
   verified: boolean;
   k?: number;
   calibration?: boolean;
+  customer_message?: string | null;
 }
 
 /** What: body of a 200 from POST /v1/search. Use when: search_kb wrapper, drawer. */

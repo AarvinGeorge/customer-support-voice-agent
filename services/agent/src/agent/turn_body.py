@@ -227,6 +227,7 @@ class TurnRunner:
             text = voice_user_text(inp.body)
         else:
             text = inp.text or ""
+        control.customer_text = text if result.model_text is None and text else None  # CS-E-02.F11, Gate 1 input
         merged_msg = getattr(inp, "merged_transcript", None)  # step 12: wrapped, untrusted client chatter
         messages = ([HumanMessage(content=merged_msg)] if merged_msg else []) + [build_turn_message(text, ctx)]
         agent_input = {**memory.update, **result.state, "messages": messages}

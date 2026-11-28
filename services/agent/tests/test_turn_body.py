@@ -6,6 +6,7 @@ Inputs: none. Output: pass/fail. Side effects: none.
 Role: Done when of CS-E-03.S7.T5 through the real ingress entry."""
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -56,7 +57,8 @@ class World:
     Side effects: none. Role: wiring."""
 
     def __init__(self, *, replies: list[AIMessage] | None = None,
-                 core_transport: httpx.AsyncBaseTransport | None = None, stub_verified: bool = True) -> None:
+                 core_transport: httpx.AsyncBaseTransport | None = None, stub_verified: bool = True,
+                 knowledge_seen: list[httpx.Request] | None = None) -> None:
         """What: build it. Use when: tests. Inputs: see class. Output: none. Side effects: none. Role: constructor."""
         Recording.bound, Recording.seen = [], []
         self.stub = create_app()
@@ -64,8 +66,15 @@ class World:
             self.stub.state.verified.add(SID)
         http = httpx.AsyncClient(transport=core_transport or httpx.ASGITransport(app=self.stub))
         self.core = CoreAgentClient("http://core:8000", "agent-tok", http=http)
+        def kn(r: httpx.Request) -> httpx.Response:
+            """What: knowledge is down; records the request. Use when: transport. Inputs: request. Output: 503.
+            Side effects: appends to knowledge_seen. Role: fake."""
+            if knowledge_seen is not None:
+                knowledge_seen.append(r)
+            return httpx.Response(503)
+
         knowledge = KnowledgeClient("http://knowledge:8000", "kn-tok",
-                                    http=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(503))))
+                                    http=httpx.AsyncClient(transport=httpx.MockTransport(kn)))
         self.agent = build_agent(Recording(messages=iter(replies or [AIMessage("Here you go.")]), disable_streaming=True),
                                  fallback_model=Recording(messages=iter([])), checkpointer=InMemorySaver(),
                                  tools=build_tools(self.core, knowledge))
@@ -140,3 +149,18 @@ async def test_interrupted_thread_is_repaired_before_the_model_runs() -> None:
     repaired = [m for m in first_prompt if isinstance(m, ToolMessage) and m.tool_call_id == "c9"]
     assert len(repaired) == 1 and '"status":"not_run"' in repaired[0].content
     assert [e.kind for e in events if e.type == "step.started"][:2] == ["repair", "memory"]
+
+
+async def test_search_kb_sends_the_customers_own_text_for_gate_1() -> None:
+    # CS-E-02.F11: Gate 1 scores the code-held customer message as well as the model's query (rca-gate1-weak-band.md).
+    seen: list[httpx.Request] = []
+    search = AIMessage("", tool_calls=[{"name": "search_kb", "args": {"query": "Android app for Quillstack"}, "id": "c1",
+                                        "type": "tool_call"}])
+    w = World(replies=[search, AIMessage("Here you go.")], knowledge_seen=seen)
+    await w.seed({"messages": [HumanMessage("earlier"), AIMessage("ok", id="a0")], **OWNER_STATE})
+    await w.turn("Do you have an Android app for Quillstack?")
+    assert seen, "search_kb never reached knowledge"
+    for r in seen:
+        body = json.loads(r.content)
+        assert body["query"] == "Android app for Quillstack"
+        assert body["customer_message"] == "Do you have an Android app for Quillstack?"
