@@ -79,7 +79,7 @@ async def test_the_thread_never_says_no_ticket_while_a_ticket_exists_when_the_re
 async def test_g07_replay_the_verified_continuation_line_reports_the_ticket_it_opened(
         monkeypatch: pytest.MonkeyPatch) -> None:
     """G-07 as it ran on 2026-11-28 02:17 UTC (LangSmith cs-f11-proof, run 01a21ff1-c81e): a weak first turn
-    clarifies, the card verifies Sam, the continued request escalates not_in_docs and code opens the ticket."""
+    clarifies, the card verifies Steve, the continued request escalates not_in_docs and code opens the ticket."""
     snapshots: list[list[str]] = []
     real_finish = Escalator.finish
 
