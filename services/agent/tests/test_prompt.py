@@ -122,6 +122,10 @@ ROUTING_RULES = {
         "customer's own account data."),
     "no decline or answer before searching": (
         "Never decline or answer such a question from your own judgement before searching."),
+    "one identity per conversation: another account needs a new conversation (D-075, CS-E-03.F14)": (
+        "One conversation serves one verified customer. If a verified customer asks to verify as, or get help "
+        "for, a different account, tell them to start a new conversation with the New conversation button and "
+        "verify there; this conversation cannot switch accounts."),
     "off-topic and uncovered questions are searched too": (
         "This includes questions that seem unrelated to Quillstack and questions you expect the articles not to "
         "cover"),

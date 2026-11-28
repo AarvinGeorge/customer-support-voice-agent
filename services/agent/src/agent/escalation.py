@@ -22,7 +22,7 @@ Role: runs in the 3 s reserve: the loop stops 3 s before the deadline (TurnRunne
 | Off-topic | (decline_off_topic) | nobody |
 | Not in our docs / weak twice | not_in_docs | this module |
 | Retrieval failure | retrieval_unavailable | this module |
-| Grounding fails twice / commitment draft | grounding_failed / needs_commitment | this module |
+| Grounding fails twice (a commitment draft counts as a fail, D-085) | grounding_failed | this module |
 | Customer asks for a human / commitment | customer_asked_human / needs_commitment | model create_ticket |
 | Action needs approval | (submitted) | core, inside submit |
 | Same tool fails twice; commit or submit failure | tool_failure | this module |
@@ -78,7 +78,7 @@ NO_REQUESTER_LINE = ("I can't open a ticket without verifying who you are, and I
 
 REASON_CATEGORY: dict[str, str] = {
     "not_in_docs": "other", "retrieval_unavailable": "other", "grounding_failed": "other",
-    "needs_commitment": "commitment", "limit_reached": "other", "deadline": "other", "model_unavailable": "other",
+    "limit_reached": "other", "deadline": "other", "model_unavailable": "other",
     "tool_failure": "other",
 }
 TOOL_CATEGORY: dict[str, str] = {"prepare_refund": "refund", "list_charges": "billing"}
@@ -86,7 +86,6 @@ REASON_SUMMARY: dict[str, str] = {
     "not_in_docs": "The help articles do not cover the customer's question.",
     "retrieval_unavailable": "Help article search was unavailable, so the agent did not answer.",
     "grounding_failed": "The agent's draft answer failed the policy check twice.",
-    "needs_commitment": "The customer needs a commitment the agent cannot make.",
     "tool_failure": "A system the agent depends on failed twice in one message.",
     "limit_reached": "The agent reached its step limit for one message.",
     "deadline": "The agent did not finish within the time limit for one message.",

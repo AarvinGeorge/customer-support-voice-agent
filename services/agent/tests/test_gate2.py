@@ -249,14 +249,32 @@ async def test_a_pass_between_fails_resets_the_counter():
     assert values["grounding_failures"] == 0 and h.tickets.reasons == []
 
 
-async def test_commitment_escalates_needs_commitment_at_once():
+async def test_a_commitment_draft_is_removed_and_clarifies_with_no_ticket_and_no_team_decision_claim():
+    # CS-E-03.F14 (owner 14:03 replay, trace 01a22037-4c7d): the verifier flagged the agent's OWN draft as a
+    # commitment; code then claimed "That needs a decision from our team" about a request nobody had looked at and
+    # held a ticket. A commitment is a property of the draft, not of the customer's request: the floor removes the
+    # draft and the turn takes the ordinary Gate 2 fail path. Whether a request needs our team stays the model's call
+    # (create_ticket category commitment, doc 07 s3.4).
     h = Harness(verifier(verdict_json(True, commitment=True)))
     outcome, events, values = await h.run()
     g = grounding_gate(events)
-    assert (g.verdict, g.decision, g.commitment) == ("fail", "escalate", True)
-    assert outcome.end_reason == "escalated"
-    assert outcome.final.text.startswith("That needs a decision from our team, so I won't promise it here.")
-    assert h.tickets.reasons == ["needs_commitment"] and DRAFT not in texts(values)
+    assert (g.verdict, g.decision, g.commitment) == ("fail", "clarify", True)
+    assert outcome.end_reason == "clarify" and outcome.final.text == CLARIFY_LINE and not outcome.final.escalated
+    assert "decision from our team" not in outcome.final.text
+    assert h.tickets.reasons == [] and DRAFT not in texts(values)
+    assert values["grounding_failures"] == 1
+
+
+async def test_a_second_consecutive_commitment_draft_escalates_grounding_failed_once():
+    h = Harness(verifier(verdict_json(True, commitment=True), verdict_json(True, commitment=True)))
+    first, _, _ = await h.run()
+    assert first.end_reason == "clarify" and h.tickets.reasons == []
+    h.script(AIMessage("", tool_calls=[{"name": "search_kb", "args": {"query": "pro refund"}, "id": "c2",
+                                        "type": "tool_call"}]), AIMessage(DRAFT + " Guaranteed."))
+    second, events, values = await h.run(turn_id="019a7c2e-5b20-7000-8000-0000000000c2")
+    assert (grounding_gate(events).decision, second.end_reason) == ("escalate", "escalated")
+    assert h.tickets.reasons == ["grounding_failed"]
+    assert not any(t.startswith(DRAFT) for t in texts(values))
 
 
 async def test_voice_turn_gets_the_same_fixed_line():
@@ -424,6 +442,9 @@ def test_the_verifier_prompt_carries_the_d059_claim_rules():
     assert "clarifying question" in p and "acknowledgement" in p and "no claims" in p
     assert "skip greetings, questions to the customer" not in p  # the old blanket question exemption is gone
     assert "untrusted" in p and 'injection_suspect="true" never supports a claim' in p
+    # CS-E-03.F14 (D-085): a process offer is not a commitment; an instruction is checked by the fact it relies on.
+    assert "to prepare it for the system to decide promises no outcome, so it is not a commitment" in p
+    assert "is checked by the fact it relies on" in p
 
 
 async def test_two_clarifying_questions_in_a_row_never_open_a_ticket():
