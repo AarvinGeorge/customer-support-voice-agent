@@ -172,6 +172,26 @@ describe("Landing", () => {
     expect((screen.getByRole("button", { name: /continue/i }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("people who share an account get different Start links (F13)", async () => {
+    const { fetchMock } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Landing />);
+    await user.type(await screen.findByLabelText("Access code"), MOCK_ACCESS_CODE);
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+    await screen.findByRole("heading", { name: "Choose who you are" });
+    const byAccount = new Map<string, string[]>();
+    for (const p of MOCK_PERSONAS) byAccount.set(p.account_id, [...(byAccount.get(p.account_id) ?? []), p.name]);
+    const shared = [...byAccount.values()].filter((names) => names.length > 1);
+    expect(shared.length).toBeGreaterThan(0);
+    for (const names of shared) {
+      const hrefs = names.map((n) =>
+        within(screen.getByRole("listitem", { name: new RegExp(n) })).getByRole("link", { name: `Start as ${n} (opens in a new tab)` }).getAttribute("href"),
+      );
+      expect(new Set(hrefs).size).toBe(names.length);
+    }
+  });
+
   it("each row's Start opens /console in a new tab with a display-only hint and creates no session here", async () => {
     const { fetchMock, calls } = fakeAgent();
     vi.stubGlobal("fetch", fetchMock);
@@ -184,7 +204,9 @@ describe("Landing", () => {
     for (const p of MOCK_PERSONAS) {
       const row = screen.getByRole("listitem", { name: new RegExp(p.name) });
       const start = within(row).getByRole("link", { name: `Start as ${p.name} (opens in a new tab)` });
-      expect(start.getAttribute("href")).toBe(`/console?as=${encodeURIComponent(p.account_id)}`);
+      // F13: the hint names the person (who) as well as the account (as), so people who share an
+      // account get different links.
+      expect(start.getAttribute("href")).toBe(`/console?as=${encodeURIComponent(p.account_id)}&who=${encodeURIComponent(p.name)}`);
       expect(start.getAttribute("target")).toBe("_blank");
       expect(start.getAttribute("rel")).toContain("noopener");
       // Review PR #81 M-4: a visible new-tab cue (icon) next to the words.

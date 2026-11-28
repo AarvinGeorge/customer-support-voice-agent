@@ -148,7 +148,8 @@ export function VoiceLine({ state, label, caption, error }: { state: string; lab
  *   to the server; the PIN is still required and core verify alone establishes identity.
  */
 export interface VerifyHint {
-  name: string;
+  /** The person, or null when the link named only the account (the card then has no name). */
+  name: string | null;
   accountId: string;
 }
 

@@ -63,28 +63,80 @@ export async function getMe(deps: ApiDeps = {}): Promise<Me> {
 }
 
 /**
+ * What: the display-only start hint carried in a console URL: the account id (`as`) and the person
+ *   (`who`, the persona's display name, unique per persona in the seeds).
+ * Use when: building a console URL from a landing row (PersonaList) or carrying it to a new session.
+ * Inputs: none (type).
+ * Output: none (type).
+ * Side effects: none.
+ * Role: F13 mechanism: an account id alone names a company, and people share accounts, so the hint
+ *   also carries the person. `who` is null for an account-only link. Never sent to the server.
+ */
+export interface PathHint {
+  as: string;
+  who: string | null;
+}
+
+/**
+ * What: appends the hint's query parameters (`as`, and `who` when present).
+ * Use when: consolePath and consoleStartPath.
+ * Inputs: the hint.
+ * Output: "as=<id>" or "as=<id>&who=<name>", URL-encoded.
+ * Side effects: none.
+ * Role: one place that fixes the hint query shape.
+ */
+function hintQuery(hint: PathHint): string {
+  const base = `as=${encodeURIComponent(hint.as)}`;
+  return hint.who === null || hint.who === "" ? base : `${base}&who=${encodeURIComponent(hint.who)}`;
+}
+
+/**
  * What: the console URL for a session, with the optional display-only hint (D-076).
  * Use when: navigating after createSession (the console's own start, New conversation).
- * Inputs: the session id; the hint (a persona's account id, or null).
- * Output: "/console?session=<id>", plus "&as=<account id>" when a hint is given (both URL-encoded).
+ * Inputs: the session id; the hint (account id and person) or null.
+ * Output: "/console?session=<id>", plus "&as=<account id>[&who=<name>]" when a hint is given.
  * Side effects: none.
  * Role: one place that fixes the console route shape. The hint only pre-fills the verification
  *   card; it is never sent to the server.
  */
-export function consolePath(sessionId: string, hint: string | null = null): string {
+export function consolePath(sessionId: string, hint: PathHint | null = null): string {
   const base = `/console?session=${encodeURIComponent(sessionId)}`;
-  return hint === null || hint === "" ? base : `${base}&as=${encodeURIComponent(hint)}`;
+  return hint === null || hint.as === "" ? base : `${base}&${hintQuery(hint)}`;
 }
 
 /**
  * What: the URL a landing Start link opens in a new tab: the console without a session (D-076).
  * Use when: the landing page's "Start a conversation" (no hint) and each persona row's Start
- *   (that persona's account id as the display-only hint).
- * Inputs: the hint (account id) or null.
- * Output: "/console" or "/console?as=<account id>".
+ *   (that persona's account id and name as the display-only hint).
+ * Inputs: the hint or null.
+ * Output: "/console" or "/console?as=<account id>&who=<name>".
  * Side effects: none.
  * Role: the console creates the fresh session itself, so every click is a new conversation.
  */
-export function consoleStartPath(hint: string | null = null): string {
-  return hint === null || hint === "" ? "/console" : `/console?as=${encodeURIComponent(hint)}`;
+export function consoleStartPath(hint: PathHint | null = null): string {
+  return hint === null || hint.as === "" ? "/console" : `/console?${hintQuery(hint)}`;
+}
+
+/**
+ * What: resolves a start hint against the persona list into what the card may show.
+ * Use when: ConsoleRoute has the persona list and the `as` and `who` URL parameters.
+ * Inputs: the personas, `as`, `who` (or null).
+ * Output: { name, accountId } with the person's name when `who` names a persona on that account;
+ *   name null when the account is known but the person is not named (account-only link or a name
+ *   that does not belong to it); null when no persona has that account.
+ * Side effects: none.
+ * Role: F13: the person is matched by (account, name), never by account alone, and an account
+ *   shared by several people is never guessed at.
+ */
+export function resolveStartHint(
+  personas: readonly { name: string; account_id: string }[],
+  as: string,
+  who: string | null,
+): { name: string | null; accountId: string } | null {
+  const onAccount = personas.filter((p) => p.account_id === as);
+  if (onAccount.length === 0) return null;
+  const person = who === null ? undefined : onAccount.find((p) => p.name === who);
+  if (person !== undefined) return { name: person.name, accountId: person.account_id };
+  // An account-only link names the person only when exactly one persona is on the account.
+  return { name: who === null && onAccount.length === 1 ? onAccount[0]!.name : null, accountId: as };
 }
