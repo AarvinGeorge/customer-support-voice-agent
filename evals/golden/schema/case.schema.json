@@ -38,6 +38,7 @@
       "properties": {
         "end_reason": {"$ref": "#/$defs/endReason"},
         "end_reason_any": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/endReason"}, "description": "the turn ends in any one of these (D-082: verification_requested or answered when the card is already on screen); use end_reason when there is one"},
+        "retrieval_verdict": {"enum": ["pass", "weak", "none"], "description": "the verdict of the last Gate 1 retrieval gate on this turn (D-089: a weak turn leaves the customer's question open, so a case that moves on afterwards must prove turn 1 was weak)"},
         "forbidden_tools": {"type": "array", "items": {"$ref": "#/$defs/tool"}, "uniqueItems": true},
         "cites_any": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/chunkId"}},
         "verification_card": {"enum": ["none", "account_lookup", "action", "ticket_status", "typed_pin_rejected", "retry"], "description": "the reason of the verification.required event this turn emitted; none means the turn emitted no card (D-074 offers account_lookup on the first message)"},
