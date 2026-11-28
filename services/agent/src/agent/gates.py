@@ -469,18 +469,19 @@ def _turns_ago(messages: list[BaseMessage], index: int) -> int:
 
 def session_state_text(values: dict[str, Any], messages: list[BaseMessage], control: TurnControl | None) -> str:
     """What: the code-held facts about the session itself, one sentence each: verified in this conversation, waiting
-    for the customer to verify (agent.sessions flag, or asked this turn), the secure card on screen (waiting and not
-    verified), the tickets opened in this conversation (agent.records.session_tickets).
+    for the customer to verify (agent.sessions flag, or asked this turn), the secure card on screen (waiting, or the
+    D-074 card offered, and not verified), the tickets opened in this conversation (agent.records.session_tickets).
     Use when: session_evidence (the session_state source). Inputs: state values, thread messages, control.
     Output: text. Side effects: none.
     Role: D-071 part 1 (RCA fix C): true statements about the session have a source."""
     verified = bool(values.get("verified"))
     awaiting = control is not None and (control.session_awaiting_verification or control.awaiting_verification)
+    card = awaiting or (control is not None and (control.session_card_offered or control.card_offered))  # D-074
     tickets = session_tickets(messages, identity_key(values))  # bound to the verification (N3)
     yes = {True: "yes", False: "no"}
     return (f"Verified in this conversation: {yes[verified]}. "
             f"Waiting for the customer to verify: {yes[bool(awaiting) and not verified]}. "
-            f"The secure verification card is on the customer's screen: {yes[bool(awaiting) and not verified]}. "
+            f"The secure verification card is on the customer's screen: {yes[bool(card) and not verified]}. "
             f"Tickets opened in this conversation: {', '.join(tickets) if tickets else 'none'}.")
 
 

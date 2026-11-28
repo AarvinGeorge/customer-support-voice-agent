@@ -63,6 +63,7 @@ def voice_verify_say() -> str:
 VOICE_VERIFICATION_LINES = {
     "router.VERIFY_SAY": VERIFY_SAY,
     "router.VERIFY_LINE": VERIFY_LINE,
+    "router.first_verify_say": f"{router_mod.FIRST_VERIFY_LEAD} {VERIFY_SAY}",  # D-074 first message
     "confirm.STEP_UP_LINE": confirm.STEP_UP_LINE,
     "confirm.VERIFY_LAPSED_LINE": confirm.VERIFY_LAPSED_LINE,
     "handler.VERIFY_EXPIRED_LINE": handler.VERIFY_EXPIRED_LINE,

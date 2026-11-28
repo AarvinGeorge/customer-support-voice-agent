@@ -104,7 +104,7 @@ describe("verificationNotice: one test per verification result (doc 07 s6.2, s6.
 
   it("conflict uses the doc 07 s6.3 sentence", () => {
     expect(verificationNotice(vr({ status: "conflict" })).text).toBe(
-      "This conversation is already verified as someone else. Please start a new conversation to verify as another person.",
+      "To help a different account, please start a new conversation.",
     );
   });
 

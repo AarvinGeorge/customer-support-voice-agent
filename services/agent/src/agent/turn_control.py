@@ -76,7 +76,9 @@ class TurnControl:
     RouterMiddleware and DeadlineAndFaultMiddleware.
     Inputs: session_id, turn_id, mode, deadline (a value of `clock`; None means no deadline),
     demo_fault (already gated by DEMO_FAULTS_ENABLED at ingress), events (the turn stream or None), clock
-    (default loop_clock). `ticket` is the one ticket opened this turn (model tool or escalation code), so a later
+    (default loop_clock). `first_message` is true on the session's first customer message (D-074: the router
+    greets on a verify route, agent.first_turn offers the card and sets `card_offered`, its own fact, never
+    `awaiting_verification`, review PR #82 I1, I2). `ticket` is the one ticket opened this turn (model tool or escalation code), so a later
     escalation in the same turn reuses it instead of opening a second one (CS-E-03.S4.T1).
     Output: the object. Side effects: none.
     Gate fields (retrieval, retrieval_chunks, scope_check, grounding, grounding_supported, citations, gate_message_id) are written by
@@ -108,6 +110,9 @@ class TurnControl:
     failures: dict[str, int] = field(default_factory=dict)
     awaiting_verification: bool = False
     session_awaiting_verification: bool = False  # agent.sessions flag at turn start (ingress), D-071 part 1
+    first_message: bool = False  # the session's first customer message (ingress: user_turns 0), D-074
+    session_card_offered: bool = False  # agent.sessions.card_offered_at set at turn start (the card is on screen)
+    card_offered: bool = False  # agent.first_turn offered the card this turn (written as card_offered_at)
     identity: str | None = None  # "user|account" this turn runs under (agent.gates.identity_key), review PR #71 N3
     verify_attempts_left: int = 3
     # Gate 1 (agent.gates, doc 07 s6.5): the last search's verdict facts, the relevant chunks the model saw (for

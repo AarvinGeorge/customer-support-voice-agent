@@ -106,7 +106,8 @@ export function verificationNotice(ev: VerificationResultEvent): VerificationNot
       return {
         status: ev.status,
         tone: "warning",
-        text: "This conversation is already verified as someone else. Please start a new conversation to verify as another person.",
+        // D-075: one identity per conversation; the header's New conversation button starts a fresh session.
+        text: "To help a different account, please start a new conversation.",
       };
     case "unavailable":
       return {

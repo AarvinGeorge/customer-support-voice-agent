@@ -9,6 +9,8 @@ Side effects: one core verify (0 retries), a MeContext load on success, verifica
 verification.required events, a verify step, agent.sessions.awaiting_verification cleared on success; D-070: on
 success a held escalation becomes a ticket for the verified person (one attempt) and the hold is cleared; a lockout
 clears the hold and opens nothing.
+D-075: a verified thread is never rebound to another person (core refuses with IDENTITY_CONFLICT; the agent also
+checks the returned claims against the thread's identity before it stores anything).
 Role: the PIN goes to core only; nothing here returns or logs it.
 """
 from __future__ import annotations
@@ -46,8 +48,8 @@ NO_PIN_PRESSED = "[customer pressed I don't have my PIN]"
 NO_PIN_LINE = ("Without your support PIN I can't verify you in this conversation, so I can't look at your account or "
                "open a ticket for you. The How to reach support section of our Support, response times and escalation "
                "article explains what to do next.")
-CONFLICT_LINE = ("This conversation is already verified as someone else. Please start a new conversation to verify "
-                 "as another person.")
+# D-075: one identity per conversation; the web's New conversation button starts a fresh, unverified session.
+CONFLICT_LINE = "To help a different account, please start a new conversation."
 UNAVAILABLE_LINE = "I couldn't check your details just now. Please try the card again in a moment."
 
 
@@ -70,6 +72,16 @@ def _retry_prompt(stream: TurnStream, text: str, attempts_left: int) -> None:
                 attempts_left=attempts_left, fields=["account_id", "pin"])
 
 
+def _conflict(stream: TurnStream, control: TurnControl, step: Step) -> StructuredResult:
+    """What: the D-075 reply to a second identity: verification.result conflict and the fixed CONFLICT_LINE; the thread,
+    its claims and agent.sessions are not touched. Use when: core answers IDENTITY_CONFLICT, or core verified someone
+    other than the person this thread is bound to. Inputs: stream, control, the verify step. Output: StructuredResult
+    (end_reason answered). Side effects: the step result and one event. Role: one identity per conversation."""
+    step.done("error", "Already verified as someone else")
+    stream.emit("verification.result", status="conflict")
+    return _fixed(stream, control, CONFLICT_LINE, "answered")
+
+
 async def _no_pin(control: TurnControl, flags: SessionFlags | None, escalator: Escalator | None) -> StructuredResult:
     """What: the card's "I don't have my PIN" press: no core call, no model call, no ticket; the hold is cleared and
     the card closes (awaiting_verification false); the fixed line points to "How to reach support".
@@ -78,6 +90,7 @@ async def _no_pin(control: TurnControl, flags: SessionFlags | None, escalator: E
     control.awaiting_verification = False
     if flags is not None:
         await flags.set_awaiting_verification(control.session_id, False)
+        await flags.set_card_offered(control.session_id, False)  # the card closes (D-074 fact, review PR #82)
     if escalator is not None:
         await escalator.hold(control, None)
     outcome = TurnOutcome.fixed(NO_PIN_LINE, end_reason="answered")
@@ -121,13 +134,13 @@ async def verify_card(stream: TurnStream, control: TurnControl, body: Any, core:
                 await escalator.hold(control, None)
             return _fixed(stream, control, LOCKED_LINE, "answered")
         if code == "IDENTITY_CONFLICT":
-            step.done("error", "Already verified as someone else")
-            stream.emit("verification.result", status="conflict")
-            return _fixed(stream, control, CONFLICT_LINE, "answered")
+            return _conflict(stream, control, step)
         step.done("timeout" if err.kind == "timeout" else "error", "Could not check your details")
         stream.emit("verification.result", status="unavailable", attempts_left=control.verify_attempts_left)
         _retry_prompt(stream, UNAVAILABLE_LINE, control.verify_attempts_left)
         return _fixed(stream, control, UNAVAILABLE_LINE, "verification_requested")
+    if control.identity is not None and identity_key({"verified": True, "claims_snapshot": claims}) != control.identity:
+        return _conflict(stream, control, step)  # D-075: the thread stays bound to its one identity
     person = VerifiedPerson(display_name=claims["display_name"], role=claims["role"], tier=claims["tier"],
                             contract_status=claims["contract_status"], account_id=claims["account_id"])
     step.done("ok", "Verified your details", detail=person.display_name)

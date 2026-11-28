@@ -215,6 +215,23 @@ def test_reverify_same_person_is_idempotent_and_a_second_identity_is_409(stack):
     s.clock.set(START)
 
 
+def test_a_different_account_in_a_verified_session_is_409_whatever_the_pin(stack):
+    """What: D-075 one identity per conversation: in a verified session a claim for another account is 409
+    IDENTITY_CONFLICT before any credential check, with a right or a wrong PIN, so the answer never says whether that
+    account's PIN matched, nothing is counted against that account and the claims stay. Use when: always.
+    Inputs: stack. Output: assertions. Side effects: committed rows. Role: D-075 (CS-E-03.S1.T9) in core."""
+    s, sid = stack, stack.new_session()
+    first = s.verify(sid, s.w.a, "4821").json()
+    wrong, right = s.verify(sid, s.w.b, "9999"), s.verify(sid, s.w.b, "1357")
+    assert (wrong.status_code, right.status_code) == (409, 409)
+    assert wrong.json()["error"]["code"] == right.json()["error"]["code"] == "IDENTITY_CONFLICT"
+    assert s.claims(sid).json() == first
+    with psycopg.connect(s.owner_url, autocommit=True) as c:
+        row = c.execute("SELECT count(*) FROM verify_attempts WHERE session_id = %s AND claimed_account_id = %s",
+                        (sid, s.w.b)).fetchone()
+    assert row is not None and row[0] == 0  # not a PIN oracle for the other account, and no failure toward its lock
+
+
 def test_wrong_pin_in_a_verified_session_does_not_lock_the_session(stack):
     """What: wrong PINs after a successful verify answer 401 but never set verify_locked or open a ticket, and the
     verified claims stay. Use when: always. Inputs: stack. Output: assertions. Side effects: committed rows.

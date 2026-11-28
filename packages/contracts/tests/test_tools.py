@@ -139,6 +139,8 @@ def test_prepare_refund_description_says_it_decides_and_returns_the_policy():
     Use when: CI. Inputs: none. Output: assertion. Side effects: none. Role: F8 (model declined without calling it)."""
     low = TOOL_DESCRIPTIONS["prepare_refund"].lower()
     assert "every refund request" in low and "eligib" in low and "policy" in low
+    # Review PR #80 I1 (mutant C1): the charge is identified first, then prepare_refund is called for it.
+    assert "call it for every refund request from a verified customer once you know the charge" in low
 
 
 def test_search_kb_description_says_search_first():

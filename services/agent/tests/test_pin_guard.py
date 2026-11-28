@@ -34,7 +34,7 @@ class Flags:
 
     def __init__(self, w: World) -> None:
         """What: keep the world. Use when: tests. Inputs: world. Output: none. Side effects: none. Role: fake."""
-        self.w, self.calls = w, []
+        self.w, self.calls, self.cards = w, [], []
 
     async def set_awaiting_verification(self, session_id: str, awaiting: bool,
                                         verified_user_id: str | None = None) -> None:
@@ -43,6 +43,13 @@ class Flags:
         self.calls.append((session_id, awaiting))
         s = self.w.turns.sessions[session_id]
         self.w.turns.sessions[session_id] = replace(s, awaiting_verification=awaiting)
+
+    async def set_card_offered(self, session_id: str, offered: bool) -> None:
+        """What: record and apply the D-074 card fact. Use when: the first-message offer. Inputs: id, flag.
+        Output: none. Side effects: row. Role: fake."""
+        self.cards.append((session_id, offered))
+        s = self.w.turns.sessions[session_id]
+        self.w.turns.sessions[session_id] = replace(s, card_offered=offered)
 
 
 def guarded(*replies: AIMessage) -> tuple[World, Flags]:
@@ -115,7 +122,8 @@ async def test_bare_pin_while_awaiting_is_refused() -> None:
 
 async def test_redacted_but_not_credential_looking_text_goes_to_the_model_redacted() -> None:
     w, flags = guarded(AIMessage(content="Let me check that invoice."))
-    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True)
+    # awaiting means an earlier turn asked for the card, so this is not the first message (no D-074 offer write)
+    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True, user_turns=1)
     evs = await chat(w, "invoice ending 0412")
     assert evs[-1].final.text != TYPED_PIN_LINE and flags.calls == []  # Gate 2 may rewrite the answer
     assert "invoice ending [PIN]" in model_text(w) and "0412" not in model_text(w)
@@ -132,6 +140,7 @@ async def test_verified_invoice_ending_is_kept() -> None:
 async def test_voice_question_and_transcript_are_redacted_before_the_model_and_storage() -> None:
     w, flags = guarded(AIMessage(content="Please use the card on screen."))
     w.vstore.voice["vs-1"] = VoiceSessionRow("vs-1", SID, w.voice.now(), w.voice.now())
+    w.turns.sessions[SID] = replace(w.turns.sessions[SID], user_turns=1)  # not the first message: no D-074 offer write
     said = "Q S one zero four two three, four eight two one"
     body = {"client_turn_id": str(uuid.uuid4()), "voice_session_id": "vs-1", "realtime_call_id": "call_1",
             "question": f"Customer gave {RAW}", "user_item_id": "item_u1", "user_transcript": said,
@@ -272,16 +281,27 @@ async def test_a_pin_split_over_two_messages_never_reaches_the_model(first: str,
 
 async def test_the_awaiting_flag_clears_when_the_topic_moves_on() -> None:
     w, flags = guarded(AIMessage(content="We have Starter, Pro and Enterprise."))
-    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True)
+    # awaiting means an earlier turn asked for the card, so this is not the first message (no D-074 offer write)
+    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True, user_turns=1)
     await chat(w, "what plans do you offer for a team of twelve?")
     assert flags.calls == [(SID, False)] and w.turns.sessions[SID].awaiting_verification is False
 
 
 async def test_a_short_ack_keeps_the_awaiting_flag() -> None:
     w, flags = guarded(AIMessage(content="Take your time."))
-    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True)
+    # awaiting means an earlier turn asked for the card, so this is not the first message (no D-074 offer write)
+    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True, user_turns=1)
     await chat(w, "ok one sec")
     assert flags.calls == [] and w.turns.sessions[SID].awaiting_verification is True
+
+
+async def test_a_charge_ending_after_the_offered_card_reaches_the_model() -> None:
+    # Review PR #82 I1: the first-message card offer must not make later 4-digit references PIN candidates.
+    w, flags = guarded(AIMessage(content="Hello! How can I help?"), AIMessage(content="Let me check that charge."))
+    await chat(w, "Hi there")
+    await chat(w, "I was charged twice, please refund the duplicate $96 charge ending 0412.")
+    assert "charge ending 0412" in model_text(w)
+    assert flags.cards == [(SID, True)] and (SID, True) not in flags.calls  # the offer is its own fact, not "awaiting"
 
 
 def test_log_formatter_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -59,6 +59,8 @@ def fixed_lines() -> dict[str, str]:
     Use when: the snapshot. Inputs: none. Output: {name: chat line}. Side effects: none. Role: the line inventory."""
     lines: dict[str, str] = {
         "router.verify": router.VERIFY_LINE, "router.verify_say": router.VERIFY_SAY,
+        "router.first_verify": f"{router.FIRST_VERIFY_LEAD} {router.VERIFY_LINE}",  # D-074
+        "router.first_verify_say": f"{router.FIRST_VERIFY_LEAD} {router.VERIFY_SAY}",
         "router.decline_off_topic": router.DECLINE_OFF_TOPIC_LINE,
         "ingress.cap": ingress.CAP_LINE, "ingress.deadline": ingress.DEADLINE_MESSAGE, "ingress.swept": ingress.SWEPT_MESSAGE,
         "escalation.model_unavailable": escalation.MODEL_UNAVAILABLE_LINE,
