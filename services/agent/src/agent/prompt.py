@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from contracts.trust import escape_untrusted, wrap_account_context
+from contracts.redact import ours_id
 from langchain_core.messages import HumanMessage
 
 SYSTEM_PROMPT = """You are the customer support agent for Quillstack, a team knowledge base and docs workspace that companies buy for their staff. You help people at those customer companies with questions about the product, their account, their charges and their tickets, in a text chat or through a voice assistant that relays their questions to you.
@@ -111,4 +112,4 @@ def build_turn_message(user_text: str, ctx: TurnContext) -> HumanMessage:
         snapshot = json.loads(json.dumps(ctx.context_snapshot, sort_keys=True))
         parts.append(_FRAME_TAG_RE.sub("&lt;", wrap_account_context(snapshot)))
     parts.append(f"<customer_message>\n{_escape_frame(user_text)}\n</customer_message>")
-    return HumanMessage(content="\n".join(parts))
+    return HumanMessage(content="\n".join(parts), id=ours_id("turn"))  # CS-E-02.F14: code composes this message
