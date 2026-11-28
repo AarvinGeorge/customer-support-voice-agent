@@ -1,6 +1,6 @@
 """What: builds the run report (raw counts) and writes it as a dated Markdown file and a JSON file.
 Use when: a run finished. Inputs: case grades, the Gate 1 result (or None), run metadata, the time.
-Output: a dict, Markdown text, two files under the output directory. Side effects: writes files.
+Output: a dict (with the decision paths each run took), Markdown text, two files under the output directory. Side effects: writes files.
 Role: the record of the golden pass rate; train and test are reported separately and counts are never rounded into a percentage."""
 from __future__ import annotations
 
@@ -38,9 +38,12 @@ def build_report(grades: list[CaseGrade], gate1: dict[str, Any] | None, meta: di
             "verdicts": _counts(verdicts),
             "by_split": by_split,
             "detail": [{"id": g.case_id, "split": g.split, "verdict": g.verdict,
-                        "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in g.checks]} for g in grades],
+                        "checks": [{"name": c.name, "status": c.status, "detail": c.detail,
+                                    **({"exercised": c.exercised} if c.exercised is not None else {})} for c in g.checks]} for g in grades],
         },
         "checks": {k: _counts(v) for k, v in sorted(checks.items())},
+        "paths": [{"case": g.case_id, "probe": c.name.removeprefix("path:"), "exercised": c.exercised, "detail": c.detail}
+                  for g in grades for c in g.checks if c.exercised is not None],
         "gate1": gate1,
     }
 
@@ -64,6 +67,15 @@ def render_markdown(r: dict[str, Any]) -> str:
     L += ["", "## Checks (raw counts across cases)", "", "| check | pass | fail | error |", "|---|---|---|---|"]
     for name, v in r["checks"].items():
         L.append(f"| {name} | {v['pass']} | {v['fail']} | {v['error']} |")
+    L += ["", "## Decision paths (did the run test the decision, or take the trivial path)", ""]
+    if not r.get("paths"):
+        L.append("No case in this run lists a path probe.")
+    else:
+        L += ["| case | probe | path | detail |", "|---|---|---|---|"]
+        for p in r["paths"]:
+            L.append(f"| {p['case']} | {p['probe']} | {'exercised' if p['exercised'] else 'NOT exercised'} | {p['detail']} |")
+        L.append("")
+        L.append("A pass with NOT exercised means the invariant held on the trivial path; it does not prove the decision.")
     L += ["", "## Gate 1 (retrieval verdict by label)", ""]
     g = r["gate1"]
     if g is None:

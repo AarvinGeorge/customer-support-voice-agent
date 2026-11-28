@@ -29,7 +29,7 @@ def test_parse_sse_handles_a_final_event_without_trailing_blank_line() -> None:
 
 def test_load_cases_validates_every_shipped_case() -> None:
     cs = cases.load_cases()
-    assert len(cs) == 15 and {c["split"] for c in cs} == {"train", "test"}
+    assert len(cs) == 21 and {c["split"] for c in cs} == {"train", "test"}
 
 
 def test_load_cases_rejects_a_case_that_breaks_the_schema(tmp_path) -> None:  # type: ignore[no-untyped-def]

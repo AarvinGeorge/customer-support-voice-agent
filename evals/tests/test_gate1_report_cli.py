@@ -154,8 +154,8 @@ def test_python_m_evals_run_grades_all_cases_against_the_fake_and_writes_a_repor
     files = sorted(p.name for p in tmp_path.iterdir())
     assert files == ["golden-2026-11-27-150000.json", "golden-2026-11-27-150000.md"]
     rep = json.loads((tmp_path / files[0]).read_text())
-    assert rep["cases"]["total"] == 15
-    assert rep["cases"]["verdicts"] == {"pass": 1, "fail": 0, "error": 14}  # only G-01 is scripted; the rest are error, never pass
+    assert rep["cases"]["total"] == 21
+    assert rep["cases"]["verdicts"] == {"pass": 1, "fail": 0, "error": 20}  # only G-01 is scripted; the rest are error, never pass
     assert rep["gate1"]["n"] == 25
     assert code == 1  # not every case passed
 
@@ -184,7 +184,7 @@ def test_agent_client_access_failure_is_exit_2(tmp_path: Path) -> None:
 
 
 def test_all_golden_cases_and_personas_still_load() -> None:
-    assert len(load_cases()) == 15 and "Priya Raman" in load_personas() and AgentClient and ACCESS_CODE
+    assert len(load_cases()) == 21 and "Priya Raman" in load_personas() and AgentClient and ACCESS_CODE
 
 
 def test_a_malformed_search_body_is_request_failed_and_does_not_lose_the_run() -> None:
@@ -229,3 +229,16 @@ def test_cli_reseeds_each_case_through_the_shared_guard(tmp_path: Path, monkeypa
     cli.main(["run", "--cases", "G-01,G-02", "--skip-gate1", "--out-dir", str(tmp_path)], env, **deps)
     assert checks == ["http://localhost:3095"]
     assert seen == [("http://localhost:3095", "postgresql://core")] * 2
+
+
+def test_report_prints_which_decision_path_each_run_took() -> None:
+    """Review PR #84 I3: a pass on the trivial path must be visible in the report, not silent."""
+    g = CaseGrade("G-19", "train", [Check("outcome", "pass"), Check("path:retry_after_rejected_prepare", "pass", "not exercised: no rejected prepare", exercised=False)])
+    g2 = CaseGrade("G-18", "train", [Check("path:answer_from_session_evidence", "pass", "exercised", exercised=True)])
+    r = report.build_report([g, g2], None, meta={}, now=dt.datetime(2026, 11, 27, tzinfo=dt.UTC))
+    assert r["paths"] == [{"case": "G-19", "probe": "retry_after_rejected_prepare", "exercised": False, "detail": "not exercised: no rejected prepare"},
+                          {"case": "G-18", "probe": "answer_from_session_evidence", "exercised": True, "detail": "exercised"}]
+    md = report.render_markdown(r)
+    assert "Decision paths" in md and "NOT exercised" in md and "G-19" in md
+    plain = report.build_report(GRADES, None, meta={}, now=dt.datetime(2026, 11, 27, tzinfo=dt.UTC))
+    assert plain["paths"] == [] and "Decision paths" in report.render_markdown(plain)

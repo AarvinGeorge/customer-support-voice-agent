@@ -329,7 +329,8 @@ def g_trajectory(ctx: Ctx) -> list[Check]:
 
 
 def g_turns(ctx: Ctx) -> list[Check]:
-    """What: per-turn expectations (end_reason, forbidden_tools, cites_any). Use when: a turn has a non-empty expect.
+    """What: per-turn expectations (end_reason, forbidden_tools, cites_any, says, verification_card, verification_result, grounding).
+    Use when: a turn has a non-empty expect.
     Inputs: ctx. Output: one check per such turn, named turn.N. Side effects: none. Role: step-by-step script checks."""
     out: list[Check] = []
     for i, spec in enumerate(ctx.case["turns"]):
@@ -365,6 +366,41 @@ def g_turns(ctx: Ctx) -> list[Check]:
                 bad.append("no final answer")
             elif not cited & {base_id(c) for c in exp["cites_any"]}:
                 bad.append(f"cited {sorted(cited)}, none of {exp['cites_any']}")
+        if "says" in exp:
+            if t.final is None:
+                err = True
+                bad.append("no final answer")
+            elif not any(p.lower() in t.final["text"].lower() for p in exp["says"]):
+                bad.append(f"final text has none of {exp['says']}")
+        if "verification_card" in exp:
+            reasons = [e["reason"] for e in t.events if e.get("type") == "verification.required"]
+            want = exp["verification_card"]
+            if want == "none" and reasons:
+                bad.append(f"verification card emitted {reasons}, expected none")
+            elif want != "none" and want not in reasons:
+                bad.append(f"verification card reasons {reasons}, expected {want}")
+        if "verification_result" in exp:
+            statuses = [e["status"] for e in t.events if e.get("type") == "verification.result"]
+            if exp["verification_result"] not in statuses:
+                bad.append(f"verification.result {statuses}, expected {exp['verification_result']}")
+        if "grounding" in exp:
+            ev = ctx.turn_events(t)
+            if ev is None:
+                err = True
+                bad.append("stored events missing")
+            else:
+                gates = [e for e in ev if e.get("type") == "gate" and e.get("gate") == "grounding"]
+                need = exp["grounding"]["min_claims"]
+                if not gates:
+                    bad.append("no Gate 2 event on this turn (a fixed line is not a checked claim)")
+                else:
+                    g = gates[-1]
+                    total, ok = g.get("claims_total") or 0, g.get("claims_supported") or 0
+                    if g["verdict"] != "pass" or total < need or ok != total:
+                        bad.append(f"Gate 2 verdict {g['verdict']}, {ok} of {total} claims supported, need a pass on at least {need}")
+                    src = exp["grounding"].get("from_source")
+                    if src and not any(c.get("supported") and c.get("source_id") == src for c in g.get("claims") or []):
+                        bad.append(f"no supported claim rests on source {src}")
         status = "fail" if any(not b.startswith(("no turn", "stored events", "no final")) for b in bad) else ("error" if err else "pass")
         out.append(Check(name, status, "; ".join(bad) or "ok"))
     return out
@@ -652,8 +688,58 @@ def _false_nothing(ctx: Ctx, ev: list[Event] | None, name: str, miss: str) -> Ch
     return Check(name, "fail" if bad else "pass", "; ".join(bad) or "wording matches core")
 
 
+def _step_status(events: list[Event]) -> list[tuple[str, str]]:
+    """What: (tool name, completed status) per tool step of one turn, in call order. Use when: path probes. Inputs: stored events
+    of one turn. Output: list. Side effects: none. Role: pairs step.started with its step.completed by step_id."""
+    done = {e["step_id"]: e.get("status") for e in events if e.get("type") == "step.completed"}
+    return [(e["name"], str(done.get(e["step_id"]))) for e in events if e.get("type") == "step.started" and e.get("kind") == "tool"]
+
+
+def _probe(name: str, ctx: Ctx) -> tuple[bool, str]:
+    """What: whether the run took the path that tests one decision. Use when: g_paths. Inputs: probe id, ctx. Output: (exercised,
+    detail). Side effects: none. Role: retry_after_rejected_prepare (D-079: a prepare that did not succeed, then a later prepare in
+    the same turn); answer_from_session_evidence (D-065: the last answered turn has a supported Gate 2 claim and ran no tool);
+    weak_retrieval_answered (D-066: a weak Gate 1 on a turn that ended answered)."""
+    turns = [(t, ctx.turn_events(t) or []) for t in ctx.run.turns]
+    if name == "retry_after_rejected_prepare":
+        for t, ev in turns:
+            st = [s for n, s in _step_status(ev) if n == "prepare_refund"]
+            if any(s != "ok" for s in st[:-1]) and st[-1] == "ok":
+                return True, f"exercised: turn {t.index} retried a prepare after a rejected one"
+        return False, "not exercised: no rejected prepare was retried, so a pass shows the invariant held but D-079 was not tested"
+    if name == "answer_from_session_evidence":
+        t, ev = next(((t, ev) for t, ev in reversed(turns) if t.final), (None, []))
+        if t is None:
+            return False, "not exercised: no final answer"
+        called = [n for n, _ in _step_status(ev)]
+        g2 = [e for e in ev if e.get("type") == "gate" and e.get("gate") == "grounding" and (e.get("claims_supported") or 0) >= 1]
+        if g2 and not called:
+            return True, f"exercised: turn {t.index} answered from earlier evidence with no tool call"
+        return False, f"not exercised: turn {t.index} called {called or 'no tools'} or had no supported claim, so D-065 was not tested"
+    for t, ev in turns:  # weak_retrieval_answered
+        if t.end_reason == "answered" and any(e.get("type") == "gate" and e.get("gate") == "retrieval" and e.get("verdict") == "weak" for e in ev):
+            return True, f"exercised: turn {t.index} had a weak Gate 1 and ended answered"
+    return False, "not exercised: Gate 1 was not weak on an answered turn, so D-066 was not tested"
+
+
+def g_paths(ctx: Ctx) -> list[Check]:
+    """What: one info check per path probe the case lists. Use when: the case has expected.path_probes. Inputs: ctx. Output: checks
+    named path:<probe>, always pass (or error when stored events are missing) with exercised set. Side effects: none.
+    Role: makes a pass on the trivial path visible in the report (review PR #84 I3); never a verdict."""
+    probes = ctx.exp.get("path_probes") or []
+    if not probes:
+        return []
+    if ctx.all_events() is None:
+        return [Check(f"path:{p}", "error", ctx.run.data_error or "stored turn_events missing") for p in probes]
+    out = []
+    for p in probes:
+        ok, detail = _probe(p, ctx)
+        out.append(Check(f"path:{p}", "pass", detail, exercised=ok))
+    return out
+
+
 GRADERS: list[Callable[[Ctx], list[Check]]] = [g_outcome, g_final_state, g_reasons, g_escalation, g_trajectory, g_turns, g_gate,
-                                               g_text, g_raw_ids, g_forbidden]
+                                               g_text, g_raw_ids, g_forbidden, g_paths]
 
 
 def grade_case(case: dict[str, Any], run: CaseRun, policy: PolicyConfig) -> CaseGrade:
