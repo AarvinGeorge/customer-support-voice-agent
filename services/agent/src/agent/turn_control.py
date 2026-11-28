@@ -114,6 +114,9 @@ class TurnControl:
     session_card_offered: bool = False  # agent.sessions.card_offered_at set at turn start (the card is on screen)
     card_offered: bool = False  # agent.first_turn offered the card this turn (written as card_offered_at)
     identity: str | None = None  # "user|account" this turn runs under (agent.gates.identity_key), review PR #71 N3
+    # CS-E-02.F11: the customer's own (PIN-redacted) text of this turn, set by agent.turn_body; search_kb sends it so
+    # Gate 1 scores it as well as the model's query. None when the turn text is a code line (structured input).
+    customer_text: str | None = None
     verify_attempts_left: int = 3
     # Gate 1 (agent.gates, doc 07 s6.5): the last search's verdict facts, the relevant chunks the model saw (for
     # citations), and a pending scope check (verdict none) that RouterMiddleware runs before the next model call.

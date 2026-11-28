@@ -250,6 +250,12 @@ class SmokeRow:
     calls: int = 0
 
     @property
+    def known_limitation(self) -> str | None:
+        """What: the case's D-083 tag, if any. Use when: rendering. Inputs: none. Output: decision id or None.
+        Side effects: none. Role: a tagged PASS is shown apart from plain passes (never counted as fixed)."""
+        return self.grade.known_limitation if self.grade else None
+
+    @property
     def verdict(self) -> str:
         """What: FAIL when a golden or live check failed, ERROR when one errored or the case did not grade, else PASS.
         Use when: rendering. Inputs: none. Output: str. Side effects: none. Role: verdict."""
@@ -274,7 +280,12 @@ def render_summary(rows: list[SmokeRow], ledger: list[tuple[str, int, dict[str, 
              f"stack {meta['project']} via Caddy 127.0.0.1:{meta['edge_port']}  models {meta.get('models', '?')}", ""]
     lines.append(f"{'case':<38}{'result':<8}{'calls':>6}  end reasons per turn")
     for r in rows:
-        lines.append(f"{r.label:<38}{r.verdict:<8}{r.calls:>6}  {' > '.join(r.ends) or '-'}")
+        shown = r.verdict + ("*" if r.known_limitation else "")
+        lines.append(f"{r.label:<38}{shown:<8}{r.calls:>6}  {' > '.join(r.ends) or '-'}")
+    tagged = [r for r in rows if r.known_limitation]
+    if tagged:
+        lines.append("known limitations (not counted as fixed): " + ", ".join(
+            f"{r.label.split(' ')[0]} {r.known_limitation} {r.verdict}" for r in tagged) + "  (* safe path held, D-083)")
     live = [c for r in rows for c in r.live]
 
     def tally(kind: str) -> str:
@@ -310,12 +321,16 @@ def status_description(rows: list[SmokeRow], ledger: list[tuple[str, int, dict[s
                        abort: str | None) -> str:
     """What: the one-line commit status description (at most 140 characters, the GitHub statuses API limit).
     Use when: the smoke ends; scripts/live_smoke.sh posts it as the `live-smoke` status. Inputs: rows, ledger, cap,
-    passed, abort reason. Output: text like "PASS 5/5 cases, 19 calls, cap 25, 4 searches".
+    passed, abort reason. Output: text like "PASS 4/5 cases + 1 known limitation (D-083), 19 calls, cap 25, 4 searches"
+    (a tagged case's pass is shown apart, never in the plain count).
     Side effects: none. Role: scripts/check_smoke_status.py reads "calls N, cap M" from it."""
-    ok = sum(r.verdict == "PASS" for r in rows)
+    ok = sum(r.verdict == "PASS" and not r.known_limitation for r in rows)
+    known = [r for r in rows if r.known_limitation and r.verdict == "PASS"]
     calls = sum(c["total"] for _, _, c in ledger)
     searches = sum(c["search"] for _, _, c in ledger)
     head = "PASS" if passed else ("ABORTED" if abort else "FAIL")
     failed = ", ".join(r.label.split(" ")[0] for r in rows if r.verdict != "PASS")
-    text = f"{head} {ok}/{len(SMOKE)} cases, {calls} calls, cap {cap}, {searches} searches"
+    tags = sorted({r.known_limitation for r in known if r.known_limitation})
+    extra = f" + {len(known)} known limitation ({', '.join(tags)})" if known else ""
+    text = f"{head} {ok}/{len(SMOKE)} cases{extra}, {calls} calls, cap {cap}, {searches} searches"
     return (text + (f"; not passing: {failed}" if failed else ""))[:140]

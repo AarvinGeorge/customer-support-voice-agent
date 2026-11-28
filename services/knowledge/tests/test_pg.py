@@ -19,6 +19,7 @@ from knowledge import search
 from knowledge.db import Database
 from knowledge.ingest.job import corpus_version, run_ingest
 from knowledge.ingest.store import PgStore, vector_text
+from knowledge.normalize import normalize_query
 
 pytestmark = pytest.mark.pg
 
@@ -59,6 +60,13 @@ class HashEmbedder:
         self.calls += 1
         self.inputs += 1
         return hashed(text)
+
+    async def aembed_many(self, texts, timeout_s):
+        """What: one vector per text in one call. Use when: search with a customer message. Inputs: texts, timeout.
+        Output: vectors. Side effects: counts. Role: fake."""
+        self.calls += 1
+        self.inputs += len(texts)
+        return [hashed(t) for t in texts]
 
 
 @pytest.fixture(scope="module")
@@ -181,3 +189,30 @@ def test_corpus_version_reader_follows_the_latest_finished_run(db):
     assert fresh.corpus_version() == "f" * 64
     assert live != "f" * 64 and len(live) == 64
     assert vector_text([0.5]) == "[0.5]"
+
+
+def test_cosines_matches_the_vector_leg_and_reads_only_the_given_chunks(db):
+    """What: Database.cosines returns the same cosine the vector leg computes, for exactly the ids asked.
+    Use when: CI of this suite. Inputs: one query vector, the vector leg's top 3. Output: assertion. Side effects: SQL.
+    Role: CS-E-02.F11 Gate 1 input read against real pgvector."""
+    vec = hashed("how long does a refund take")
+    top = db.vector_leg(vec, ["all"], 3)
+    got = db.cosines(vec, [r["chunk_id"] for r in top])
+    assert set(got) == {r["chunk_id"] for r in top}
+    for r in top:
+        assert abs(got[r["chunk_id"]] - float(r["cosine"])) < 1e-6
+    assert db.cosines(vec, []) == {}
+
+
+def test_search_with_a_customer_message_scores_the_max_on_real_sql(db):
+    """What: a search whose customer message matches a returned chunk better than the query does reports the
+    message's cosine as that chunk's score. Use when: CI of this suite. Inputs: a vague query, a precise message.
+    Output: assertion. Side effects: SQL. Role: CS-E-02.F11 end to end on the real database."""
+    message = "How long does a refund take to show up on my card?"
+    plain = run(db, query="refund")
+    both = run(db, query="refund", customer_message=message)
+    assert [c.chunk_id for c in both.chunks] == [c.chunk_id for c in plain.chunks]  # ranking stays on the query
+    msg = db.cosines(hashed(normalize_query(message, db.vocabulary()).text), [c.chunk_id for c in plain.chunks])
+    assert any(msg[c.chunk_id] > c.scores.cosine for c in plain.chunks)  # the message really changes a score
+    for p, b in zip(plain.chunks, both.chunks):
+        assert abs(b.scores.cosine - max(p.scores.cosine, msg[p.chunk_id])) < 1e-6

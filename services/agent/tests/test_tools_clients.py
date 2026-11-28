@@ -103,7 +103,8 @@ class Harness:
         return self.core_app.state.calls
 
     async def turn(self, name: str, args: dict[str, Any], state: dict[str, Any] | None = None,
-                   demo_fault: str | None = None) -> tuple[TurnOutcome, list[Any], list[ToolMessage]]:
+                   demo_fault: str | None = None,
+                   customer_text: str | None = None) -> tuple[TurnOutcome, list[Any], list[ToolMessage]]:
         """What: one turn: the model calls `name` once, then answers "done". Use when: tests.
         Inputs: tool name, args, state, demo fault. Output: (outcome, events, tool messages).
         Side effects: core and knowledge calls (in memory). Role: helper."""
@@ -113,6 +114,7 @@ class Harness:
                             fallback_model=Fake(messages=iter([])), checkpointer=InMemorySaver(), tools=self.tools)
         stream = TurnStream(TurnMeta(SID, TID, "chat", "agent_a", "text"))
         control = TurnControl(session_id=SID, turn_id=TID, mode="chat", demo_fault=demo_fault)
+        control.customer_text = customer_text
 
         async def body(s: TurnStream) -> TurnOutcome:
             """What: agent body. Use when: start_turn. Inputs: stream. Output: outcome. Side effects: none.
@@ -234,6 +236,17 @@ async def test_search_kb_unverified_is_public_and_weak_adds_the_clarify_instruct
     _, _, tool_msgs = await h.turn("search_kb", {"query": "refund window"}, state={"verified": False})
     assert json.loads(h.knowledge_calls[0].content) == {"query": "refund window", "tier": "public", "verified": False}
     assert "Ask exactly one clarifying question" in str(tool_msgs[0].content)
+
+
+async def test_search_kb_sends_the_code_held_customer_text_capped_at_the_contract_limit():
+    # CS-E-02.F11: the gate scores the customer's own words too, so the model's wording cannot move the verdict alone.
+    h = Harness()
+    await h.turn("search_kb", {"query": "Android app"}, state={"verified": False}, customer_text="Do you have an Android app?")
+    assert json.loads(h.knowledge_calls[0].content) == {"query": "Android app", "tier": "public", "verified": False,
+                                                        "customer_message": "Do you have an Android app?"}
+    h = Harness()
+    await h.turn("search_kb", {"query": "export"}, state={"verified": False}, customer_text="x" * 2500)
+    assert len(json.loads(h.knowledge_calls[0].content)["customer_message"]) == 2000
 
 
 async def test_hostile_tool_result_tag_in_knowledge_text_comes_back_escaped():

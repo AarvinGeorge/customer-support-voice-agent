@@ -155,7 +155,9 @@ def test_python_m_evals_run_grades_all_cases_against_the_fake_and_writes_a_repor
     assert files == ["golden-2026-11-27-150000.json", "golden-2026-11-27-150000.md"]
     rep = json.loads((tmp_path / files[0]).read_text())
     assert rep["cases"]["total"] == 21
-    assert rep["cases"]["verdicts"] == {"pass": 1, "fail": 0, "error": 20}  # only G-01 is scripted; the rest are error, never pass
+    # only G-01 is scripted; the rest are error, never pass. The two D-083 cases are counted apart (known limitations).
+    assert rep["cases"]["verdicts"] == {"pass": 1, "fail": 0, "error": 18}
+    assert rep["cases"]["known_limitation"]["verdicts"] == {"pass": 0, "fail": 0, "error": 2}
     assert rep["gate1"]["n"] == 25
     assert code == 1  # not every case passed
 

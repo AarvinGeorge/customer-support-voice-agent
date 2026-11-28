@@ -27,3 +27,14 @@ def test_k_bounds_and_error_code_pattern():
     with pytest.raises(ValidationError):
         SearchRequest.model_validate({"query": "q", "tier": "public", "verified": False,
                                       "error_code": "SSO-401"})
+
+
+def test_customer_message_is_optional_and_bounded():
+    """What: customer_message is optional (None by default) and at most 2000 characters, like query.
+    Use when: CI. Inputs: none. Output: assertion. Side effects: none. Role: CS-E-02.F11 additive field (Gate 1
+    scores the code-held customer message as well as the model's query)."""
+    base = {"query": "q", "tier": "public", "verified": False}
+    assert SearchRequest.model_validate(base).customer_message is None
+    assert SearchRequest.model_validate({**base, "customer_message": "Do you have an Android app?"}).customer_message
+    with pytest.raises(ValidationError):
+        SearchRequest.model_validate({**base, "customer_message": "x" * 2001})
