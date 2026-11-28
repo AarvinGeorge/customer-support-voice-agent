@@ -64,17 +64,29 @@ def test_positive_control_a_typed_pin_in_a_customer_frame_is_still_masked_next_t
     assert "U-2041" in out and "ticket ending 5124" in out and "invoice ending 0412" in out
 
 
-def test_an_unwalkable_payload_still_fails_closed() -> None:
-    class Opaque:
-        """What: an object the walker cannot inspect. Use when: this test. Inputs: none. Output: object.
-        Side effects: none. Role: fixture."""
+class _Runtime:
+    """What: an object the walker cannot inspect, like the runtime inside a middleware ModelRequest. Use when: the
+    unwalkable payload tests. Inputs: text its str() returns. Output: object. Side effects: none. Role: fixture."""
 
-        def __str__(self) -> str:
-            """What: a string that carries a secret. Use when: the JSON fallback. Inputs: none. Output: text.
-            Side effects: none. Role: fixture."""
-            return "my PIN is 4821"
+    def __init__(self, text: str) -> None:
+        """What: keep the text. Use when: fixture. Inputs: text. Output: none. Side effects: none. Role: constructor."""
+        self.text = text
 
-    assert "4821" not in json.dumps(hide_for_langsmith({"x": Opaque()}))
+    def __str__(self) -> str:
+        """What: the text. Use when: the JSON fallback. Inputs: none. Output: text. Side effects: none. Role: fixture."""
+        return self.text
+
+
+def test_an_unwalkable_payload_keeps_our_records_and_scans_customer_frames() -> None:
+    # Live trace 01a2206c-7896: a middleware run's "request" held an object the walker refuses, and the fallback
+    # scanned every string as customer text, so the model's tool call read {"ending": "[PIN]"}.
+    payload = {"request": {"runtime": _Runtime("<customer_message>my PIN is 4821</customer_message>"),
+                           "messages": [{"type": "ai", "tool_calls": [{"name": "list_charges",
+                                                                         "args": {"ending": "0412"}}]}],
+                           "state": {"open_tickets": [{"short_id": "5124"}], "pin": "4821"}}}
+    out = json.dumps(hide_for_langsmith(payload))
+    assert '"ending": "0412"' in out and '"short_id": "5124"' in out
+    assert "4821" not in out  # positive control: the framed customer PIN and the PIN field are masked
 
 
 def _field_names(model: type) -> set[str]:

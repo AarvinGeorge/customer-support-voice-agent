@@ -104,11 +104,13 @@ class Opaque:
     def __repr__(self) -> str:
         """What: a repr that carries the secret. Use when: str() fallback. Inputs: none. Output: text.
         Side effects: none. Role: fixture."""
-        return "Opaque(text='QS-10423 4821')"
+        return "Opaque(text='<customer_message>QS-10423 4821</customer_message>')"  # CS-E-02.F14: framed, as ingress writes it
 
 
 def test_hide_for_langsmith_redacts_any_payload_shape() -> None:
-    payload = {"messages": [[{"type": "human", "content": "QS-10423 4821"}]], "pin": "7302",
+    # CS-E-02.F14: customer text reaches a trace inside its ingress frame; the frame is scanned in any payload shape.
+    payload = {"messages": [[{"type": "human", "content": "<customer_message>QS-10423 4821</customer_message>"}]],
+               "pin": "7302",
                "obj": Opaque(), "email": "priya@acme.com"}
     assert "4821" in repr(payload) and "7302" in repr(payload)
     out = hide_for_langsmith(payload)
@@ -127,5 +129,5 @@ def test_hide_for_langsmith_never_raises_and_never_passes_raw() -> None:
             """What: raise. Use when: repr. Inputs: none. Output: none. Side effects: raises. Role: fixture."""
             raise RuntimeError("no repr")
 
-    out = hide_for_langsmith({"x": Broken(), "msg": "my PIN is 4821"})
+    out = hide_for_langsmith({"x": Broken(), "msg": "<customer_message>my PIN is 4821</customer_message>"})
     assert "4821" not in repr(out)

@@ -568,8 +568,8 @@ def _trace(obj: Any) -> Any:
 
 def hide_for_langsmith(payload: Any) -> dict[str, Any]:
     """What: the LangSmith Client hide_inputs and hide_outputs function, by provenance (_trace): our records keep
-    their numbers, customer frames are scanned. A payload it cannot walk (an object of unknown shape) is flattened
-    and every string is scanned (fails closed).
+    their numbers, customer frames are scanned. A payload it cannot walk (a middleware request holding a runtime
+    object) is flattened to plain data first and redacted by the same rule; if even that fails, nothing is sent.
     Use when: langsmith.Client(hide_inputs=hide_for_langsmith, hide_outputs=hide_for_langsmith).
     Inputs: a run's inputs or outputs dict. Output: a redacted dict (never the raw payload).
     Side effects: none. Role: doc 07 s11.1 second net by provenance (D-071); ingress already redacted customer text
@@ -578,7 +578,7 @@ def hide_for_langsmith(payload: Any) -> dict[str, Any]:
         out = _trace(payload)
     except Exception:  # noqa: BLE001 - review round 2 N-I1: any failure falls back, never raises into tracing
         try:
-            out = redact(_plain(payload), _TRACE_CONTEXT)
+            out = _trace(_plain(payload))  # CS-E-02.F14: the same provenance rule, never a scan of our records
         except Exception:  # noqa: BLE001 - never send what could not be inspected
             return {"redaction": "failed"}
     return out if isinstance(out, dict) else {"output": out}
