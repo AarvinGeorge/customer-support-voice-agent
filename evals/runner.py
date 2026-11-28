@@ -45,9 +45,10 @@ def _last_pending(turns: list[TurnResult]) -> dict[str, Any] | None:
     return None
 
 
-def run_case(case: dict[str, Any], persona: dict[str, Any], agent: AgentClient, store: Store) -> CaseRun:
+def run_case(case: dict[str, Any], persona: dict[str, Any], agent: AgentClient, store: Store,
+             personas: dict[str, dict[str, Any]] | None = None) -> CaseRun:
     """What: play one case's turns and read the stores. Use when: run_cases (hooks already ran). Inputs: case, persona, client,
-    store. Output: CaseRun (error set when it could not finish). Side effects: HTTP, a store read, maybe a voice session insert.
+    store, optional persona map (for a verification turn's as_persona). Output: CaseRun (error set when it could not finish). Side effects: HTTP, a store read, maybe a voice session insert.
     Role: the browser stand-in. Stops at the first failed turn but still reads what the stores hold."""
     run = CaseRun(case_id=case["id"], persona=persona, session_id=None, turns=[])
     try:
@@ -67,8 +68,14 @@ def run_case(case: dict[str, Any], persona: dict[str, Any], agent: AgentClient, 
             body: dict[str, Any] = {"client_turn_id": cid, "text": text}
             sent: dict[str, Any] = {"text": text}
         elif kind == "verification":
-            pin = persona["pin"] if spec["credentials"] == "persona" else wrong_pin(persona["pin"])
-            body = {"client_turn_id": cid, "verification": {"account_id": persona["account_id"], "pin": pin}}
+            who = persona
+            if spec.get("as_persona"):
+                who = (personas or {}).get(spec["as_persona"])
+                if who is None:
+                    run.error = f"turn {i}: as_persona {spec['as_persona']} is not in personas.yaml"
+                    break
+            pin = who["pin"] if spec["credentials"] == "persona" else wrong_pin(who["pin"])
+            body = {"client_turn_id": cid, "verification": {"account_id": who["account_id"], "pin": pin}}
             sent = {"credentials": spec["credentials"]}
         elif kind == "confirm":
             card = _last_pending(run.turns)
@@ -124,7 +131,7 @@ def run_cases(cases: list[dict[str, Any]], personas: dict[str, dict[str, Any]], 
             try:
                 if before_case:
                     before_case(case)
-                run = run_case(case, persona, agent, store)
+                run = run_case(case, persona, agent, store, personas)
             except HookError as e:
                 run = CaseRun(case["id"], persona, None, [], error=str(e))
             finally:
