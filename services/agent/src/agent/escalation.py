@@ -49,7 +49,7 @@ from agent.clients.core_agent import CoreAgentClient
 from agent.clients.http import ToolCallError
 from agent.records import ticket_record
 from agent.memory import dangling_calls
-from agent.middleware.router import ESCALATION_LEADS, NO_TICKET_CLAUSE, TICKET_CLAUSE, escalation_lead
+from agent.middleware.router import ESCALATION_LEADS, TICKET_CLAUSE, escalation_lead, no_ticket_clause
 from agent.middleware.tool_guard import clamp_timeout
 from agent.say import speak
 from agent.sse import TurnOutcome, TurnStream, route_outcome
@@ -151,17 +151,11 @@ def ticket_key(control: TurnControl, reason: str) -> str:
     return f"{control.session_id}:{control.turn_id}:esc:{reason}"
 
 
-def turn_ref(control: TurnControl) -> str:
-    """What: the last 4 characters of the turn id (dashes removed). Use when: the fallback line. Inputs: control.
-    Output: text. Side effects: none. Role: doc 07 s8.1 "gives the turn_id last 4 as a reference"."""
-    return control.turn_id.replace("-", "")[-4:]
-
-
 def fallback_clause(control: TurnControl) -> str:
     """What: "I couldn't open a ticket just now. If you contact us, please quote reference abcd."
     Use when: a failure-path ticket could not be opened. Inputs: control. Output: text. Side effects: none.
     Role: doc 07 s8.1 fallback line."""
-    return NO_TICKET_CLAUSE.format(ref=turn_ref(control))
+    return no_ticket_clause(control.turn_id)
 
 
 def customer_text(content: Any) -> str:
@@ -223,17 +217,23 @@ class Escalator:
     async def open_ticket(self, control: TurnControl, reason: str, *, summary: str, category: str | None = None,
                           key_reason: str | None = None) -> dict[str, Any] | None:
         """What: one ticket attempt, clamped to min(3 s, time left) with no reserve (this IS the reserve), key
-        {sid}:{turn}:esc:{reason}, origin code; reuses a ticket already opened this turn (exactly one per turn).
+        {sid}:{turn}:esc:{reason}, origin code; reuses a ticket already opened this turn and makes no second attempt after a recorded failure
+        (one attempt per turn).
         Use when: any code-owned escalation. Inputs: control, escalation reason, summary, category, key reason
         (defaults to reason). Output: TicketRef dict, or None on failure or when under 1 s is left.
         Side effects: one escalation step and at most one core call; sets control.ticket, or control.requester_refusal
-        when core answers REQUESTER_UNKNOWN (D-070). Role: s8.1 row."""
+        when core answers REQUESTER_UNKNOWN (D-070); always records the result on control.ticket_attempt (opened,
+        failed or refused, CS-E-03.F12), the one fact the ticket clause of a line is chosen from. Role: s8.1 row."""
         if control.ticket is not None:
+            control.ticket_attempt = "opened"
             return control.ticket
+        if control.ticket_attempt == "failed":  # one attempt per turn: the in-loop hook already tried (review PR #87 M-1)
+            return None
         step = Step.start(control.events, "escalation", "create_ticket", "Opening a ticket")
         timeout = clamp_timeout(limits.CORE_TICKET_TIMEOUT_S, control.remaining_s(), reserve_s=0.0)
         if timeout is None:
             step.done("skipped", "Couldn't open a ticket", detail="Not enough time left")
+            control.ticket_attempt = "failed"
             return None
         body = {"category": category or REASON_CATEGORY.get(reason, "other"), "summary": summary[:500] or reason,
                 "steps_tried": [], "blocking": False, "origin": "code", "escalation_reason": reason,
@@ -244,16 +244,19 @@ class Escalator:
         except (ToolCallError, TimeoutError, asyncio.TimeoutError) as err:
             if isinstance(err, ToolCallError) and err.code == "REQUESTER_UNKNOWN":  # D-070: core needs a verified customer
                 control.requester_refusal = dict(err.details or {})
+                control.ticket_attempt = "refused"
                 step.done("blocked", "Needs verification first", detail="A ticket needs a verified customer")
                 return None
             step.done("timeout" if not isinstance(err, ToolCallError) or err.kind == "timeout" else "error",
                       "Couldn't open a ticket", detail="The ticket system did not respond")
+            control.ticket_attempt = "failed"
             return None
         ticket = res.get("ticket") if isinstance(res, dict) else None
         if not isinstance(ticket, dict):
             step.done("error", "Couldn't open a ticket", detail="The ticket system gave no ticket")
+            control.ticket_attempt = "failed"
             return None
-        control.ticket = ticket
+        control.ticket, control.ticket_attempt = ticket, "opened"
         step.done("ok", "Opened a ticket", detail=str(ticket.get("display") or ""))
         return ticket
 

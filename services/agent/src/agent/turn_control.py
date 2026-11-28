@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Protocol
 
 RouteKind = Literal["verify", "readback", "escalate", "decline_off_topic"]
+TicketAttempt = Literal["opened", "failed", "refused"]  # CS-E-03.F12, TurnControl.ticket_attempt
 
 
 def loop_clock() -> float:
@@ -136,6 +137,12 @@ class TurnControl:
     # D-070: core's REQUESTER_UNKNOWN details ({reason, verify_locked}) when it refused this turn's ticket because the
     # session has no verified requester; the escalation module then holds the escalation instead (agent.escalation).
     requester_refusal: dict[str, Any] | None = None
+    # CS-E-03.F12: the recorded result of this turn's ticket attempt, written by Escalator.open_ticket on every exit
+    # (a ticket the model's create_ticket tool opened this turn sets only `ticket`; the escalator reuses it and records
+    # "opened") and by router.record_hook_ticket for the optional in-loop hook: None (no attempt yet), "opened", "failed" (error,
+    # timeout, no ticket in the answer, or too little time left to try), "refused" (REQUESTER_UNKNOWN, D-070). The
+    # escalation line's ticket clause is chosen from it, never from `route.ticket is None` alone.
+    ticket_attempt: TicketAttempt | None = None
     model_node_failed: bool = False  # the agent model node raised (primary and fallback failed or skipped), s6.7
     # Agent model replies cut at max_tokens and discarded (review PR #68 I-1): (model name, usage metadata), so the
     # drawer shows the reason and the turn usage keeps their tokens (each is already one of model_attempts).
