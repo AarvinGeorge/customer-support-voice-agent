@@ -767,33 +767,17 @@ def test_rollback_checks_the_checkout_against_the_manifest(tmp_path: Path) -> No
     assert " pull " not in log and "force-recreate" not in log
 
 
-def _build_args_guard() -> str:
-    """What: the run script of the images workflow step that requires the web image's public build arguments.
-    Use when: pytest. Inputs: none. Output: the script text. Side effects: reads a file. Role: lets the test execute the real guard."""
-    steps = _wf("images.yml")["jobs"]["images"]["steps"]
-    return next(st["run"] for st in steps if st.get("name", "").startswith("Require the web image's public build arguments"))
-
-
-def test_images_fail_without_the_langsmith_build_arguments() -> None:
-    """What: the guard step fails when LANGSMITH_PROJECT_URL or LANGSMITH_PROJECT is empty or the URL is not https, and passes
-    when both are set; it comes before the bake. Use when: pytest. Inputs: none. Output: assert.
-    Side effects: runs the step's bash with a clean environment (no docker, no network). Role: review I2 (an empty drawer link
-    would be baked into the release image and could only change with a new commit)."""
-    script = _build_args_guard()
-
-    def go(**env: str) -> subprocess.CompletedProcess:
-        """What: run the guard with env. Use when: this test. Inputs: env. Output: CompletedProcess. Side effects: none.
-        Role: helper."""
-        return subprocess.run(["bash", "-c", script], env={"PATH": os.environ["PATH"], **env}, capture_output=True, text=True, timeout=30)
-
-    url = "https://smith.langchain.com/o/0000/projects/p/1111"
-    assert go(LANGSMITH_PROJECT="cs-voice-agent", LANGSMITH_PROJECT_URL=url).returncode == 0
-    for bad in ({"LANGSMITH_PROJECT_URL": ""}, {"LANGSMITH_PROJECT_URL": "smith.langchain.com/x"}, {"LANGSMITH_PROJECT": ""}):
-        p = go(**{"LANGSMITH_PROJECT": "cs-voice-agent", "LANGSMITH_PROJECT_URL": url, **bad})
-        assert p.returncode != 0 and "::error" in p.stdout, (bad, p.stdout)
-    names = [st.get("name", st.get("uses", "")) for st in _wf("images.yml")["jobs"]["images"]["steps"]]
-    guard = next(i for i, n in enumerate(names) if n.startswith("Require the web image"))
-    assert guard < next(i for i, n in enumerate(names) if n.startswith("Build agent, core"))
+def test_web_image_bakes_no_langsmith_value() -> None:
+    """What: neither the images workflow nor the web service's compose build mentions LANGSMITH_PROJECT_URL, and the images
+    workflow has no step that requires web build arguments. Use when: pytest. Inputs: none. Output: assert.
+    Side effects: reads files. Role: D-087 (no LangSmith project URL baked into a public web bundle)."""
+    text = (ROOT / ".github" / "workflows" / "images.yml").read_text()
+    assert "LANGSMITH_PROJECT_URL" not in text and "NEXT_PUBLIC_LANGSMITH" not in text
+    names = [st.get("name", "") for st in _wf("images.yml")["jobs"]["images"]["steps"]]
+    assert not any("build arguments" in n for n in names)
+    web = __import__("yaml").safe_load((ROOT / "compose.yaml").read_text())["services"]["web"]["build"]
+    assert "args" not in web
+    assert "NEXT_PUBLIC_LANGSMITH" not in (ROOT / "apps" / "web" / "Dockerfile").read_text()
 
 
 # ---- release_manifest.py (the helper CI, the release workflow and deploy.sh share) ----

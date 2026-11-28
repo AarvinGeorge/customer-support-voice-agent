@@ -4,7 +4,7 @@
  *   selected turn's metric strip (Mono Large), one panel with the step tree (per-step latency,
  *   model usage, Gate 1 score against tau_low and tau_high in words and numbers with the
  *   calibration status, Gate 2 claims, rule codes and policy refs), the decisions list (identity,
- *   gates, rules, action outcome, escalation, fallback), the LangSmith link and a Demo controls slot.
+ *   gates, rules, action outcome, escalation, fallback) and a Demo controls slot.
  * Use when: ConsoleShell's Inspector button is on.
  * Inputs: InspectorDrawerProps.
  * Output: an <aside aria-label="Inspector">.
@@ -20,7 +20,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Copy,
-  ExternalLink,
   FileCheck,
   LifeBuoy,
   Repeat,
@@ -38,7 +37,6 @@ import {
   decisionRows,
   inspectorSelection,
   inspectorSteps,
-  langsmithRunUrl,
   metricStrip,
   turnHeading,
   type DecisionKey,
@@ -64,8 +62,6 @@ export interface InspectorDrawerProps {
   pickedTurnId: string | null;
   onPick: (turnId: string) => void;
   onClose: () => void;
-  langsmithProjectUrl: string;
-  langsmithProject?: string;
   demoControls?: ReactNode;
 }
 
@@ -295,8 +291,6 @@ export function InspectorDrawer({
   pickedTurnId,
   onPick,
   onClose,
-  langsmithProjectUrl,
-  langsmithProject,
   demoControls,
 }: InspectorDrawerProps) {
   const headingRef = useRef<HTMLHeadingElement | null>(null);
@@ -304,7 +298,6 @@ export function InspectorDrawer({
 
   const selection = inspectorSelection(conversation.turnOrder, pickedTurnId);
   const turn = selection ? conversation.turns[selection.turnId] : undefined;
-  const runUrl = selection ? langsmithRunUrl(selection.turnId, langsmithProjectUrl) : null;
 
   /**
    * What: closes the drawer on Escape pressed anywhere inside it.
@@ -399,20 +392,6 @@ export function InspectorDrawer({
       <footer className="flex flex-col gap-3 px-5 py-4">
         {selection && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            {runUrl ? (
-              <a
-                href={runUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 rounded-sm text-label text-ink underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-              >
-                Open in LangSmith
-                <ExternalLink aria-hidden className="size-3" />
-                <span className="sr-only"> (opens in a new tab{langsmithProject ? `, project ${langsmithProject}` : ""})</span>
-              </a>
-            ) : (
-              <span className="text-label text-muted">LangSmith link not configured</span>
-            )}
             <button
               type="button"
               onClick={copy}

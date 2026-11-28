@@ -219,7 +219,7 @@ Captured from the approved mockups; refine from code with `/impeccable document`
 - Replaces the input bar in place: orb (ember-tinted, calm), state label with icon, two-row waveform strip (Agent, You), live caption box, Mute, Stop speaking, Back to typing.
 
 ### Observability drawer
-- Right panel on Margin: metric strip in Mono Large (latency, TTFT, tokens with cached, cost), two tabs (Trace and decisions; Usage and latency), LangSmith link.
+- Right panel on Margin: metric strip in Mono Large (latency, TTFT, tokens with cached, cost), two tabs (Trace and decisions; Usage and latency); no LangSmith link (D-087).
 
 ## 6. Do's and Don'ts
 

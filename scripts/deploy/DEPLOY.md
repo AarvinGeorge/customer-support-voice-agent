@@ -14,7 +14,6 @@ Everything below is prepared and was proven on a laptop with `--local` (see the 
 | Host stack | `docker` with the compose plugin (2.24 or later, for `!reset`), `git`, `curl`, `python3` 3.10 or later (all standard; the script uses them); `gh` only if you deploy by hand without `--manifest` |
 | Registry read access | the images are private packages under `ghcr.io/aarvingeorge/customer-support-voice-agent/`. The workflow logs the VM in for the run with its own read-only token and logs out after. For a deploy or rollback by hand, log in once: `docker login ghcr.io -u <github user>` with a classic token that has only `read:packages`. Images already on the VM (a rollback) need no login |
 | Spend caps | provider spend caps and rate limits set BEFORE the URL is shared (CLAUDE.md s6) |
-| Web build variables | repository variables `LANGSMITH_PROJECT` (the LangSmith project name) and `LANGSMITH_PROJECT_URL` (the project page, `https://...`), set BEFORE the commit on `main` that will be released: the `images` workflow bakes them into the web image (the drawer's trace link) and FAILS, before building, when either is empty or the URL is not https, so no release can carry an empty link |
 
 ## 1. One-time VM setup
 
@@ -47,7 +46,7 @@ Then on the VM add the edge and behaviour settings from the table below (`SITE_A
 | Internal | `CORE_TOKEN_AGENT`, `CORE_TOKEN_COMMIT`, `CORE_TOKEN_OPS`, `KNOWLEDGE_TOKEN_AGENT`, `SESSION_SIGNING_KEY`, `PIN_PEPPER`, `OPERATOR_TOKEN_KEY`, `DEMO_ACCESS_CODE`, `OPERATOR_ACCESS_CODE` |
 | Postgres | `POSTGRES_PASSWORD`, `AGENT_OWNER_PASSWORD`, `AGENT_APP_PASSWORD`, `CORE_OWNER_PASSWORD`, `CORE_APP_PASSWORD`, `KNOWLEDGE_OWNER_PASSWORD`, `KNOWLEDGE_APP_PASSWORD`, and the six URLs `AGENT_DB_URL`, `CORE_DB_URL`, `KNOWLEDGE_DB_URL`, `AGENT_DB_OWNER_URL`, `CORE_DB_OWNER_URL`, `KNOWLEDGE_DB_OWNER_URL` (host is `postgres`; keys.py composes them) |
 | Edge | secrets `SITE_ADDRESS` (the bare domain, no scheme) and `SITE_ORIGIN` (`https://` plus the same domain) |
-| Variables (repository variables) | `DEMO_FAULTS_ENABLED` and `FEATURE_A4` (REQUIRED, `true` or `false`); `LANGSMITH_PROJECT` and `LANGSMITH_PROJECT_URL` (REQUIRED by the `images` workflow, build time only, see section 0); optional `EDGE_SUBNET` and `FORWARDED_ALLOW_IPS` (equal), `LANGSMITH_TRACING`, `LANGSMITH_ENDPOINT`, `REDIS_URL`, `CORE_URL`, `KNOWLEDGE_URL` |
+| Variables (repository variables) | `DEMO_FAULTS_ENABLED` and `FEATURE_A4` (REQUIRED, `true` or `false`); `LANGSMITH_PROJECT`; optional `EDGE_SUBNET` and `FORWARDED_ALLOW_IPS` (equal), `LANGSMITH_TRACING`, `LANGSMITH_ENDPOINT`, `REDIS_URL`, `CORE_URL`, `KNOWLEDGE_URL` |
 
 ### Settings that change behaviour (set explicitly; preflight refuses the first two if unset)
 
@@ -79,14 +78,10 @@ Commands:
 2. `git tag r-01 <sha> && git push origin r-01` (or run the `release` workflow with `tag` and `sha`).
 3. On the VM: `scripts/deploy/deploy.sh up --tag r-01` (it runs `gh release download r-01` for the manifest when it has none; or pass `--manifest release-r-01.json`), or run the `deploy` workflow with the tag.
 
-The web image bakes two public build arguments (`NEXT_PUBLIC_LANGSMITH_PROJECT`, `NEXT_PUBLIC_LANGSMITH_PROJECT_URL`) from the repository variables `LANGSMITH_PROJECT` and `LANGSMITH_PROJECT_URL` at CI build time; changing them needs a new build (a new commit on `main`), not a VM setting. The `images` workflow refuses to build while either is empty (step "Require the web image's public build arguments").
-
 ### First run of the release path: rehearsal release r-00
 
 `release.yml` could not run before it was on `main`, so its first run was this rehearsal, not `r-01`. r-00 is never deployed; it proves the tag, the artifact hand-off, the GHCR read-back and the asset. It passed once (2026-11-27, commit `f42a365`, release run 46091497125, see `build-log/reports/r00-rehearsal.md`); repeat it only after a change to `images.yml` or `release.yml`, with a new tag (`r-00.1`, then `r-00.2`) because the release workflow refuses a tag that exists.
 ```
-gh variable set LANGSMITH_PROJECT --body '<project name>'                   # owner or coordinator, once (section 0)
-gh variable set LANGSMITH_PROJECT_URL --body 'https://smith.langchain.com/...'
 git fetch origin && sha="$(git rev-parse origin/main)"                       # the commit to release (a later one than the merge is fine)
 gh run list --workflow ci.yml --branch main --event push --commit "$sha" --json status,conclusion,databaseId
 #   wait until it shows conclusion "success". Then the images run for the same commit (it starts when ci completes):

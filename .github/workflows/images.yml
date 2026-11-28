@@ -4,7 +4,7 @@
 # Use when: GitHub runs it on `workflow_run` (ci completed on main); by hand (workflow_dispatch with a sha) only to rebuild a
 #   commit whose ci run on main is green but has no images (for example a run that was replaced in the queue).
 # Inputs: the commit the green ci run tested (workflow_run head_sha, or the dispatch sha, re-checked: on main and ci green).
-#   Repository variables LANGSMITH_PROJECT and LANGSMITH_PROJECT_URL (public build arguments of the web image, required).
+#   No build arguments: nothing from LangSmith is baked into the web image (D-087).
 # Output: ghcr.io/aarvingeorge/customer-support-voice-agent/<image>:<sha> and the artifact images-<sha> (90 days).
 # Side effects: pushes four images to GHCR with this run's GITHUB_TOKEN (packages: write, contents: read, actions: read).
 # Role: the publish stage after the gate. ci.yml stays gate-only (D-068: every ci job only calls scripts/ci_local.sh, no `if`);
@@ -66,18 +66,6 @@ jobs:
           run_id="$(gh run list --workflow ci.yml --branch main --event push --commit "$SHA" --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
           [ -n "$run_id" ] || { echo "::error::no green ci run on main for $SHA"; exit 1; }
           echo "building $SHA, gated by ci run $run_id"
-      - name: Require the web image's public build arguments (an empty drawer link must never reach a release)
-        env:
-          LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT }}
-          LANGSMITH_PROJECT_URL: ${{ vars.LANGSMITH_PROJECT_URL }}
-        run: |
-          set -euo pipefail
-          # Baked into the web image at build time (apps/web/Dockerfile); only a new build can change them (DEPLOY.md section 0).
-          problem=""
-          [ -n "${LANGSMITH_PROJECT:-}" ] || problem="$problem repository variable LANGSMITH_PROJECT is empty;"
-          case "${LANGSMITH_PROJECT_URL:-}" in https://?*) ;; *) problem="$problem repository variable LANGSMITH_PROJECT_URL is empty or not https://;" ;; esac
-          if [ -n "$problem" ]; then echo "::error title=web build arguments::$problem set them (gh variable set ...) and re-run: a release image would ship an empty trace link"; exit 1; fi
-          echo "web build arguments set"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
       - name: Log in to GHCR with this run's token (expires with the job)
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
@@ -86,9 +74,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build agent, core, knowledge and web once with OCI labels and push
-        env:
-          LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT }}          # public build args of the web image (no secret)
-          LANGSMITH_PROJECT_URL: ${{ vars.LANGSMITH_PROJECT_URL }}
         run: |
           set -euo pipefail
           repo="ghcr.io/${GITHUB_REPOSITORY,,}"

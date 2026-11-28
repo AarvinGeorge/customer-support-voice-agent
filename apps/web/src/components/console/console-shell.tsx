@@ -25,7 +25,6 @@ import type { ConfirmInput, TurnRequest, VerificationInput, VerifiedPerson } fro
 
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
-import { publicConfig } from "@/lib/config/public";
 import type { TurnView } from "@/lib/turns/reducer";
 import { turnStore, type ThreadItem, type TurnStoreState } from "@/lib/turns/store";
 import { inputPlaceholder } from "@/lib/turns/furniture";
@@ -160,14 +159,13 @@ export interface VerifyHint {
  * Output: none (type).
  * Side effects: none.
  * Role: `store` defaults to the app singleton; tests and the replay route pass their own.
- *   `langsmithProjectUrl` defaults to the public config value; `demoControls` fills the drawer's
+ *   `demoControls` fills the drawer's
  *   Demo controls slot (CS-E-07.S1.T4). `hint` pre-fills the verification card (D-076).
  */
 export interface ConsoleShellProps {
   sessionId: string | null;
   store?: StoreApi<TurnStoreState>;
   onNewConversation?: () => void;
-  langsmithProjectUrl?: string;
   demoControls?: ReactNode;
   /** The display-only signed-in hint, or null for the signed-out journey. */
   hint?: VerifyHint | null;
@@ -189,7 +187,6 @@ export function ConsoleShell({
   sessionId,
   store = turnStore,
   onNewConversation,
-  langsmithProjectUrl = publicConfig.langsmithProjectUrl,
   demoControls,
   hint: hintProp = null,
   notice = null,
@@ -472,8 +469,6 @@ export function ConsoleShell({
             pickedTurnId={pickedTurnId}
             onPick={setPickedTurnId}
             onClose={closeInspector}
-            langsmithProjectUrl={langsmithProjectUrl}
-            langsmithProject={publicConfig.langsmithProject}
             demoControls={demoControls}
           />
         )}
