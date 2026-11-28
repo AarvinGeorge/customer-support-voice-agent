@@ -3,7 +3,9 @@ ending 0412 in the last 14 days" against a list_charges result whose call passed
 rca-pin-overmask.md finding 1 case), and the positive control: a call that looked back since_days 7 cannot support
 "the only charge ending 0412 in the last 30 days" (30 was never passed, and the result cannot show days 8 to 30).
 A control without since_days is not used: the result alone (one charge on Nov 21, default window 90 days) makes a
-14-day claim derivable, and the real verifier supported it (first run, report tool-args-evidence.md).
+14-day claim derivable, and the real verifier supported it (first run, report tool-args-evidence.md). Misuse case
+(review PR #93 I2): since_days 14 must never support "your refund is approved ... within 14 days" (the draft fails, or
+is flagged as a commitment, which also stops it).
 Use when: `uv run pytest -m real -s -o addopts="" tests/test_real_tool_args.py` (or `-k control`) only; deselected in
 CI by the default addopts.
 Inputs: ANTHROPIC_API_KEY from the repo .env (value never printed). Output: one line per case; pass/fail.
@@ -72,3 +74,12 @@ async def test_real_control_a_scope_never_passed_stays_unsupported():
     res = await _judge({"ending": "0412", "since_days": 7}, CONTROL_DRAFT)
     assert res.verdict == "fail"  # judged, not an error or timeout (a failed call must not pass this control)
     assert any(not c["supported"] for c in res.claims)
+
+
+MISUSE_DRAFT = "Good news: your refund for the charge ending 0412 is approved, and it will reach you within 14 days."
+
+
+@pytest.mark.real
+async def test_real_misuse_a_scope_arg_never_supports_an_outcome():
+    res = await _judge({"ending": "0412", "since_days": 14}, MISUSE_DRAFT)  # review PR #93 I2: scope is not an outcome
+    assert res.verdict == "fail" or res.commitment
