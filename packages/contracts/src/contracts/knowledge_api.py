@@ -17,7 +17,9 @@ ERROR_CODE_PATTERN = r"^E-[A-Z]+-[0-9]{3}$"
 
 class SearchRequest(StrictModel):
     """What: body of POST /v1/search. Use when: search_kb wrapper or calibration script.
-    Inputs: query, error_code, tier and verified from claims, k, calibration flag.
+    Inputs: query, error_code, tier and verified from claims, k, calibration flag, and customer_message (the code-held,
+    PIN-redacted customer text of this turn; CS-E-02.F11, additive): Gate 1 scores the returned chunks against both
+    the query and this text and keeps the higher cosine, so the verdict does not hang on the model's wording.
     Output: model; raises if tier and verified disagree. Side effects: none. Role: doc 07 s4.1."""
 
     query: str = Field(min_length=1, max_length=2000)
@@ -26,6 +28,7 @@ class SearchRequest(StrictModel):
     verified: bool
     k: int = Field(default=5, ge=1, le=8)
     calibration: bool = False
+    customer_message: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
     def _tier_matches_verified(self) -> "SearchRequest":

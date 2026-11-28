@@ -41,6 +41,7 @@ from agent.turn_control import CURRENT_CALL, CallScope, Route, TurnControl, requ
 TOOL_NAMES: tuple[str, ...] = ("search_kb", "request_verification", "get_account_summary", "list_charges",
                                "list_tickets", "prepare_refund", "create_ticket")
 Result = tuple[str, Any]
+CUSTOMER_MESSAGE_MAX = 2000  # contracts SearchRequest.customer_message max_length
 A = TypeVar("A", bound=StrictModel)
 
 
@@ -114,7 +115,8 @@ def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseT
         """What: knowledge search with tier and verified from claims; relevant chunks only (s4.1, s5.1 row 1),
         then Gate 1 (agent.gates.apply_retrieval_gate: the clarify instruction on a first weak turn, the route on
         escalate, the scope check on none).
-        Use when: the model searches help articles. Inputs: query, error_code. Output: ("ok", artifact with
+        Use when: the model searches help articles. Inputs: query, error_code; TurnControl.customer_text (sent as
+        customer_message, capped at the contract's 2000 characters, CS-E-02.F11). Output: ("ok", artifact with
         verdict, instruction, docs, chunk_ids, confidence). Side effects: one knowledge call; gate events and
         TurnControl gate fields. Role: tool."""
         args = _args(SearchKbArgs, "search_kb", raw)
@@ -125,6 +127,8 @@ def build_tools(core: CoreAgentClient, knowledge: KnowledgeClient) -> list[BaseT
         body: dict[str, Any] = {"query": args.query, "tier": tier, "verified": verified and tier != "public"}
         if args.error_code:
             body["error_code"] = args.error_code
+        if control.customer_text:  # CS-E-02.F11: Gate 1 also scores the customer's own words (code-held)
+            body["customer_message"] = control.customer_text[:CUSTOMER_MESSAGE_MAX]
         resp = await knowledge.search(control, body)
         verdict = resp["confidence"]["verdict"]
         decision = apply_retrieval_gate(control, resp, int(_state_get(scope.state, "weak_streak") or 0))

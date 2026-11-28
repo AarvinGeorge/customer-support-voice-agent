@@ -1,5 +1,6 @@
 """What: OpenAI embeddings client: sync batch calls for ingest, an async single call with a hard timeout for search.
-Use when: ingest embeds new chunks (embed_batch) and search embeds a query (aembed_one).
+Use when: ingest embeds new chunks (embed_batch) and search embeds a query (aembed_one) or the query plus the
+customer message (aembed_many).
 Inputs: OPENAI_API_KEY; model from knowledge.config. Output: lists of 1536 floats.
 Side effects: HTTPS calls to api.openai.com; `calls` counts every HTTP request and `inputs` every text sent.
 Role: the only module that spends embedding money. Plain httpx, no SDK; the counter is what the 'second run makes zero
@@ -99,15 +100,22 @@ class OpenAIEmbedder:
         Inputs: text, timeout in seconds. Output: one vector. Side effects: one request; counters.
         Role: no retry here (the caller owns the retry budget, doc 07 s4.1); raises EmbeddingError on timeout,
         transport error or a non-200 status."""
+        return (await self.aembed_many([text], timeout_s))[0]
+
+    async def aembed_many(self, texts: list[str], timeout_s: float) -> list[list[float]]:
+        """What: embed a few texts in ONE request with a hard timeout. Use when: search embeds the query and the
+        customer message together (CS-E-02.F11). Inputs: texts (at most batch_size), timeout in seconds.
+        Output: one vector per text, same order. Side effects: one request; counters.
+        Role: as aembed_one: no retry, EmbeddingError on timeout, transport error or a non-200 status."""
         self.calls += 1
-        self.inputs += 1
+        self.inputs += len(texts)
         try:
             async with httpx.AsyncClient(headers=self._aheaders, transport=self._atransport) as client:
-                resp = await asyncio.wait_for(client.post(URL, json=self._payload([text])), timeout=timeout_s)
+                resp = await asyncio.wait_for(client.post(URL, json=self._payload(list(texts))), timeout=timeout_s)
         except asyncio.TimeoutError as exc:
             raise EmbeddingError("embedding timeout") from exc
         except httpx.HTTPError as exc:
             raise EmbeddingError(f"embedding request failed: {type(exc).__name__}") from exc
         if resp.status_code != 200:
             raise EmbeddingError(f"embedding request failed with status {resp.status_code}")
-        return self._vectors(resp, 1)[0]
+        return self._vectors(resp, len(texts))

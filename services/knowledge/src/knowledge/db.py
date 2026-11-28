@@ -104,6 +104,21 @@ class Database:
                 "ORDER BY c.embedding <=> %(v)s::vector LIMIT %(n)s",
                 {"v": vector_text(vec), "tiers": tiers, "n": limit}).fetchall()
 
+    def cosines(self, vec: list[float], chunk_ids: list[str]) -> dict[str, float]:
+        """What: the cosine of one vector against the given chunks. Use when: search scores the customer message
+        against the chunks it is about to return (CS-E-02.F11). Inputs: vector, chunk ids (the fused top k).
+        Output: {chunk_id: cosine}; {} for no ids. Side effects: one SELECT, statement_timeout 1 s.
+        Role: Gate 1 input; reads k rows by primary key, no ranking."""
+        from knowledge.ingest.store import vector_text
+        if not chunk_ids:
+            return {}
+        with self._connect() as conn, conn.transaction():
+            conn.execute("SET LOCAL statement_timeout = '1000ms'")
+            rows = conn.execute("SELECT chunk_id, 1 - (embedding <=> %(v)s::vector) AS cosine FROM chunks "
+                                "WHERE chunk_id = ANY(%(ids)s::text[])",
+                                {"v": vector_text(vec), "ids": list(chunk_ids)}).fetchall()
+        return {r["chunk_id"]: float(r["cosine"]) for r in rows}
+
     def keyword_leg(self, text: str, codes: list[str], tiers: list[str], vec: list[float] | None, limit: int) -> list[dict]:
         """What: full-text matches within the allowed tiers. Use when: always (also when the embedding is down).
         Inputs: normalized text, detected codes, tiers, query vector or None, limit. Output: rows with f_rank

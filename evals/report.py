@@ -21,10 +21,14 @@ def _counts(items: list[str]) -> dict[str, int]:
 
 def build_report(grades: list[CaseGrade], gate1: dict[str, Any] | None, meta: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     """What: assemble the report dict. Use when: after run_cases and run_gate1. Inputs: grades, gate1 result or None, meta, now.
-    Output: dict with cases (verdicts, by_split, detail), checks (per grader raw counts), gate1, meta, generated_at.
-    Side effects: none. Role: the single source for both output files."""
-    verdicts = [g.verdict for g in grades]
-    by_split = {s: _counts([g.verdict for g in grades if g.split == s]) for s in ("train", "test")}
+    Output: dict with cases (total, verdicts and by_split over the plain cases only, known_limitation with the tagged
+    cases' own counts, detail), checks (per grader raw counts), gate1, meta, generated_at.
+    Side effects: none. Role: the single source for both output files. A case tagged known_limitation (D-083) is
+    never counted in the plain pass counts: its pass means it held the documented safe path, not that it is fixed."""
+    plain = [g for g in grades if not g.known_limitation]
+    tagged = [g for g in grades if g.known_limitation]
+    verdicts = [g.verdict for g in plain]
+    by_split = {s: _counts([g.verdict for g in plain if g.split == s]) for s in ("train", "test")}
     checks: dict[str, list[str]] = {}
     for g in grades:
         for c in g.checks:
@@ -37,7 +41,10 @@ def build_report(grades: list[CaseGrade], gate1: dict[str, Any] | None, meta: di
             "total": len(grades),
             "verdicts": _counts(verdicts),
             "by_split": by_split,
-            "detail": [{"id": g.case_id, "split": g.split, "verdict": g.verdict,
+            "known_limitation": {"total": len(tagged), "verdicts": _counts([g.verdict for g in tagged]),
+                                 "cases": [{"id": g.case_id, "split": g.split, "tag": g.known_limitation,
+                                            "verdict": g.verdict} for g in tagged]},
+            "detail": [{"id": g.case_id, "split": g.split, "verdict": g.verdict, "known_limitation": g.known_limitation,
                         "checks": [{"name": c.name, "status": c.status, "detail": c.detail,
                                     **({"exercised": c.exercised} if c.exercised is not None else {})} for c in g.checks]} for g in grades],
         },
@@ -48,6 +55,16 @@ def build_report(grades: list[CaseGrade], gate1: dict[str, Any] | None, meta: di
     }
 
 
+def all_green(r: dict[str, Any]) -> bool:
+    """What: did the run pass. Use when: the CLI exit code. Inputs: the report dict. Output: True when at least one case
+    ran and no case failed or errored, plain or tagged. Side effects: none. Role: a known limitation that left its safe
+    path is a failure like any other; a tagged pass is not a plain pass but does not fail the run."""
+    c = r["cases"]
+    k = c["known_limitation"]["verdicts"]
+    v = c["verdicts"]
+    return c["total"] > 0 and v["fail"] == 0 and v["error"] == 0 and k["fail"] == 0 and k["error"] == 0
+
+
 def render_markdown(r: dict[str, Any]) -> str:
     """What: render the report as Markdown. Use when: writing the file. Inputs: the report dict. Output: text (no long dashes).
     Side effects: none. Role: the human-readable copy; every number is a raw count."""
@@ -55,15 +72,26 @@ def render_markdown(r: dict[str, Any]) -> str:
     for k, v in r["meta"].items():
         L.append(f"- {k}: {v}")
     c = r["cases"]
+    plain_n = sum(c["verdicts"].values())
     L += ["", "## Cases", "", "| scope | pass | fail | error |", "|---|---|---|---|",
-          f"| all ({c['total']}) | {c['verdicts']['pass']} | {c['verdicts']['fail']} | {c['verdicts']['error']} |"]
+          f"| all ({plain_n}) | {c['verdicts']['pass']} | {c['verdicts']['fail']} | {c['verdicts']['error']} |"]
     for s, v in c["by_split"].items():
         L.append(f"| {s} ({sum(v.values())}) | {v['pass']} | {v['fail']} | {v['error']} |")
     L += ["", "A case passes only when every check passes; error means data needed to decide was missing.", "",
           "| case | split | verdict | not passing |", "|---|---|---|---|"]
     for d in c["detail"]:
         bad = "; ".join(f"{x['name']} {x['status']}: {x['detail']}" for x in d["checks"] if x["status"] != "pass")
-        L.append(f"| {d['id']} | {d['split']} | {d['verdict']} | {bad or '-'} |")
+        tag = f" (known limitation {d['known_limitation']})" if d.get("known_limitation") else ""
+        L.append(f"| {d['id']} | {d['split']} | {d['verdict']}{tag} | {bad or '-'} |")
+    k = c["known_limitation"]
+    L += ["", "## Known limitations (not counted as fixed)", ""]
+    if k["total"]:
+        L += [f"{k['total']} tagged cases: {k['verdicts']['pass']} held the documented safe path, {k['verdicts']['fail']} fail, "
+              f"{k['verdicts']['error']} error. They are not in the counts above.", "", "| case | split | decision | verdict |",
+              "|---|---|---|---|"]
+        L += [f"| {x['id']} | {x['split']} | {x['tag']} | {x['verdict']} |" for x in k["cases"]]
+    else:
+        L.append("None in this run.")
     L += ["", "## Checks (raw counts across cases)", "", "| check | pass | fail | error |", "|---|---|---|---|"]
     for name, v in r["checks"].items():
         L.append(f"| {name} | {v['pass']} | {v['fail']} | {v['error']} |")
