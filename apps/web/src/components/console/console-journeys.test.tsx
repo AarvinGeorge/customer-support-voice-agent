@@ -47,14 +47,14 @@ interface Call {
  * Side effects: none outside the returned objects.
  * Role: test double.
  */
-function fakeAgent(opts: { sessionId?: string; turn?: SseEvent[] } = {}) {
+function fakeAgent(opts: { sessionId?: string; turn?: SseEvent[]; personas?: readonly unknown[] } = {}) {
   const calls: Call[] = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
     const method = init?.method ?? "GET";
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
     calls.push({ method, path, body, headers: Object.fromEntries(new Headers(init?.headers).entries()) });
-    if (method === "GET" && path === "/api/demo/personas") return new Response(JSON.stringify(MOCK_PERSONAS), { status: 200 });
+    if (method === "GET" && path === "/api/demo/personas") return new Response(JSON.stringify(opts.personas ?? MOCK_PERSONAS), { status: 200 });
     if (method === "POST" && path === "/api/sessions") {
       return new Response(JSON.stringify({ session_id: opts.sessionId ?? SID, created_at: "2026-11-27T12:00:00Z" }), { status: 201 });
     }
@@ -92,6 +92,14 @@ afterEach(() => {
 });
 
 describe("a console tab opened from the landing page", () => {
+  it("keeps the person (who) as well as the account in the URL it redirects to (F13)", async () => {
+    nav.query = "as=QS-20871&who=Dana%20Okafor";
+    const { fetchMock } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ConsoleRoute />);
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`/console?session=${SID}&as=QS-20871&who=Dana%20Okafor`));
+  });
+
   it("without a session creates exactly one fresh session (empty body) and keeps the hint in the URL", async () => {
     nav.query = "as=QS-10423";
     const { fetchMock, calls } = fakeAgent();
@@ -178,6 +186,69 @@ describe("the verification card and the display-only hint", () => {
     expect((screen.getByLabelText("Account ID") as HTMLInputElement).value).toBe(PRIYA.account_id);
     expect((screen.getByLabelText("Support PIN") as HTMLInputElement).value).toBe("");
     expect(card).toBeTruthy();
+  });
+
+  it("people who share an account: the hint names the person, not the first persona on the account (F13)", async () => {
+    const shared = MOCK_PERSONAS.filter((p) => MOCK_PERSONAS.filter((q) => q.account_id === p.account_id).length > 1);
+    expect(shared.length).toBeGreaterThan(1);
+    for (const person of shared) {
+      nav.query = `session=${SID}&as=${person.account_id}&who=${encodeURIComponent(person.name)}`;
+      const { fetchMock } = fakeAgent();
+      vi.stubGlobal("fetch", fetchMock);
+      const view = render(<ConsoleRoute />);
+      sendMessage("I was charged twice");
+      await screen.findByRole("region", { name: `Verify as ${person.name}` });
+      expect((screen.getByLabelText("Account ID") as HTMLInputElement).value).toBe(person.account_id);
+      expect((screen.getByLabelText("Support PIN") as HTMLInputElement).value).toBe("");
+      view.unmount();
+      turnStore.getState().reset();
+    }
+  });
+
+  it("the seeded case: Dana's link titles her card 'Verify as Dana Whitfield' (Marcus is listed first on QS-20318)", async () => {
+    const base = MOCK_PERSONAS[0]!;
+    const personas = [
+      { ...base, name: "Marcus Lee", role: "member", account_id: "QS-20318" },
+      { ...base, name: "Dana Whitfield", role: "owner", account_id: "QS-20318" },
+    ];
+    nav.query = `session=${SID}&as=QS-20318&who=${encodeURIComponent("Dana Whitfield")}`;
+    const { fetchMock } = fakeAgent({ personas });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ConsoleRoute />);
+    sendMessage("I was charged twice");
+    await screen.findByRole("region", { name: "Verify as Dana Whitfield" });
+    expect(screen.queryByRole("region", { name: "Verify as Marcus Lee" })).toBeNull();
+    expect((screen.getByLabelText("Account ID") as HTMLInputElement).value).toBe("QS-20318");
+  });
+
+  it("an account-only hint on a shared account names nobody but still pre-fills the account", async () => {
+    const person = MOCK_PERSONAS.find((p) => MOCK_PERSONAS.filter((q) => q.account_id === p.account_id).length > 1)!;
+    nav.query = `session=${SID}&as=${person.account_id}`;
+    const { fetchMock } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ConsoleRoute />);
+    sendMessage("I was charged twice");
+    await screen.findByRole("region", { name: "Verify your account" });
+    await waitFor(() => expect((screen.getByLabelText("Account ID") as HTMLInputElement).value).toBe(person.account_id));
+  });
+
+  it("a name that does not belong to the account is ignored (account still pre-filled, no name)", async () => {
+    nav.query = `session=${SID}&as=${PRIYA.account_id}&who=Marcus%20Lee`;
+    const { fetchMock } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ConsoleRoute />);
+    sendMessage("I was charged twice");
+    await screen.findByRole("region", { name: "Verify your account" });
+    await waitFor(() => expect((screen.getByLabelText("Account ID") as HTMLInputElement).value).toBe(PRIYA.account_id));
+  });
+
+  it("an empty who= behaves like an absent one (single-persona account still names its person)", async () => {
+    nav.query = `session=${SID}&as=${PRIYA.account_id}&who=`;
+    const { fetchMock } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ConsoleRoute />);
+    sendMessage("I was charged twice");
+    await screen.findByRole("region", { name: `Verify as ${PRIYA.name}` });
   });
 
   it("without a hint the card says 'Verify your account' with empty fields", async () => {

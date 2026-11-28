@@ -233,7 +233,7 @@ export function PersonaList({ personas }: { personas: readonly Persona[] }) {
 
               <div className="flex items-end justify-end md:items-center">
                 <a
-                  href={consoleStartPath(p.account_id)}
+                  href={consoleStartPath({ as: p.account_id, who: p.name })}
                   target="_blank"
                   rel="noopener"
                   aria-label={`Start as ${p.name} (opens in a new tab)`}

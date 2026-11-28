@@ -1,6 +1,6 @@
 "use client";
 /**
- * What: the /console client entry: reads ?session= and the display-only ?as= hint, creates a fresh
+ * What: the /console client entry: reads ?session= and the display-only ?as= and ?who= hint, creates a fresh
  *   session when the tab opened without one, resets the store when the session changes, resolves
  *   the hint against the persona list, and wires New conversation to a fresh session.
  * Use when: rendered by src/app/console/page.tsx inside Suspense (useSearchParams).
@@ -8,7 +8,7 @@
  * Output: ConsoleShell bound to the app turn store, with the Demo controls in the drawer slot.
  * Side effects: a tab without ?session= makes one POST /api/sessions and replaces the URL, keeping
  *   the hint (a 401 returns to the access page; any other failure shows a lasting error line with
- *   Try again, review PR #81 M-3); with ?as= one GET /api/demo/personas; store reset on a session
+ *   Try again, review PR #81 M-3); with ?as= (and ?who=) one GET /api/demo/personas; store reset on a session
  *   change (review PR #16, M5); New conversation makes one POST /api/sessions and replaces the
  *   URL without the hint (a new conversation starts signed out, review PR #81 M-2).
  * Role: route glue between the landing links (consoleStartPath, D-076) and the console shell. The
@@ -18,7 +18,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
-import { consolePath, createSession, listPersonas } from "@/lib/api/access";
+import { consolePath, createSession, listPersonas, resolveStartHint } from "@/lib/api/access";
 import { ACCESS_GATE_PATH, ApiError } from "@/lib/api/client";
 import { turnStore } from "@/lib/turns/store";
 
@@ -40,11 +40,13 @@ export function ConsoleRoute() {
   const router = useRouter();
   const sessionId = params.get("session");
   const as = params.get("as");
+  const who = params.get("who");
+  const hintKey = as === null ? null : `${as}\u0000${who ?? ""}`;
   const starting = useRef(false);
   // The resolved hint is keyed on the ?as= value it was resolved for, so a changed or removed
-  // ?as= never shows an old name (review PR #81 M-2).
-  const [resolved, setResolved] = useState<{ as: string; hint: VerifyHint | null } | null>(null);
-  const hint = as !== null && resolved?.as === as ? resolved.hint : null;
+  // ?as= or ?who= never shows an old name (review PR #81 M-2).
+  const [resolved, setResolved] = useState<{ key: string; hint: VerifyHint | null } | null>(null);
+  const hint = hintKey !== null && resolved?.key === hintKey ? resolved.hint : null;
   const [startError, setStartError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -69,7 +71,7 @@ export function ConsoleRoute() {
     createSession()
       .then((created) => {
         turnStore.getState().reset();
-        router.replace(consolePath(created.session_id, keepHint ? as : null));
+        router.replace(consolePath(created.session_id, keepHint && as !== null ? { as, who } : null));
       })
       .catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 401) router.replace(ACCESS_GATE_PATH);
@@ -93,14 +95,14 @@ export function ConsoleRoute() {
     let ignore = false;
     listPersonas()
       .then((personas) => {
-        const p = personas.find((x) => x.account_id === as);
-        if (!ignore) setResolved({ as, hint: p === undefined ? null : { name: p.name, accountId: p.account_id } });
+        // F13: the person comes from (account, name), never from the account alone.
+        if (!ignore) setResolved({ key: hintKey as string, hint: resolveStartHint(personas, as, who) });
       })
       .catch(() => undefined);
     return () => {
       ignore = true;
     };
-  }, [as]);
+  }, [as, who, hintKey]);
 
   return (
     <ConsoleShell
