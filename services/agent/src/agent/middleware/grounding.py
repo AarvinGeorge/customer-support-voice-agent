@@ -3,8 +3,9 @@ draft (no tool calls) is checked; a line our code wrote (agent.gates.is_code_lin
 never checked. A check emits status checking_policy, calls the grounding_verifier
 (5 s in chat, 3 s in voice per D-061; 0 retries, fail closed) and emits the `gate` event; pass keeps the draft (the SSE adapter flushes it with
 the citations recorded here); fail removes the draft from the thread with RemoveMessage (spike 3) and ends the
-turn with the fixed clarifying line, or on the second consecutive fail, or at once on commitment, with an
-escalate(grounding_failed | needs_commitment) route line and its ticket.
+turn with the fixed clarifying line, or on the second consecutive fail with an escalate(grounding_failed) route line
+and its ticket. A commitment draft is a fail like any other (CS-E-03.F14): removed, never shown, and it does not by
+itself escalate, because it says the draft over-promised, not that the customer's request needs our team.
 Use when: in the create_agent stack (after_model hooks run in reverse order, so this runs first after the model).
 Inputs: the agent state (messages, grounding_failures), the bound TurnControl, a GroundingVerifier, the optional
 open_ticket hook (by default the escalation module opens the ticket after the loop and rewrites the line; the line
@@ -97,12 +98,10 @@ class GroundingMiddleware(AgentMiddleware):
                         sources=sources, **counts)
             return {"grounding_failures": 0} if failures else None
         control.grounding = "fail"
-        if result.commitment:
-            reason: str | None = "needs_commitment"
-        elif failures >= limits.GATE2_FAILURES_CLARIFY_MAX:
-            reason = "grounding_failed"
-        else:
-            reason = None
+        # CS-E-03.F14: a commitment fails the DRAFT (the floor: it never leaves) and takes the ordinary fail path. It
+        # is not evidence that the customer's request needs our team; that call is the model's (create_ticket
+        # category commitment, doc 07 s3.4), so code never writes a "needs a decision from our team" line here.
+        reason: str | None = "grounding_failed" if failures >= limits.GATE2_FAILURES_CLARIFY_MAX else None
         decision = "clarify" if reason is None else "escalate"
         verdict = "fail" if result.verdict == "pass" else result.verdict  # a commitment is never a pass (M7)
         error = result.verdict == "error"
