@@ -157,7 +157,7 @@ def test_case_count_and_coverage():
     """What: about 12 cases; S1 to S5 each covered; a past_due case and the poisoned-article case exist. Use when: CI.
     Inputs: none. Output: pass or fail. Side effects: none. Role: the story's scope (doc 09 s5 row CS-E-09.S5.T1)."""
     cases = _cases()
-    assert 12 <= len(cases) <= 16
+    assert 12 <= len(cases) <= 24
     scenarios = Counter(c["scenario"] for c in cases)
     for s in ("S1", "S2", "S3", "S4", "S5"):
         assert scenarios[s] >= 1, f"no case for {s}"

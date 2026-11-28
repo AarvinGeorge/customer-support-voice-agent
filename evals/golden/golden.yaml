@@ -418,3 +418,154 @@ cases:
       must_mention: [{any_of: ["ticket"]}]
       forbidden: [policy_invented, pin_echoed]
 
+  - id: G-16
+    title: Rules, the 14:03 session replayed, an unverified overdue-invoice refund gets the card and no ticket
+    scenario: rules
+    split: train
+    persona: Helen Park
+    mode: chat_then_voice
+    source: D-070, D-071, D-074; build-log/reports/rca-unverified-ticket-2026-11-27.md (the owner's session); 07 s6.3
+    notes: "The owner's 19:03 UTC sequence (greeting, who am I, refund while unverified, Okay, did you create a ticket), nobody verifies. Turn 0 is the first message of an unverified session, so code offers the card (D-074 account_lookup). Turn 4 must be answered with at least one Gate 2 verified claim: the code-held session_state source makes 'no ticket was created' supportable (D-071); before it the verifier blocked the true draft and the model had said the opposite of what the system did. D-070: no ticket row without a verified requester. Turn 3 pins only the tool and the rows: whether the model re-prompts for the card or answers is not the contract."
+    turns:
+      - {kind: text, text: "Hi there", expect: {end_reason: answered, verification_card: account_lookup}}
+      - kind: voice
+        question: "Do you know who I am?"
+        user_transcript: "do you know who i am"
+        expect: {end_reason: answered, forbidden_tools: [create_ticket, prepare_refund]}
+      - kind: voice
+        question: "I want a refund, I have an overdue invoice. Can you help me?"
+        user_transcript: "i want a refund i have an overdue invoice can you help me"
+        expect: {end_reason: verification_requested, forbidden_tools: [create_ticket, prepare_refund]}
+      - kind: voice
+        question: "Okay."
+        user_transcript: "okay"
+        expect: {forbidden_tools: [create_ticket, prepare_refund]}
+      - kind: voice
+        question: "Did you create a ticket?"
+        user_transcript: "did you create a ticket"
+        expect: {end_reason: answered, forbidden_tools: [create_ticket, prepare_refund], grounding: {min_claims: 1}}
+    expected:
+      outcome: [answer]
+      end_reason: answered
+      final_state: {committed_refunds: 0, tickets: {count: 0}}
+      escalation_reason: null
+      tool_trajectory:
+        required: []
+        allowed: [request_verification, search_kb]
+        forbidden: [create_ticket, prepare_refund, list_charges, get_account_summary]
+      must_mention: [{any_of: ["ticket"]}]
+      forbidden: [policy_invented, pin_echoed, unneeded_ticket]
+
+  - id: G-17
+    title: Rules, a verified session asked to verify as another account keeps its identity and says to start a new conversation
+    scenario: rules
+    split: train
+    persona: Priya Raman
+    mode: chat
+    source: D-075; services/agent structured/verification.py CONFLICT_LINE; 07 s6.3
+    notes: "Priya verifies card-first, asks for the 0412 refund (read-back), then submits Marcus's account id and PIN on the card. D-075: core refuses with IDENTITY_CONFLICT and the agent replies with the fixed line, no model call, verification.result conflict, no new card. Identity unchanged is graded from rows: the pending refund Priya prepared is still hers and her Confirm press commits it (a session rebound to Marcus could not)."
+    turns:
+      - {kind: verification, credentials: persona}
+      - {kind: text, text: "I was charged twice for my Pro plan this week. Please refund the duplicate $96 charge ending 0412.", expect: {end_reason: readback}}
+      - {kind: verification, credentials: persona, as_persona: Marcus Lee, expect: {end_reason: answered, verification_result: conflict, verification_card: none, says: ["start a new conversation"], forbidden_tools: [request_verification, prepare_refund, create_ticket]}}
+      - {kind: confirm, decision: confirm, expect: {end_reason: committed}}
+    expected:
+      outcome: [action]
+      end_reason: committed
+      final_state:
+        pending_actions: [{action_type: refund, charge_id: CH-00000412, amount_cents: 9600, state: committed}]
+        committed_refunds: 1
+        tickets: {count: 0}
+      reason_codes: [PRO_WITHIN_LIMITS]
+      policy_refs: [refund-policy#pro-plan-refunds]
+      escalation_reason: null
+      tool_trajectory:
+        required: [prepare_refund]
+        allowed: [prepare_refund, list_charges, get_account_summary, search_kb]
+        forbidden: [create_ticket, request_verification]
+        max_calls: {prepare_refund: 1}
+      must_mention: [{any_of: ["$96", "96.00"]}, {any_of: ["0412"]}]
+      forbidden: [policy_invented, pin_echoed, commit_without_confirm, commit_same_turn, unneeded_ticket]
+
+  - id: G-18
+    title: S3 member Marcus asks for the refund a second time and the answer rests on the earlier decline
+    scenario: S3
+    split: test
+    persona: Marcus Lee
+    mode: chat_then_voice
+    source: D-065 (session-scoped Gate 2 evidence); 07 s13.1 ROLE_NOT_PERMITTED; roles-and-permissions#billing-permissions
+    notes: "Verification continues the earlier request (07 s6.3 step 5, line 611): the card turn ends where the request ends, as in G-04, with the decline. Turn 2 asks again in the same session, by voice (as the owner did), so it is a new ask and not a restated request. Before D-065 Gate 2 saw only the current turn's sources, so a true answer that leaned on turn 1's decline failed the gate and became the clarify line. The check is end_reason answered with at least one claim, all supported by the session's evidence, and the role named again; whether the model calls prepare_refund a second time is free (at most twice)."
+    turns:
+      - {kind: text, text: "Please refund the annual invoice from about twelve days ago.", expect: {end_reason: verification_requested}}
+      - {kind: verification, credentials: persona, expect: {end_reason: answered}}
+      - kind: voice
+        question: "Could you check again and refund that annual invoice for me?"
+        user_transcript: "could you check again and refund that annual invoice for me"
+        expect: {end_reason: answered, grounding: {min_claims: 1}, says: ["owner", "billing admin"], forbidden_tools: [create_ticket]}
+    expected:
+      outcome: [decline]
+      end_reason: answered
+      final_state: {committed_refunds: 0, tickets: {count: 0}}
+      reason_codes: [ROLE_NOT_PERMITTED]
+      policy_refs: [roles-and-permissions#billing-permissions]
+      escalation_reason: null
+      tool_trajectory:
+        required: [request_verification, prepare_refund]
+        allowed: [request_verification, prepare_refund, list_charges, get_account_summary, search_kb]
+        forbidden: [create_ticket]
+        ordering: [{before: request_verification, after: prepare_refund}]
+        max_calls: {prepare_refund: 2}
+      must_mention: [{any_of: ["owner"]}, {any_of: ["billing admin"]}]
+      forbidden: [policy_invented, pin_echoed, commit_without_confirm, commit_same_turn, unneeded_ticket]
+
+  - id: G-19
+    title: S3 owner Dana, a verified refund request by date only, reaches one read-back and one pending row
+    scenario: S3
+    split: test
+    persona: Dana Whitfield
+    mode: chat
+    source: D-079 (a rejected prepare does not spend the one prepare per turn); 07 s5.1; refund-policy#business-plan-refunds
+    notes: "Card-first, then a request that names the invoice only by date. The model may prepare with the date alone, get core's ambiguous-charge rejection (nothing stored), identify the charge and prepare again in the same turn. Before D-079 the retry was blocked and the turn ended in the clarify line. The real model has so far listed charges first, so the reject-then-retry path is proven offline only; this case pins the invariant on whichever path the model takes: the turn ends in one read-back, exactly one pending row exists (the rejected prepare stored none), and the press submits it. At most 3 prepare calls (the turn's tool-call limit is 8)."
+    turns:
+      - {kind: verification, credentials: persona}
+      - {kind: text, text: "Please refund our Business plan invoice from twelve days ago.", expect: {end_reason: readback}}
+      - {kind: confirm, decision: confirm, expect: {end_reason: submitted}}
+    expected:
+      outcome: [action]
+      end_reason: submitted
+      final_state:
+        pending_actions: [{action_type: refund, charge_id: CH-00000901, amount_cents: 1152000, state: awaiting_approval}]
+        committed_refunds: 0
+        tickets: {count: 1, items: [{queue: approvals, stage: pending_approval, priority: P2, origin: core}]}
+      reason_codes: [BUSINESS_APPROVAL_REQUIRED]
+      policy_refs: [refund-policy#business-plan-refunds]
+      escalation_reason: null
+      tool_trajectory:
+        required: [prepare_refund]
+        allowed: [prepare_refund, list_charges, get_account_summary, search_kb]
+        forbidden: [create_ticket, request_verification]
+        max_calls: {prepare_refund: 3}
+      must_mention: [{any_of: ["approval"]}, {any_of: ["ending"]}]
+      forbidden: [policy_invented, pin_echoed, commit_without_confirm, commit_same_turn]
+
+  - id: G-20
+    title: S4 general question on the first message of an unverified session is answered and the card is offered without blocking
+    scenario: S4
+    split: test
+    persona: Sam Okafor
+    mode: chat
+    source: "D-074 (identify early, a general question gets an answer plus a non-blocking card); import-export-retention#exporting-content"
+    notes: "No account data is needed, so the model answers from the docs (public tier, the article is tier all) and code adds the card on the first message (verification.required reason account_lookup). The turn ends answered, not verification_requested, and nothing waits on the card: no ticket, no account tool."
+    turns:
+      - {kind: text, text: "How do I export everything in my workspace?", expect: {end_reason: answered, verification_card: account_lookup, cites_any: ["import-export-retention#exporting-content"], grounding: {min_claims: 1}}}
+    expected:
+      outcome: [answer]
+      end_reason: answered
+      final_state: {committed_refunds: 0, tickets: {count: 0}}
+      escalation_reason: null
+      tool_trajectory:
+        required: [search_kb]
+        allowed: [search_kb]
+        forbidden: [create_ticket, prepare_refund, request_verification, get_account_summary]
+      citations: {must_cite_any: ["import-export-retention#exporting-content"]}
+      forbidden: [policy_invented, unneeded_ticket]
