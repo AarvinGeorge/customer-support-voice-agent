@@ -90,6 +90,7 @@ async def _no_pin(control: TurnControl, flags: SessionFlags | None, escalator: E
     control.awaiting_verification = False
     if flags is not None:
         await flags.set_awaiting_verification(control.session_id, False)
+        await flags.set_card_offered(control.session_id, False)  # the card closes (D-074 fact, review PR #82)
     if escalator is not None:
         await escalator.hold(control, None)
     outcome = TurnOutcome.fixed(NO_PIN_LINE, end_reason="answered")

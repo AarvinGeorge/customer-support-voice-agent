@@ -34,7 +34,7 @@ class Flags:
 
     def __init__(self, w: World) -> None:
         """What: keep the world. Use when: tests. Inputs: world. Output: none. Side effects: none. Role: fake."""
-        self.w, self.calls = w, []
+        self.w, self.calls, self.cards = w, [], []
 
     async def set_awaiting_verification(self, session_id: str, awaiting: bool,
                                         verified_user_id: str | None = None) -> None:
@@ -43,6 +43,13 @@ class Flags:
         self.calls.append((session_id, awaiting))
         s = self.w.turns.sessions[session_id]
         self.w.turns.sessions[session_id] = replace(s, awaiting_verification=awaiting)
+
+    async def set_card_offered(self, session_id: str, offered: bool) -> None:
+        """What: record and apply the D-074 card fact. Use when: the first-message offer. Inputs: id, flag.
+        Output: none. Side effects: row. Role: fake."""
+        self.cards.append((session_id, offered))
+        s = self.w.turns.sessions[session_id]
+        self.w.turns.sessions[session_id] = replace(s, card_offered=offered)
 
 
 def guarded(*replies: AIMessage) -> tuple[World, Flags]:
@@ -286,6 +293,15 @@ async def test_a_short_ack_keeps_the_awaiting_flag() -> None:
     w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True, user_turns=1)
     await chat(w, "ok one sec")
     assert flags.calls == [] and w.turns.sessions[SID].awaiting_verification is True
+
+
+async def test_a_charge_ending_after_the_offered_card_reaches_the_model() -> None:
+    # Review PR #82 I1: the first-message card offer must not make later 4-digit references PIN candidates.
+    w, flags = guarded(AIMessage(content="Hello! How can I help?"), AIMessage(content="Let me check that charge."))
+    await chat(w, "Hi there")
+    await chat(w, "I was charged twice, please refund the duplicate $96 charge ending 0412.")
+    assert "charge ending 0412" in model_text(w)
+    assert flags.cards == [(SID, True)] and (SID, True) not in flags.calls  # the offer is its own fact, not "awaiting"
 
 
 def test_log_formatter_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:

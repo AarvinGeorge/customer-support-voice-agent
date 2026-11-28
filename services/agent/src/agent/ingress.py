@@ -81,6 +81,7 @@ class SessionRow:
     user_turns: int = 0
     awaiting_verification: bool = False
     verified_user_id: str | None = None
+    card_offered: bool = False  # agent.sessions.card_offered_at is set: the D-074 card was offered (on screen)
 
 
 @dataclass(frozen=True)
@@ -452,6 +453,7 @@ class Ingress:
             control = TurnControl(session_id=inp.session_id, turn_id=row.turn_id, mode=inp.mode,
                                   deadline=deadline_mono, demo_fault=inp.demo_fault, events=s,
                                   session_awaiting_verification=session.awaiting_verification,
+                                  session_card_offered=session.card_offered,
                                   first_message=session.user_turns == 0 and session.verified_user_id is None)
             bind_turn_control(control)  # the turn task's own context; the only .set() (spike 15)
             cm = asyncio.timeout(hard_net)
@@ -555,7 +557,8 @@ class PgTurnStore:
             return None
         async with self.pool.connection() as conn:
             cur = await conn.execute("SELECT session_id::text, visitor_id, user_turns, awaiting_verification, "
-                                     "verified_user_id FROM agent.sessions WHERE session_id = %s", (session_id,))
+                                     "verified_user_id, card_offered_at IS NOT NULL FROM agent.sessions "
+                                     "WHERE session_id = %s", (session_id,))
             r = await cur.fetchone()
         return SessionRow(*r) if r else None
 

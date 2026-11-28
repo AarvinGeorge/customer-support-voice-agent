@@ -64,6 +64,11 @@ class Flags:
         """What: empty log. Use when: tests. Inputs: none. Output: none. Side effects: none. Role: constructor."""
         self.calls: list[tuple[str, bool, str | None]] = []
 
+    async def set_card_offered(self, session_id: str, offered: bool) -> None:
+        """What: record the D-074 card fact. Use when: the first-message offer. Inputs: id, flag. Output: none.
+        Side effects: records. Role: fake."""
+        self.cards = [*getattr(self, "cards", []), (session_id, offered)]
+
     async def set_awaiting_verification(self, session_id: str, awaiting: bool, verified_user_id: str | None = None) -> None:
         """What: record. Use when: verification. Inputs: id, flag, user. Output: none. Side effects: records.
         Role: fake."""

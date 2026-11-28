@@ -68,6 +68,15 @@ def test_c_session_state_states_verification_the_card_and_tickets():
     assert _passes(CARD_CLAIM, ev)
 
 
+@pytest.mark.parametrize("fact", ["session_card_offered", "card_offered"])
+def test_c_the_offered_card_is_on_screen_but_nobody_is_waiting(fact: str):
+    # D-074 fix round 1 (review PR #82): the first-message offer is its own fact; Gate 2 may accept "the card is on
+    # screen", while "waiting for the customer to verify" stays no.
+    ev = session_evidence({"verified": False}, [HumanMessage("hi")], _control(**{fact: True}))
+    assert "The secure verification card is on the customer's screen: yes." in ev.text
+    assert "Waiting for the customer to verify: no." in ev.text
+
+
 def test_c_the_card_is_not_on_screen_when_nothing_awaits_or_the_customer_is_verified():
     idle = session_evidence({"verified": False}, [HumanMessage("hi")], _control())
     assert "The secure verification card is on the customer's screen: no." in idle.text

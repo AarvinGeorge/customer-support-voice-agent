@@ -67,6 +67,11 @@ class SessionFlags(Protocol):
         Side effects: UPDATE. Role: port method."""
         ...
 
+    async def set_card_offered(self, session_id: str, offered: bool) -> None:
+        """What: set or clear agent.sessions.card_offered_at (D-074). Use when: the first-message offer; the card's
+        "I don't have my PIN" press. Inputs: id, flag. Output: none. Side effects: UPDATE. Role: port method."""
+        ...
+
 
 class PgSessionFlags:
     """What: SessionFlags over the agent_app pool, and the EscalationHolds store (agent.escalation, D-070).
@@ -86,6 +91,14 @@ class PgSessionFlags:
             await conn.execute("UPDATE agent.sessions SET awaiting_verification = %s, "
                                "verified_user_id = COALESCE(%s, verified_user_id) WHERE session_id = %s",
                                (awaiting, verified_user_id, session_id))
+
+    async def set_card_offered(self, session_id: str, offered: bool) -> None:
+        """What: set card_offered_at to now (kept if already set) or clear it. Use when: the D-074 offer, the no-PIN
+        press. Inputs: session id, flag. Output: none. Side effects: one UPDATE. Role: write (review PR #82 I1, I2)."""
+        async with self.pool.connection() as conn:
+            await conn.execute("UPDATE agent.sessions SET card_offered_at = CASE WHEN %s THEN "
+                               "COALESCE(card_offered_at, now()) ELSE NULL END WHERE session_id = %s",
+                               (offered, session_id))
 
     async def escalation_facts(self, session_id: str) -> EscalationFacts:
         """What: the session's awaiting_verification flag, held escalation and last verified user, read from
@@ -205,6 +218,8 @@ class TurnRunner:
         ctx = TurnContext(mode="voice" if inp.mode == "voice" else "chat", verified=verified,
                           verification="just_verified" if result.verification == "just_verified" else None,
                           pending=result.pending_summary,
+                          card_on_screen=not verified and (control.session_card_offered
+                                                           or control.session_awaiting_verification),
                           context_snapshot=merged.get("context_snapshot") if verified else None, context_stale=stale)
         if result.model_text is not None:
             text = result.model_text
@@ -217,7 +232,8 @@ class TurnRunner:
         agent_input = {**memory.update, **result.state, "messages": messages}
         loop_config = turn_run_config(inp.session_id, control.turn_id, control.demo_fault)
         outcome = await self._loop(stream, control, agent_input, config, loop_config)  # steps 14 and 15
-        offer_card(stream, control, verified)  # D-074: the first message of an unverified session gets the card
+        if offer_card(stream, control, verified) and self.flags is not None:  # D-074: the card on the first message
+            await self.flags.set_card_offered(inp.session_id, True)
         if control.awaiting_verification and self.flags is not None:  # s6.3 step 2: agent.sessions is the authority
             await self.flags.set_awaiting_verification(inp.session_id, True)
         return outcome

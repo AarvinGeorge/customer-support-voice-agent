@@ -56,3 +56,44 @@ async def test_hold_round_trip_and_facts_come_only_from_agent_sessions() -> None
         async with pool.connection() as conn:
             await conn.execute("DELETE FROM agent.sessions WHERE session_id = %s", (sid,))
         await pool.close()
+
+
+async def test_card_offered_is_its_own_fact_on_agent_sessions() -> None:
+    """What: migration 0003 and PgSessionFlags.set_card_offered: the D-074 card fact round trips through
+    PgTurnStore.get_session, keeps its first time, clears on the no-PIN press, and never touches awaiting_verification
+    (review PR #82 I1, I2). Use when: pg tests. Inputs: env AGENT_PG_TEST_URL. Output: assertions.
+    Side effects: one session row, deleted afterwards. Role: pins the SQL the test fakes stand in for."""
+    from psycopg_pool import AsyncConnectionPool
+
+    from agent.ingress import PgTurnStore
+
+    url = os.environ.get("AGENT_PG_TEST_URL", "")
+    if not url:
+        pytest.fail("AGENT_PG_TEST_URL is not set; run scripts/pg_tests.sh (Compose Postgres, migrate_agent)")
+    pool = AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
+    await pool.open()
+    sid = str(uuid.uuid4())
+    try:
+        async with pool.connection() as conn:
+            await conn.execute("INSERT INTO agent.sessions (session_id, visitor_id) VALUES (%s, 'pg-test')", (sid,))
+        flags, store = PgSessionFlags(pool), PgTurnStore(pool)
+        row = await store.get_session(sid)
+        assert row is not None and row.card_offered is False
+        await flags.set_card_offered(sid, True)
+        async with pool.connection() as conn:
+            first = (await (await conn.execute("SELECT card_offered_at FROM agent.sessions WHERE session_id = %s",
+                                               (sid,))).fetchone() or [None])[0]
+        await flags.set_card_offered(sid, True)
+        async with pool.connection() as conn:
+            again = (await (await conn.execute("SELECT card_offered_at FROM agent.sessions WHERE session_id = %s",
+                                               (sid,))).fetchone() or [None])[0]
+        assert first is not None and again == first
+        row = await store.get_session(sid)
+        assert row is not None and row.card_offered is True and row.awaiting_verification is False
+        await flags.set_card_offered(sid, False)
+        row = await store.get_session(sid)
+        assert row is not None and row.card_offered is False
+    finally:
+        async with pool.connection() as conn:
+            await conn.execute("DELETE FROM agent.sessions WHERE session_id = %s", (sid,))
+        await pool.close()
