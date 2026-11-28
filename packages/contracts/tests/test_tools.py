@@ -146,3 +146,16 @@ def test_search_kb_description_says_search_first():
     Use when: CI. Inputs: none. Output: assertion. Side effects: none. Role: F7 (off-topic answered unsearched)."""
     low = TOOL_DESCRIPTIONS["search_kb"].lower()
     assert "small talk" in low and "account" in low and "first" in low
+
+
+def test_ask_support_agent_description_relays_everything_and_rules_nothing():
+    """What: the voice tool description sends every customer question or request to the agent and carries no
+    scope, role, tier or number rule. Use when: CI. Inputs: none. Output: assertion. Side effects: none.
+    Role: CS-E-05.F2 (the Realtime model judged scope itself, so Gate 1 and the classifier never ran)."""
+    desc = ASK_SUPPORT_AGENT_TOOL["description"]
+    low = desc.lower()
+    assert "every customer question or request" in low and "whatever the topic" in low
+    assert "the agent decides scope, policy and identity" in low
+    assert "anything about" not in low and "about quillstack" not in low  # the old scope gate
+    assert _policy_terms(desc) == []
+    assert not re.search(r"\d", desc)
