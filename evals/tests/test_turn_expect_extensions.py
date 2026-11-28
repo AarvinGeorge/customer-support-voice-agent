@@ -101,3 +101,36 @@ def test_says_needs_one_phrase_in_that_turns_final_text() -> None:
     assert by(graders.grade_case(case, ok, POLICY))["turn.0"] == "pass"  # case-insensitive
     bad = make_run("G-08", [turn(0, "text", [], text="Sorry, something else.")])
     assert by(graders.grade_case(case, bad, POLICY))["turn.0"] == "fail"
+
+
+def claim(text: str, supported: bool, source_id: str | None) -> dict[str, Any]:
+    """What: one Gate 2 claim dict. Use when: a from_source test. Inputs: text, supported, source id. Output: dict.
+    Side effects: none. Role: helper."""
+    return {"text": text, "supported": supported, "source_id": source_id}
+
+
+def test_grounding_from_source_needs_a_supported_claim_resting_on_that_source() -> None:
+    exp = {"grounding": {"min_claims": 1, "from_source": "session_state"}}
+    ok = {**GROUND_OK, "claims": [claim("No ticket was created.", True, "session_state"), claim("x", True, "doc")]}
+    assert grade_turn(exp, ok) == "pass"
+    other = {**GROUND_OK, "claims": [claim("A ticket was created.", True, "account_context"), claim("x", True, "doc")]}
+    assert grade_turn(exp, other) == "fail"  # supported, but not by the session's own state (I2)
+    unsupported = {**GROUND_OK, "claims_supported": 1, "claims": [claim("A ticket was created.", False, "session_state"), claim("x", True, "doc")]}
+    assert grade_turn(exp, unsupported) == "fail"
+    nosource = {**GROUND_OK, "claims": None}
+    assert grade_turn(exp, nosource) == "fail"  # no claim list to read: fail, never a silent pass
+
+
+def test_grounding_verdict_other_than_pass_fails_even_with_full_counts() -> None:
+    """Review PR #84 M3: the verdict test must be load bearing on its own."""
+    errored = {**gate("error", "clarify", kind="grounding"), "claims_total": 2, "claims_supported": 2}
+    assert grade_turn({"grounding": {"min_claims": 1}}, errored) == "fail"
+
+
+def test_every_as_persona_name_in_the_dataset_is_a_persona() -> None:
+    """Review PR #84 M5: dataset validation, not a run-time surprise."""
+    personas = cases.load_personas()
+    for c in cases.load_cases():
+        for t in c["turns"]:
+            if t.get("as_persona"):
+                assert t["as_persona"] in personas, f"{c['id']}: {t['as_persona']}"

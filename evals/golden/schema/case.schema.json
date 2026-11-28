@@ -43,7 +43,7 @@
         "verification_result": {"enum": ["verified", "failed", "locked", "conflict", "unavailable"], "description": "the status of the verification.result event this turn emitted (D-075 conflict)"},
         "grounding": {
           "type": "object", "additionalProperties": false, "required": ["min_claims"],
-          "properties": {"min_claims": {"type": "integer", "minimum": 1}},
+          "properties": {"min_claims": {"type": "integer", "minimum": 1}, "from_source": {"type": "string", "minLength": 1, "description": "at least one supported claim rests on this evidence source id (for example session_state, D-071)"}},
           "description": "the turn's Gate 2 passed on at least min_claims claims, every claim supported (D-065 session evidence, D-071 session_state): a fixed line has no gate and fails"
         }
       }
@@ -134,6 +134,7 @@
             }
           }
         },
+        "path_probes": {"type": "array", "uniqueItems": true, "items": {"enum": ["retry_after_rejected_prepare", "answer_from_session_evidence", "weak_retrieval_answered"]}, "description": "which decision path the run took, recorded in the report and never a pass or fail: a green run on the trivial path shows the invariant held, not that the decision was exercised (D-079, D-065, D-066)"},
         "reason_codes": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Z_]+$"}, "description": "primary first (doc 07 s13.1)"},
         "policy_refs": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9-]+#[a-z0-9-]+$"}},
         "escalation_reason": {"enum": ["not_in_docs", "grounding_failed", "retrieval_unavailable", "tool_failure", "limit_reached", "deadline", "verify_locked", "needs_commitment", "customer_asked_human", "model_unavailable", null], "description": "null when the case must not escalate by agent code"},

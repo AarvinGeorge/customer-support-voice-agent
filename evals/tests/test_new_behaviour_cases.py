@@ -13,6 +13,8 @@ from evals.tests.test_graders import ASK, PA, PRO_RULE, VERIFY_REQ, by, grade
 
 CARD = {"type": "verification.required", "reason": "account_lookup", "prompt_text": "p", "attempts_left": 3, "fields": ["account_id", "pin"]}
 GROUND = {**gate("pass", "answer", kind="grounding"), "claims_total": 2, "claims_supported": 2}
+GROUND_STATE = {**GROUND, "claims": [{"text": "No ticket was created.", "supported": True, "source_id": "session_state"},
+                                      {"text": "A card is on screen.", "supported": True, "source_id": "session_state"}]}
 VOICE = {"user_transcript": "t", "transcript_final": True}
 
 
@@ -37,7 +39,7 @@ def g16_run(**over: Any) -> CaseRun:
          turn(1, "voice", [], text="I don't know who you are yet.", input=VOICE),
          turn(2, "voice", [*step("request_verification"), VERIFY_REQ], end_reason="verification_requested", text="Please verify.", input=VOICE),
          turn(3, "voice", [], text="Use the secure card when you are ready.", input=VOICE),
-         turn(4, "voice", [GROUND], text="No, I have not created a ticket for you.", input=VOICE)]
+         turn(4, "voice", [GROUND_STATE], text="No, I have not created a ticket for you.", input=VOICE)]
     return make_run("G-16", t, **over)
 
 
@@ -57,7 +59,7 @@ def test_g16_passes_and_each_mutation_fails_its_own_check() -> None:
     assert "turn.4" in failing(grade("G-16", run))  # the clarify line replaced the answer
     bad = make_run("G-16", [turn(0, "text", [CARD]), turn(1, "voice", [*step("create_ticket")], input=VOICE),
                             turn(2, "voice", [*step("request_verification"), VERIFY_REQ], end_reason="verification_requested", input=VOICE),
-                            turn(3, "voice", [], input=VOICE), turn(4, "voice", [GROUND], text="ticket", input=VOICE)])
+                            turn(3, "voice", [], input=VOICE), turn(4, "voice", [GROUND_STATE], text="ticket", input=VOICE)])
     assert {"turn.1", "trajectory"} <= set(failing(grade("G-16", bad)))  # a model ticket call while unverified
 
 
@@ -170,3 +172,59 @@ def test_g20_passes_and_each_mutation_fails_its_own_check() -> None:
     blocked = make_run("G-20", [turn(0, "text", [*step("search_kb"), *step("request_verification"), VERIFY_REQ], end_reason="verification_requested")])
     assert {"trajectory", "turn.0"} <= set(failing(grade("G-20", blocked)))
     assert by(grade("G-20", g20_run()))["citations"] == "pass"
+
+
+def probe(grade_: Any, name: str) -> bool | None:
+    """What: the exercised flag of one path probe check. Use when: asserting which path a run took. Inputs: grade, probe id.
+    Output: True, False or None when absent. Side effects: none. Role: helper."""
+    return next((c.exercised for c in grade_.checks if c.name == f"path:{name}"), None)
+
+
+def test_g18_records_whether_the_second_answer_rested_on_session_evidence() -> None:
+    g = grade("G-18", g18_run())
+    assert g.verdict == "pass" and probe(g, "answer_from_session_evidence") is True  # no tool call in turn 2
+    deny = rule("ROLE_NOT_PERMITTED", "declined", "roles-and-permissions", "billing-permissions")
+    t = [turn(0, "text", [*step("request_verification"), VERIFY_REQ], end_reason="verification_requested"),
+         turn(1, "verification", [*step("prepare_refund", rule=deny)], text="Only owners and billing admins can request refunds. ticket"),
+         turn(2, "voice", [*step("prepare_refund", rule=deny), GROUND], text="Only an owner or a billing admin can request this.", input=VOICE)]
+    g2 = grade("G-18", make_run("G-18", t))
+    assert probe(g2, "answer_from_session_evidence") is False  # a fresh prepare in turn 2: the trivial path (I3)
+
+
+def test_g19_records_whether_a_rejected_prepare_was_retried() -> None:
+    assert probe(grade("G-19", g19_run()), "retry_after_rejected_prepare") is True
+    biz = rule("BUSINESS_APPROVAL_REQUIRED", "needs_approval", "refund-policy", "business-plan-refunds")
+    t = [turn(0, "verification", [], end_reason="verified"), turn(1, "text", [*step("list_charges"), *step("prepare_refund", rule=biz), ASK], end_reason="readback")]
+    g = grade("G-19", make_run("G-19", t))
+    assert probe(g, "retry_after_rejected_prepare") is False  # listed charges first: the invariant held, D-079 not exercised
+
+
+def g21_run(verdict: str = "weak") -> CaseRun:
+    """What: a run that satisfies G-21 (weak Gate 1, cited Gate 2 pass, ends answered). Use when: a test mutates one thing.
+    Inputs: Gate 1 verdict. Output: CaseRun. Side effects: none. Role: the happy baseline."""
+    t = [turn(0, "verification", [], end_reason="verified"),
+         turn(1, "text", [*step("search_kb"), gate(verdict, "clarify" if verdict == "weak" else "answer", ["refund-policy#how-refunds-work"]), GROUND],
+              text="Refunds reach your card in 5 to 10 business days.", citations=["refund-policy#how-refunds-work"])]
+    return make_run("G-21", t)
+
+
+def test_g21_d066_weak_gate_one_still_ends_answered_and_records_the_path() -> None:
+    g = grade("G-21", g21_run())
+    assert g.verdict == "pass", [(c.name, c.detail) for c in g.checks if c.status != "pass"]
+    assert probe(g, "weak_retrieval_answered") is True
+    assert probe(grade("G-21", g21_run("pass")), "weak_retrieval_answered") is False  # Gate 1 passed: D-066 not exercised
+    run = g21_run()
+    run.turns[1].events[-1]["end_reason"] = "clarify"
+    assert "turn.1" in failing(grade("G-21", run))  # the pre-D-066 label
+
+
+def test_g16_a_ticket_claim_without_session_state_support_fails() -> None:
+    """Review PR #84 I2: the last answer is graded on its claim, not on the word ticket."""
+    assert grade("G-16", g16_run()).verdict == "pass"  # a supported claim resting on session_state
+    wrong = {**GROUND, "claims": [{"text": "Yes, I created a ticket for you.", "supported": True, "source_id": "account_context"}]}
+    t = [turn(0, "text", [CARD]), turn(1, "voice", [], input=VOICE),
+         turn(2, "voice", [*step("request_verification"), VERIFY_REQ], end_reason="verification_requested", input=VOICE),
+         turn(3, "voice", [], input=VOICE), turn(4, "voice", [wrong], text="Yes, I created a ticket for you.", input=VOICE)]
+    assert "turn.4" in failing(grade("G-16", make_run("G-16", t)))  # a ticket claim not tied to session_state (the false Yes)
+    t[4] = turn(4, "voice", [GROUND], text="Yes, I created a ticket for you.", input=VOICE)  # no claim list at all
+    assert "turn.4" in failing(grade("G-16", make_run("G-16", t)))

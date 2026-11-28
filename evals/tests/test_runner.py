@@ -158,7 +158,7 @@ def test_run_cases_grades_every_case_and_unscripted_ones_are_error() -> None:
 
     result = runner.run_cases(all_cases, PERSONAS, client, store, POLICY, before_case=before)
     verdicts = {g.case_id: g.verdict for g in result.grades}
-    assert len(verdicts) == 20 and verdicts["G-01"] == "pass"
+    assert len(verdicts) == 21 and verdicts["G-01"] == "pass"
     assert all(v == "error" for k, v in verdicts.items() if k != "G-01")
 
 
@@ -168,7 +168,7 @@ def test_run_cases_filters_by_id_and_split() -> None:
     result = runner.run_cases(cases.load_cases(), PERSONAS, client, store, POLICY, only=["G-01"], before_case=lambda c: setattr(w, "next", g01_script()))
     assert [g.case_id for g in result.grades] == ["G-01"]
     test_only = runner.select(cases.load_cases(), None, "test")
-    assert {c["split"] for c in test_only} == {"test"} and len(test_only) == 9
+    assert {c["split"] for c in test_only} == {"test"} and len(test_only) == 7
 
 
 def test_a_failing_hook_makes_that_case_error_and_later_cases_still_run() -> None:

@@ -76,12 +76,13 @@ class CaseRun:
 
 @dataclass
 class Check:
-    """What: one grader result. Use when: reporting. Inputs: name, status, detail (never a PIN).
+    """What: one grader result. Use when: reporting. Inputs: name, status, detail (never a PIN), exercised (path probes).
     Output: the record. Side effects: none. Role: unit of grading; error means the data to decide was missing."""
 
     name: str
     status: Status
     detail: str = ""
+    exercised: bool | None = None  # path probes only: whether the run took the path that tests the decision (None for other checks)
 
 
 @dataclass
