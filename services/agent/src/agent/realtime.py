@@ -25,7 +25,7 @@ from contracts.trust import escape_untrusted
 from agent.models.config import RoleSpec
 
 REALTIME_PROMPT = (Path(__file__).parent / "prompts" / "realtime.md").read_text(encoding="utf-8").strip()
-REALTIME_PROMPT_SHA256 = "d8b24daa50d4cb68fc92481312d56356a973c9a14c8e31c65dafd46d882104ea"  # pinned by a test
+REALTIME_PROMPT_SHA256 = "af129c06a5eaa52030146b25edd66a6a5ad3fd65452d2d9af098ea7036a9f0c3"  # pinned by a test
 CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 SUMMARY_MESSAGES = 8          # last 4 exchanges (doc 07 s6.6)
 SUMMARY_TEXT_CHARS = 300      # each remembered line is cut to this length
