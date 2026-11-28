@@ -42,7 +42,6 @@ ESCALATION_LEADS: dict[str, str] = {
     "retrieval_unavailable": "I couldn't search our help articles just now, so I won't guess.",
     "tool_failure": "Our systems didn't respond, so nothing was changed.",
     "grounding_failed": "I couldn't confirm that answer against our policies, so I won't guess.",
-    "needs_commitment": "That needs a decision from our team, so I won't promise it here.",
     "limit_reached": "I couldn't finish that within the steps I'm allowed for one message.",
     "deadline": "I couldn't finish that in time.",
 }
@@ -166,8 +165,8 @@ def route_message(control: TurnControl) -> AIMessage:
 def escalate_from_hook(control: TurnControl, reason: str, *, remove_id: str | None = None) -> dict[str, Any]:
     """What: end the turn from an after_model hook with escalate(reason): optionally remove the draft, write the
     route line, jump to end. The ticket is opened after the loop by agent.escalation (one per turn).
-    Use when: Gate 2 (doc 07 s6.4): second consecutive grounding failure gives escalate(grounding_failed),
-    commitment true gives escalate(needs_commitment); GroundingMiddleware (CS-E-02.S4.T2) returns this update.
+    Use when: Gate 2 (doc 07 s6.4): second consecutive grounding failure gives escalate(grounding_failed) (a
+    commitment draft is an ordinary fail, CS-E-03.F14); GroundingMiddleware (CS-E-02.S4.T2) returns this update.
     Inputs: control, escalation reason, the draft message id to remove. Output: state update with jump_to end.
     Side effects: sets the route (first decision wins) and route_message_id. Role: the Gate 2 escalation hook."""
     control.set_route(Route("escalate", reason=reason))

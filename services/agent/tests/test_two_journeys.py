@@ -264,3 +264,17 @@ async def test_the_turn_after_the_offer_tells_the_model_the_card_is_showing() ->
     model_seen.append(str(human[-1].content))
     assert "verification_card: on_screen" in model_seen[0]
     assert "verification_card" not in str(human[0].content)  # the first message: no card was showing yet
+
+
+def test_the_one_identity_rule_is_a_fact_gate2_can_check_and_matches_the_card_conflict_line():
+    """What: D-075 reaches the model and Gate 2 as a fact, with the same guidance as the card-submit conflict line.
+    Use when: pytest. Inputs: none. Output: pass/fail. Side effects: none.
+    Role: CS-E-03.F14 finding 7 (trace 01a22039-8c9c): the model was never told the one-identity rule, so it said
+    the help articles do not explain switching accounts and offered a ticket."""
+    from agent.gates import AGENT_CAPABILITIES
+    from agent.structured.verification import CONFLICT_LINE
+
+    fact = ("One conversation is for one verified customer: to get help for a different account, the customer starts "
+            "a new conversation with the New conversation button and verifies there.")
+    assert fact in AGENT_CAPABILITIES
+    assert "start a new conversation" in CONFLICT_LINE  # the card path and the words path give one guidance
