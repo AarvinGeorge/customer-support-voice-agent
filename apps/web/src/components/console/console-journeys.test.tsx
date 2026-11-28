@@ -92,6 +92,14 @@ afterEach(() => {
 });
 
 describe("a console tab opened from the landing page", () => {
+  it("keeps the person (who) as well as the account in the URL it redirects to (F13)", async () => {
+    nav.query = "as=QS-20871&who=Dana%20Okafor";
+    const { fetchMock } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ConsoleRoute />);
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`/console?session=${SID}&as=QS-20871&who=Dana%20Okafor`));
+  });
+
   it("without a session creates exactly one fresh session (empty body) and keeps the hint in the URL", async () => {
     nav.query = "as=QS-10423";
     const { fetchMock, calls } = fakeAgent();
@@ -232,6 +240,15 @@ describe("the verification card and the display-only hint", () => {
     sendMessage("I was charged twice");
     await screen.findByRole("region", { name: "Verify your account" });
     await waitFor(() => expect((screen.getByLabelText("Account ID") as HTMLInputElement).value).toBe(PRIYA.account_id));
+  });
+
+  it("an empty who= behaves like an absent one (single-persona account still names its person)", async () => {
+    nav.query = `session=${SID}&as=${PRIYA.account_id}&who=`;
+    const { fetchMock } = fakeAgent();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ConsoleRoute />);
+    sendMessage("I was charged twice");
+    await screen.findByRole("region", { name: `Verify as ${PRIYA.name}` });
   });
 
   it("without a hint the card says 'Verify your account' with empty fields", async () => {

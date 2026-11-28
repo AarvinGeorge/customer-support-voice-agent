@@ -140,7 +140,7 @@ export function VoiceLine({ state, label, caption, error }: { state: string; lab
 
 /**
  * What: the display-only signed-in hint: the persona a landing row's Start named (D-076).
- * Use when: ConsoleRoute matched ?as= against the persona list.
+ * Use when: ConsoleRoute matched ?as= (and ?who=) against the persona list.
  * Inputs: none (type).
  * Output: none (type).
  * Side effects: none.

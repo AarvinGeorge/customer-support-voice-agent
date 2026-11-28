@@ -135,8 +135,9 @@ export function resolveStartHint(
 ): { name: string | null; accountId: string } | null {
   const onAccount = personas.filter((p) => p.account_id === as);
   if (onAccount.length === 0) return null;
-  const person = who === null ? undefined : onAccount.find((p) => p.name === who);
+  const named = who !== null && who !== "";
+  const person = !named ? undefined : onAccount.find((p) => p.name === who);
   if (person !== undefined) return { name: person.name, accountId: person.account_id };
   // An account-only link names the person only when exactly one persona is on the account.
-  return { name: who === null && onAccount.length === 1 ? onAccount[0]!.name : null, accountId: as };
+  return { name: !named && onAccount.length === 1 ? onAccount[0]!.name : null, accountId: as };
 }
