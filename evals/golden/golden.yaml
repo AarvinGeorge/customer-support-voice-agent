@@ -187,9 +187,9 @@ cases:
     mode: chat
     known_limitation: D-083
     source: L1 s4 S4, s7; 07 s6.5 (weak then escalate), s3.4 (code ticket, origin code); D-052; D-070 (every ticket has a verified requester); D-083 (known limitation)
-    notes: "D-083: a product-named question the docs do not cover scores weak (the name alone is about 0.44, above tau_low; rca-gate1-weak-band.md), so the safe path is one clarifying question (turn 1, Gate 2 still checks the reply), then escalation; the card verifies Steve and code opens the not_in_docs ticket (turn 2). Never an invented answer. Reported apart from plain passes, never counted as fixed."
+    notes: "D-083: a product-named question the docs do not cover scores weak (the name alone is about 0.44, above tau_low; rca-gate1-weak-band.md), so the safe path is one clarifying question (turn 1, Gate 2 still checks the reply), then escalation; the card verifies Steve and code opens the not_in_docs ticket (turn 2). Never an invented answer. Reported apart from plain passes, never counted as fixed. CS-E-02.F13: the clarifying turn may end answered (D-066: Gate 2 passed a supported claim such as \"the articles do not mention it\"); the question stays open either way, so the next turn escalates."
     turns:
-      - {kind: text, text: "Do you have an Android app for Quillstack?", expect: {end_reason: clarify, gate2_ran: true}}
+      - {kind: text, text: "Do you have an Android app for Quillstack?", expect: {end_reason_any: [clarify, answered], gate2_ran: true}}
       - {kind: verification, credentials: persona, expect: {end_reason: escalated}}
     expected:
       outcome: [escalate]
@@ -401,10 +401,10 @@ cases:
     mode: chat
     known_limitation: D-083
     source: L1 s4 S4, s7; 07 s6.5 (weak then escalate), s3.4 (code ticket, origin code); D-070 (the verified variant of G-07); D-083 (known limitation)
-    notes: "D-083: the question scores weak, so the safe path is one clarifying question (Gate 2 still checks it), then on the customer's answer the second weak turn escalates and code opens the ticket for the verified Steve. Never an invented answer. Reported apart from plain passes, never counted as fixed."
+    notes: "D-083: the question scores weak, so the safe path is one clarifying question (Gate 2 still checks it), then on the customer's answer the second weak turn escalates and code opens the ticket for the verified Steve. Never an invented answer. Reported apart from plain passes, never counted as fixed. CS-E-02.F13: the clarifying turn may end answered (D-066); the question stays open either way, and a none verdict on the reply is judged with the question it answers."
     turns:
       - {kind: verification, credentials: persona}
-      - {kind: text, text: "Do you have an Android app for Quillstack?", expect: {end_reason: clarify, gate2_ran: true}}
+      - {kind: text, text: "Do you have an Android app for Quillstack?", expect: {end_reason_any: [clarify, answered], gate2_ran: true}}
       - {kind: text, text: "Yes, a native Android app for my phone.", expect: {end_reason: escalated}}
     expected:
       outcome: [escalate]
