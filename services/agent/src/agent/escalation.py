@@ -49,7 +49,7 @@ from agent.clients.core_agent import CoreAgentClient
 from agent.clients.http import ToolCallError
 from agent.records import ticket_record
 from agent.memory import dangling_calls
-from agent.middleware.router import ESCALATION_LEADS, NO_TICKET_CLAUSE, TICKET_CLAUSE, escalation_lead
+from agent.middleware.router import ESCALATION_LEADS, TICKET_CLAUSE, escalation_lead, no_ticket_clause
 from agent.middleware.tool_guard import clamp_timeout
 from agent.say import speak
 from agent.sse import TurnOutcome, TurnStream, route_outcome
@@ -151,17 +151,11 @@ def ticket_key(control: TurnControl, reason: str) -> str:
     return f"{control.session_id}:{control.turn_id}:esc:{reason}"
 
 
-def turn_ref(control: TurnControl) -> str:
-    """What: the last 4 characters of the turn id (dashes removed). Use when: the fallback line. Inputs: control.
-    Output: text. Side effects: none. Role: doc 07 s8.1 "gives the turn_id last 4 as a reference"."""
-    return control.turn_id.replace("-", "")[-4:]
-
-
 def fallback_clause(control: TurnControl) -> str:
     """What: "I couldn't open a ticket just now. If you contact us, please quote reference abcd."
     Use when: a failure-path ticket could not be opened. Inputs: control. Output: text. Side effects: none.
     Role: doc 07 s8.1 fallback line."""
-    return NO_TICKET_CLAUSE.format(ref=turn_ref(control))
+    return no_ticket_clause(control.turn_id)
 
 
 def customer_text(content: Any) -> str:
@@ -223,7 +217,8 @@ class Escalator:
     async def open_ticket(self, control: TurnControl, reason: str, *, summary: str, category: str | None = None,
                           key_reason: str | None = None) -> dict[str, Any] | None:
         """What: one ticket attempt, clamped to min(3 s, time left) with no reserve (this IS the reserve), key
-        {sid}:{turn}:esc:{reason}, origin code; reuses a ticket already opened this turn (exactly one per turn).
+        {sid}:{turn}:esc:{reason}, origin code; reuses a ticket already opened this turn and makes no second attempt after a recorded failure
+        (one attempt per turn).
         Use when: any code-owned escalation. Inputs: control, escalation reason, summary, category, key reason
         (defaults to reason). Output: TicketRef dict, or None on failure or when under 1 s is left.
         Side effects: one escalation step and at most one core call; sets control.ticket, or control.requester_refusal
@@ -232,6 +227,8 @@ class Escalator:
         if control.ticket is not None:
             control.ticket_attempt = "opened"
             return control.ticket
+        if control.ticket_attempt == "failed":  # one attempt per turn: the in-loop hook already tried (review PR #87 M-1)
+            return None
         step = Step.start(control.events, "escalation", "create_ticket", "Opening a ticket")
         timeout = clamp_timeout(limits.CORE_TICKET_TIMEOUT_S, control.remaining_s(), reserve_s=0.0)
         if timeout is None:

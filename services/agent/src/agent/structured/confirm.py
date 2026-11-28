@@ -25,7 +25,7 @@ from contracts import limits
 from agent.clients.core_agent import CoreAgentClient
 from agent.escalation import Escalator
 from agent.clients.http import ToolCallError, base_headers, call_json_within
-from agent.middleware.router import NO_TICKET_CLAUSE
+from agent.middleware.router import no_ticket_clause
 from agent.middleware.tool_guard import clamp_timeout, retry_fits
 from agent.settings import secret_problem
 from agent.steps import Step
@@ -309,7 +309,7 @@ class Confirmer:
         reason = f"{op}_{'failed' if proven_unchanged else 'unconfirmed'}"
         ticket = await self.open_ticket(control, reason, pending)
         short = (ticket or {}).get("short_id")
-        clause = NO_TICKET_CLAUSE.format(ref=control.turn_id.replace("-", "")[-4:])
+        clause = no_ticket_clause(control.turn_id)
         if proven_unchanged:
             lead = COMMIT_FAILED_LEAD if op == "commit" else SUBMIT_FAILED_LEAD
             text = f"{lead} {FAILED_TICKET.format(short=short) if short else clause}"

@@ -16,9 +16,9 @@ from contracts.stubs import examples as ex
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agent.escalation import Escalator
-from agent.middleware.router import ESCALATION_LEADS, route_reply
+from agent.middleware.router import ESCALATION_LEADS, record_hook_ticket, route_reply
 from agent.turn_control import Route, TurnControl
-from escalation_world import OWNER, SID, World, error_response, of
+from escalation_world import OWNER, SID, World, error_response, json_response, of
 from test_escalation import call, routed_search
 
 NO_TICKET = "couldn't open a ticket"
@@ -49,6 +49,7 @@ def test_the_fallback_clause_needs_a_recorded_failed_attempt() -> None:
     (None, "opened"),
     (lambda r: error_response(), "failed"),
     (lambda r: error_response("REQUESTER_UNKNOWN", 403, changed=False), "refused"),
+    (lambda r: json_response({}), "failed"),  # a 200 answer with no ticket in it (review PR #87 I-1, m3)
 ])
 async def test_the_escalator_records_every_ticket_attempt_result(override: Any, recorded: str) -> None:
     w = World([], overrides={("POST", "/v1/tickets"): override} if override else None)
@@ -111,3 +112,61 @@ async def test_a_failed_ticket_still_says_so_with_the_turn_reference() -> None:
     assert outcome.final.text == want and outcome.final.ticket is None
     lines = [str(m.content) for m in (await w.values())["messages"] if str(m.id or "").startswith("route-")]
     assert lines == [want]
+
+
+FALLBACK = f"{LEAD} I couldn't open a ticket just now. If you contact us, please quote reference 1354."
+
+
+async def _attempt(control: TurnControl, override: Any = None) -> World:
+    """What: one Escalator.open_ticket attempt for control against the core stub. Use when: the exit tests.
+    Inputs: control, optional ticket POST override. Output: the world (its transport records the POSTs).
+    Side effects: at most one fake POST. Role: helper."""
+    w = World([], overrides={("POST", "/v1/tickets"): override} if override else None)
+    await Escalator(w.ingress.run_agent.escalator.core).open_ticket(control, "not_in_docs", summary="s")  # type: ignore[attr-defined]
+    return w
+
+
+async def test_too_little_time_left_is_a_failed_attempt_and_the_line_says_no_ticket() -> None:
+    control = _control()
+    control.clock, control.deadline = (lambda: 0.0), 0.5  # under the 1 s floor: no POST is sent (review PR #87 I-1, m2)
+    w = await _attempt(control)
+    assert w.transport.tickets == [] and control.ticket_attempt == "failed"
+    assert route_reply(control).text == FALLBACK
+
+
+async def test_an_answer_with_no_ticket_is_a_failed_attempt_and_the_line_says_no_ticket() -> None:
+    control = _control()
+    w = await _attempt(control, lambda r: json_response({}))
+    assert len(w.transport.tickets) == 1 and control.ticket_attempt == "failed"
+    reply = route_reply(control)
+    assert reply.text == FALLBACK and reply.ticket is None
+
+
+async def test_an_answer_with_no_ticket_reaches_the_customer_as_the_fallback_end_to_end() -> None:
+    w = World([call("search_kb", {"query": "android app"})], tools={"search_kb": routed_search("not_in_docs")},
+              overrides={("POST", "/v1/tickets"): lambda r: json_response({})})
+    await w.seed({"messages": [HumanMessage("hi"), AIMessage("hello", id="a0")], **OWNER})
+    outcome, events = await w.send(text="Do you have an Android app for Quillstack?")
+    ref = events[0].turn_id.replace("-", "")[-4:]
+    assert outcome.final.text == f"{LEAD} I couldn't open a ticket just now. If you contact us, please quote reference {ref}."
+    assert outcome.final.ticket is None and [e.ticket for e in of(events, "escalated")] == [None]
+
+
+@pytest.mark.parametrize("before,ticket,after", [
+    (None, None, "failed"),        # a hook that answered None tried and failed (m7)
+    ("refused", None, "refused"),  # the hook's own more exact record is kept (m8)
+    (None, {"short_id": "8213"}, "opened"),  # m11
+])
+def test_record_hook_ticket_records_the_hook_result(before: str | None, ticket: Any, after: str) -> None:
+    control = _control()
+    control.ticket_attempt = before  # type: ignore[assignment]
+    assert record_hook_ticket(control, ticket) == ticket
+    assert control.ticket_attempt == after
+
+
+async def test_a_failed_attempt_is_the_turns_one_attempt_so_the_reserve_does_not_try_again() -> None:
+    control = _control()
+    control.ticket_attempt = "failed"  # e.g. the optional in-loop hook already tried (review PR #87 M-1)
+    w = await _attempt(control)
+    assert w.transport.tickets == [] and control.ticket_attempt == "failed"
+    assert route_reply(control).text == FALLBACK

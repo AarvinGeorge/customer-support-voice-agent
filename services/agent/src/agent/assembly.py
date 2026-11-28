@@ -67,7 +67,7 @@ def build_middleware(fallback_model: Any, deadline_kwargs: dict[str, Any] | None
     Inputs: the fallback chat model (role agent_fallback); optional DeadlineAndFaultMiddleware overrides (tests);
     the Gate 1 ScopeClassifier (role scope_classifier; None: a `none` verdict counts as on-topic); the Gate 2
     GroundingVerifier (role grounding_verifier; None: Gate 2 off, tests only); the escalation ticket hook used by
-    the router and Gate 2 (CS-E-03.S4.T1 supplies it; None: the line gives the turn reference).
+    the router and Gate 2 (CS-E-03.S4.T1 supplies it; None: the escalation module opens the ticket after the loop, CS-E-03.F12).
     Output: new middleware instances (fresh per agent, no shared state).
     Side effects: none.
     Role: single source of the stack order and the built-in settings (doc 07 s2.5, s8.1).

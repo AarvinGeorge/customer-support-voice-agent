@@ -8,7 +8,7 @@ callers that want the ticket inside the loop; by default the escalation module, 
 failure-path ticket AFTER the loop, in the 3 s reserve, and replaces the line in the thread, CS-E-03.S4.T1);
 optional ScopeClassifier (Gate 1 verdict none, doc 07 s6.5 row 3).
 Output: RouteReply, route_reply, route_message, escalate_from_hook, escalation_lead, ticket_clause,
-record_hook_ticket, RouterMiddleware, the fixed
+no_ticket_clause, record_hook_ticket, RouterMiddleware, the fixed
 line constants.
 RouterMiddleware also writes weak_streak once per run (after_agent).
 Side effects: writes one AI message (and, for readback, state.pending) to the thread; may call open_ticket.
@@ -87,6 +87,13 @@ def escalation_lead(control: TurnControl) -> str:
         or ESCALATION_LEADS.get(route.reason or "", GENERIC_ESCALATION_LEAD)
 
 
+def no_ticket_clause(turn_id: str) -> str:
+    """What: the s8.1 fallback clause with the turn reference (last 4 characters of the turn id, dashes removed).
+    Use when: every line that reports a failed ticket attempt (router, escalation, confirm). Inputs: turn id.
+    Output: text. Side effects: none. Role: one formatter for NO_TICKET_CLAUSE (review PR #87 M-5)."""
+    return NO_TICKET_CLAUSE.format(ref=turn_id.replace("-", "")[-4:])
+
+
 def ticket_clause(control: TurnControl) -> str | None:
     """What: the ticket clause of an escalation line, chosen from the recorded ticket result (CS-E-03.F12): a ticket
     gives TICKET_CLAUSE, a recorded failed attempt gives the s8.1 fallback (NO_TICKET_CLAUSE with the turn reference),
@@ -98,7 +105,7 @@ def ticket_clause(control: TurnControl) -> str | None:
     if ticket:
         return TICKET_CLAUSE.format(display=ticket.get("display") or f"ticket ending {ticket.get('short_id')}")
     if control.ticket_attempt == "failed":
-        return NO_TICKET_CLAUSE.format(ref=control.turn_id.replace("-", "")[-4:])
+        return no_ticket_clause(control.turn_id)
     return None
 
 
