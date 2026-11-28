@@ -212,12 +212,14 @@ class RouterMiddleware(AgentMiddleware):
 
     async def aafter_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         """What: write the next weak_streak once per run (doc 07 s6.5 row 2: it counts turns, not searches).
-        Use when: once at the end of every agent run (also after a jump to end). Inputs: state, runtime.
+        Use when: once at the end of every agent run (also after a jump to end). Inputs: state (its weak_streak, kept
+        by a turn with no search), runtime.
         Output: {"weak_streak": n} when it changes, else None. Side effects: none beyond the state update.
         Role: Gate 1 streak keeper (agent.gates.next_weak_streak)."""
         control = current_control()
         if control is None:
             return None
-        new = next_weak_streak(control)
-        return None if int(state.get("weak_streak") or 0) == new else {"weak_streak": new}
+        previous = int(state.get("weak_streak") or 0)
+        new = next_weak_streak(control, previous)
+        return None if previous == new else {"weak_streak": new}
 

@@ -238,7 +238,8 @@ class TurnRunner:
                           pending=result.pending_summary,
                           card_on_screen=not verified and (control.session_card_offered
                                                            or control.session_awaiting_verification),
-                          context_snapshot=merged.get("context_snapshot") if verified else None, context_stale=stale)
+                          context_snapshot=merged.get("context_snapshot") if verified else None, context_stale=stale,
+                          open_question=int(merged.get("weak_streak") or 0) >= 1)  # CS-E-02.F13
         if result.model_text is not None:
             text = result.model_text
         elif inp.mode == "voice" and getattr(inp, "body", None) is not None and hasattr(inp.body, "question"):
