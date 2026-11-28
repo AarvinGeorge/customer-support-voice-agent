@@ -158,7 +158,7 @@ def _gates(t: TurnResult, gate: str) -> list[Event]:
 
 def live_checks(case: dict[str, Any], turns: list[TurnResult], required: frozenset[str]) -> list[Check]:
     """What: the live checks per turn and per case. Per turn: stop (turn.completed, no error event, end_reason not in
-    BAD_ENDS and equal to the turn's expect), truncation (no model step cut at max_tokens, no gate reply truncated),
+    BAD_ENDS and one the turn's expect allows: end_reason, else end_reason_any), truncation (no model step cut at max_tokens, no gate reply truncated),
     gate1 (a turn that searched shows a retrieval gate event), gate2 (a turn with a model draft, final.confidence set,
     shows a grounding gate event, and no grounding gate errored), clarify (no Gate 2 clarify decision, end_reason clarify or
     clarify line unless the turn expects clarify). Per case: the required gates (retrieval; grounding_pass: a grounding gate passed).
@@ -171,12 +171,16 @@ def live_checks(case: dict[str, Any], turns: list[TurnResult], required: frozens
             out.append(Check(f"live.stop.{i}", "error", "turn was not run"))
             continue
         t = turns[i]
-        exp = (spec.get("expect") or {}).get("end_reason")
+        expect = spec.get("expect") or {}
+        exp = expect.get("end_reason")
+        # CS-E-02.F13: the same per-turn expectation the golden graders read (end_reason, else end_reason_any).
+        allowed = [exp] if exp else list(expect.get("end_reason_any") or [])
         end = t.end_reason
         errors = [e.get("code") for e in t.events if e.get("type") == "error"]
         bad = ([f"no turn.completed ({t.error})"] if t.completed is None else []) + \
               ([f"end_reason {end}"] if end in BAD_ENDS else []) + \
-              ([f"end_reason {end}, expected {exp}"] if exp and end is not None and end != exp else []) + \
+              ([f"end_reason {end}, expected {' or '.join(allowed)}"] if allowed and end is not None and end not in allowed
+               else []) + \
               ([f"error events {errors}"] if errors else [])
         out.append(Check(f"live.stop.{i}", "fail" if bad else "pass", "; ".join(bad) or f"{end}"))
         cut = [s.get("model") for s, e in _steps(t)
@@ -203,7 +207,7 @@ def live_checks(case: dict[str, Any], turns: list[TurnResult], required: frozens
         clar = ["grounding decision clarify" for e in _gates(t, "grounding") if e.get("decision") == "clarify"]
         clar += ["end_reason clarify"] if end == "clarify" else []
         clar += ["clarify line in the reply"] if CLARIFY_LINE in str((t.final or {}).get("text") or "") else []
-        if exp != "clarify":
+        if "clarify" not in allowed:
             out.append(Check(f"live.clarify.{i}", "fail" if clar else "pass", "; ".join(clar) or "none"))
     every = [e for t in turns for e in t.events if e.get("type") == "gate"]
     if "retrieval" in required:

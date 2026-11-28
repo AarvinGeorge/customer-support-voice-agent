@@ -211,10 +211,16 @@ async def test_two_weak_searches_in_one_turn_count_once():
     assert outcome.end_reason == "clarify" and values["weak_streak"] == 1
 
 
-async def test_a_turn_that_does_not_end_weak_resets_the_streak():
+async def test_a_turn_with_no_search_keeps_the_open_question():
     h = Harness(search_body("pass"))
-    h.model.messages = iter([AIMessage("Hello! How can I help?")])  # no search this turn
+    h.model.messages = iter([AIMessage("Hello! How can I help?")])  # no search this turn (CS-E-02.F13)
     _, _, values = await h.run(state={"weak_streak": 1}, text="hi")
+    assert values["weak_streak"] == 1
+
+
+async def test_a_pass_after_an_open_question_resets_the_streak():
+    h = Harness(search_body("pass"))
+    _, _, values = await h.run(state={"weak_streak": 1})
     assert values["weak_streak"] == 0
 
 

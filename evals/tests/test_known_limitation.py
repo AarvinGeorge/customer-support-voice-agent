@@ -31,7 +31,8 @@ def test_only_the_d083_cases_carry_the_tag_and_they_expect_the_weak_path() -> No
         assert set(exp["gate"]["retrieval_verdict_any_of"]) == {"weak", "none"} and exp["gate"]["decision"] == "escalate"
         assert "policy_invented" in exp["forbidden"]
         asks = [t for t in c["turns"] if t["kind"] == "text" and "Android" in t["text"]]
-        assert asks and asks[0]["expect"] == {"end_reason": "clarify", "gate2_ran": True}  # one clarifying question, checked
+        # one clarifying question, checked by Gate 2; D-066 may show it as answered (CS-E-02.F13), never escalated
+        assert asks and asks[0]["expect"] == {"end_reason_any": ["clarify", "answered"], "gate2_ran": True}
         assert c["turns"][-1]["expect"]["end_reason"] == "escalated"  # then the ticket or human offer
 
 

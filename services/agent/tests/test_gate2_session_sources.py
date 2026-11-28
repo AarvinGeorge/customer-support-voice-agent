@@ -252,7 +252,7 @@ async def test_d066_a_weak_gate1_turn_answered_with_a_cited_article_ends_answere
     outcome, events, values = await h.run()
     assert grounding_gate(events).verdict == "pass"
     assert outcome.end_reason == "answered" and [c.chunk_id for c in outcome.final.citations] == ["refund-policy#2"]
-    assert int(values.get("weak_streak") or 0) == 0
+    assert values["weak_streak"] == 1  # CS-E-02.F13: the label is answered, the Gate 1 fact is still weak
 
 
 async def test_d066_a_weak_gate1_turn_answered_with_a_non_article_source_ends_answered():
@@ -261,7 +261,7 @@ async def test_d066_a_weak_gate1_turn_answered_with_a_non_article_source_ends_an
     h = Harness(ver, body=search_body("weak", "weak_match"), replies=[_call("search_kb", "c1"), AIMessage(offer)])
     outcome, _, values = await h.run()
     assert (outcome.end_reason, outcome.final.text, outcome.final.citations) == ("answered", offer, [])
-    assert int(values.get("weak_streak") or 0) == 0
+    assert values["weak_streak"] == 1  # CS-E-02.F13: the S4 shape; the question stays open for the next turn
 
 
 async def test_d066_a_weak_gate1_turn_that_asks_a_clarifying_question_still_ends_clarify():
