@@ -329,7 +329,8 @@ def g_trajectory(ctx: Ctx) -> list[Check]:
 
 
 def g_turns(ctx: Ctx) -> list[Check]:
-    """What: per-turn expectations (end_reason, forbidden_tools, cites_any). Use when: a turn has a non-empty expect.
+    """What: per-turn expectations (end_reason, forbidden_tools, cites_any, says, verification_card, verification_result, grounding).
+    Use when: a turn has a non-empty expect.
     Inputs: ctx. Output: one check per such turn, named turn.N. Side effects: none. Role: step-by-step script checks."""
     out: list[Check] = []
     for i, spec in enumerate(ctx.case["turns"]):
@@ -365,6 +366,38 @@ def g_turns(ctx: Ctx) -> list[Check]:
                 bad.append("no final answer")
             elif not cited & {base_id(c) for c in exp["cites_any"]}:
                 bad.append(f"cited {sorted(cited)}, none of {exp['cites_any']}")
+        if "says" in exp:
+            if t.final is None:
+                err = True
+                bad.append("no final answer")
+            elif not any(p.lower() in t.final["text"].lower() for p in exp["says"]):
+                bad.append(f"final text has none of {exp['says']}")
+        if "verification_card" in exp:
+            reasons = [e["reason"] for e in t.events if e.get("type") == "verification.required"]
+            want = exp["verification_card"]
+            if want == "none" and reasons:
+                bad.append(f"verification card emitted {reasons}, expected none")
+            elif want != "none" and want not in reasons:
+                bad.append(f"verification card reasons {reasons}, expected {want}")
+        if "verification_result" in exp:
+            statuses = [e["status"] for e in t.events if e.get("type") == "verification.result"]
+            if exp["verification_result"] not in statuses:
+                bad.append(f"verification.result {statuses}, expected {exp['verification_result']}")
+        if "grounding" in exp:
+            ev = ctx.turn_events(t)
+            if ev is None:
+                err = True
+                bad.append("stored events missing")
+            else:
+                gates = [e for e in ev if e.get("type") == "gate" and e.get("gate") == "grounding"]
+                need = exp["grounding"]["min_claims"]
+                if not gates:
+                    bad.append("no Gate 2 event on this turn (a fixed line is not a checked claim)")
+                else:
+                    g = gates[-1]
+                    total, ok = g.get("claims_total") or 0, g.get("claims_supported") or 0
+                    if g["verdict"] != "pass" or total < need or ok != total:
+                        bad.append(f"Gate 2 verdict {g['verdict']}, {ok} of {total} claims supported, need a pass on at least {need}")
         status = "fail" if any(not b.startswith(("no turn", "stored events", "no final")) for b in bad) else ("error" if err else "pass")
         out.append(Check(name, status, "; ".join(bad) or "ok"))
     return out
