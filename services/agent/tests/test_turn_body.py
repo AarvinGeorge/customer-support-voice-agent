@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 from contracts.stubs import examples as ex
 from contracts.stubs.core_stub import create_app
+from contracts.agent_api import VoiceAskRequest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -22,7 +23,7 @@ from agent.clients.core_agent import CoreAgentClient
 from agent.clients.knowledge import KnowledgeClient
 from agent.ingress import Ingress, IngressInput, IngressStream, SessionRow
 from agent.tools import build_tools
-from agent.turn_body import TurnRunner
+from agent.turn_body import StructuredResult, TurnRunner
 from ingress_fakes import MemoryTurnLock, MemoryTurnStore
 
 SID, VISITOR = ex.SESSION_ID, "visitor-1"
@@ -58,7 +59,8 @@ class World:
 
     def __init__(self, *, replies: list[AIMessage] | None = None,
                  core_transport: httpx.AsyncBaseTransport | None = None, stub_verified: bool = True,
-                 knowledge_seen: list[httpx.Request] | None = None) -> None:
+                 knowledge_seen: list[httpx.Request] | None = None, structured: Any = None,
+                 session: SessionRow | None = None) -> None:
         """What: build it. Use when: tests. Inputs: see class. Output: none. Side effects: none. Role: constructor."""
         Recording.bound, Recording.seen = [], []
         self.stub = create_app()
@@ -78,9 +80,9 @@ class World:
         self.agent = build_agent(Recording(messages=iter(replies or [AIMessage("Here you go.")]), disable_streaming=True),
                                  fallback_model=Recording(messages=iter([])), checkpointer=InMemorySaver(),
                                  tools=build_tools(self.core, knowledge))
-        self.store = MemoryTurnStore(SessionRow(session_id=SID, visitor_id=VISITOR))
+        self.store = MemoryTurnStore(session or SessionRow(session_id=SID, visitor_id=VISITOR))
         self.ingress = Ingress(self.store, MemoryTurnLock(), served_by="agent_a",
-                               run_agent=TurnRunner(self.agent, self.core))
+                               run_agent=TurnRunner(self.agent, self.core, structured=structured))
 
     async def seed(self, values: dict[str, Any]) -> None:
         """What: write initial thread state. Use when: arranging. Inputs: values. Output: none.
@@ -92,6 +94,21 @@ class World:
         Side effects: as a turn. Role: helper."""
         res = await self.ingress.handle(IngressInput(session_id=SID, visitor_id=VISITOR, client_turn_id=str(uuid.uuid4()),
                                                      mode="chat", input_kind="text", text=text))
+        assert isinstance(res, IngressStream) and res.task is not None
+        _ = [f async for f in res.stream.frames()]
+        return await res.task, res.stream.events
+
+    async def voice(self, question: str, transcript: str | None, final: bool) -> tuple[Any, list[Any]]:
+        """What: one voice/ask turn (the Realtime relay) through Ingress. Use when: voice tests. Inputs: the Realtime
+        model's question, the customer transcript, transcript_final. Output: (outcome, events). Side effects: as a turn.
+        Role: helper."""
+        req = VoiceAskRequest(client_turn_id=uuid.uuid4(), voice_session_id="vs-1", realtime_call_id="call-1",
+                              question=question, user_item_id="item-u1", user_transcript=transcript,
+                              transcript_final=final, last_assistant_interrupted=False)
+        res = await self.ingress.handle(IngressInput(session_id=SID, visitor_id=VISITOR,
+                                                     client_turn_id=str(req.client_turn_id), mode="voice",
+                                                     input_kind="voice", text=req.question,
+                                                     realtime_call_id=req.realtime_call_id, body=req))
         assert isinstance(res, IngressStream) and res.task is not None
         _ = [f async for f in res.stream.frames()]
         return await res.task, res.stream.events
@@ -164,3 +181,60 @@ async def test_search_kb_sends_the_customers_own_text_for_gate_1() -> None:
         body = json.loads(r.content)
         assert body["query"] == "Android app for Quillstack"
         assert body["customer_message"] == "Do you have an Android app for Quillstack?"
+
+
+def _search_world(seen: list[httpx.Request], **kw: Any) -> World:
+    """What: a World whose model searches once, then answers. Use when: the Gate 1 input tests. Inputs: the request
+    list, World options. Output: World. Side effects: none. Role: helper."""
+    search = AIMessage("", tool_calls=[{"name": "search_kb", "args": {"query": "Android app"}, "id": "c1",
+                                        "type": "tool_call"}])
+    return World(replies=[search, AIMessage("Here you go.")], knowledge_seen=seen, **kw)
+
+
+def _messages(seen: list[httpx.Request]) -> list[Any]:
+    """What: the customer_message of each knowledge request (None when absent). Use when: asserting. Inputs: the
+    recorded requests. Output: list. Side effects: none. Role: helper."""
+    assert seen, "search_kb never reached knowledge"
+    return [json.loads(r.content).get("customer_message") for r in seen]
+
+
+async def test_voice_sends_the_customers_final_transcript_never_the_realtime_question() -> None:
+    # Review PR #86 I1: in voice the question is written by the Realtime model; only the transcript is the customer's.
+    seen: list[httpx.Request] = []
+    w = _search_world(seen)
+    await w.seed({"messages": [HumanMessage("earlier"), AIMessage("ok", id="a0")], **OWNER_STATE})
+    await w.voice("Android app availability", "do you have an android app", final=True)
+    assert set(_messages(seen)) == {"do you have an android app"}
+
+
+async def test_voice_without_a_final_transcript_sends_no_customer_message() -> None:
+    for transcript, final in (("do you have an android app", False), (None, True), ("   ", True)):
+        seen: list[httpx.Request] = []
+        w = _search_world(seen)
+        await w.seed({"messages": [HumanMessage("earlier"), AIMessage("ok", id="a0")], **OWNER_STATE})
+        await w.voice("Android app availability", transcript, final=final)
+        assert set(_messages(seen)) == {None}, (transcript, final)
+
+
+async def test_a_code_line_turn_sends_no_customer_message() -> None:
+    # Review PR #86 I5 (mutation M9 survived): the structured result's model_text is a code line, never the customer.
+    async def handler(stream: Any, inp: Any, prep: Any) -> StructuredResult:
+        """What: a structured handler that hands the model a code line. Use when: this test. Inputs: stream, input,
+        prep. Output: StructuredResult with model_text. Side effects: none. Role: fake."""
+        return StructuredResult(model_text="The customer verified on the card.")
+
+    seen: list[httpx.Request] = []
+    w = _search_world(seen, structured=handler)
+    await w.seed({"messages": [HumanMessage("earlier"), AIMessage("ok", id="a0")], **OWNER_STATE})
+    await w.turn("anything")
+    assert set(_messages(seen)) == {None}
+
+
+async def test_a_pin_in_the_customer_text_is_redacted_before_it_reaches_knowledge() -> None:
+    # Review PR #86 I5: awaiting verification, a bare 4-digit number is a PIN (doc 07 s11.1 condition 1).
+    seen: list[httpx.Request] = []
+    w = _search_world(seen, session=SessionRow(session_id=SID, visitor_id=VISITOR, awaiting_verification=True))
+    await w.seed({"messages": [HumanMessage("earlier"), AIMessage("ok", id="a0")], **OWNER_STATE})
+    await w.turn("it is 4821 what is the refund policy")
+    for m in _messages(seen):
+        assert m is not None and "4821" not in m and "[PIN]" in m

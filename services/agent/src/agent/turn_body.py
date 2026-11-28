@@ -57,6 +57,23 @@ def voice_user_text(body: Any) -> str:
     return question
 
 
+def customer_words(inp: Any, model_text: str | None) -> str | None:
+    """What: the customer's own words this turn, for Gate 1 (CS-E-02.F11). Use when: TurnRunner sets
+    TurnControl.customer_text. Inputs: the IngressInput (already PIN-redacted at step 9a), the structured result's
+    model_text. Output: text, or None when the turn has no customer-authored text.
+    Side effects: none. Role: never a code line (model_text set), never model-authored: in voice the question is written
+    by the Realtime model, so only the final user transcript counts; no final transcript gives None (query-only
+    scoring). Review PR #86 I1, I5."""
+    if model_text is not None:
+        return None
+    body = getattr(inp, "body", None)
+    if inp.mode == "voice" and body is not None and hasattr(body, "question"):
+        said = (body.user_transcript or "").strip()
+        return said if body.transcript_final and said else None
+    text = (inp.text or "").strip()
+    return text or None
+
+
 class SessionFlags(Protocol):
     """What: the agent.sessions verification facts ingress writes. Use when: typing. Inputs: see method.
     Output: none. Side effects: database. Role: port (agent.sessions is the authority, doc 07 s2.4 Counting)."""
@@ -227,7 +244,7 @@ class TurnRunner:
             text = voice_user_text(inp.body)
         else:
             text = inp.text or ""
-        control.customer_text = text if result.model_text is None and text else None  # CS-E-02.F11, Gate 1 input
+        control.customer_text = customer_words(inp, result.model_text)  # CS-E-02.F11, Gate 1 input
         merged_msg = getattr(inp, "merged_transcript", None)  # step 12: wrapped, untrusted client chatter
         messages = ([HumanMessage(content=merged_msg)] if merged_msg else []) + [build_turn_message(text, ctx)]
         agent_input = {**memory.update, **result.state, "messages": messages}

@@ -32,6 +32,8 @@ SQL_RESERVE_S = 1.0
 READ_TIMEOUT_S = 0.6  # vocabulary and corpus_version reads (cached 30 s in Database)
 LEG_LIMIT = 20
 RRF_K = 60
+MESSAGE_READ_CAP_S = 0.3  # the customer message cosine read (CS-E-02.F11, review PR #86 I2)
+MESSAGE_READ_RESERVE_S = 0.2  # budget kept for building the response after that read
 DEFAULT_TAU_LOW = 0.30  # doc 07 s4.1 default, used for `relevant` only when there is no calibration file
 
 
@@ -133,6 +135,24 @@ def _chunk(r: dict, vector_ok: bool, codes: list[str], tau_low: float = DEFAULT_
         relevant=carries or cosine >= tau_low)
 
 
+async def _message_cosines(db, mvec: list[float], chunk_ids: list[str], t0: float, trace_id: str) -> dict[str, float]:
+    """What: the customer message's cosine on the returned chunks, best effort and capped. Use when: run_search has a
+    message vector. Inputs: db, message vector, chunk ids, start time, trace id. Output: {chunk_id: cosine}, or {} when
+    the read failed, was late or no time is left. Side effects: one SQL read in a thread; a warning on failure.
+    Role: review PR #86 I2: capped at min(MESSAGE_READ_CAP_S, time left minus MESSAGE_READ_RESERVE_S), so the extra
+    read can never push a search past TOTAL_BUDGET_S into a 503; a missing read means query-only scoring."""
+    cap = min(MESSAGE_READ_CAP_S, TOTAL_BUDGET_S - (time.monotonic() - t0) - MESSAGE_READ_RESERVE_S)
+    if cap <= 0:
+        log.warning("trace_id=%s message cosine read skipped: no budget left", trace_id)
+        return {}
+    try:
+        got = await asyncio.wait_for(_leg(db.cosines, trace_id, mvec, chunk_ids), cap)
+    except asyncio.TimeoutError:
+        log.warning("trace_id=%s message cosine read exceeded %.2f s; query-only scoring", trace_id, cap)
+        return {}
+    return got if isinstance(got, dict) else {}
+
+
 async def _cached_read(fn, fallback, trace_id: str, what: str):
     """What: one short database read (vocabulary or corpus_version) that can never eat the search budget.
     Use when: run_search needs them. Inputs: blocking callable, value to use on failure, trace id, label.
@@ -203,8 +223,7 @@ async def _run_search(req: SearchRequest, db, embedder, request_id: str, trace_i
     fused = fuse(vec_rows or [], kw_rows or [], req.k, codes)
     msg_cos: dict[str, float] = {}
     if mvec is not None and vec_rows is not None and fused:
-        got = await _leg(db.cosines, trace_id, mvec, [r["chunk_id"] for r in fused])  # best effort: None on failure
-        msg_cos = got if isinstance(got, dict) else {}
+        msg_cos = await _message_cosines(db, mvec, [r["chunk_id"] for r in fused], t0, trace_id)
     tau_low = calibration.tau_low if calibration else DEFAULT_TAU_LOW
     chunks = [_chunk(r, vec_rows is not None, codes, tau_low, msg_cos.get(r["chunk_id"])) for r in fused]
     if mvec is not None:
