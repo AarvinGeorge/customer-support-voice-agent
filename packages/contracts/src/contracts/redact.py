@@ -553,64 +553,23 @@ def _plain(obj: Any) -> Any:
     return json.loads(json.dumps(obj, default=default))
 
 
-_SYSTEM_KINDS = frozenset({"ai", "tool", "system", "function", "assistant", "AIMessage", "AIMessageChunk",
-                           "ToolMessage", "ToolMessageChunk", "SystemMessage", "FunctionMessage", "ChatGeneration",
-                           "ChatGenerationChunk", "Generation"})
-_HUMAN_KINDS = frozenset({"human", "user", "HumanMessage", "HumanMessageChunk"})
-
-
-def _message_kind(obj: Mapping[Any, Any]) -> str | None:
-    """What: "system" for a model, tool or system message (or a model generation), "human" for a human message,
-    else None. Reads the plain dump ({"type": "ai"}), the OpenAI shape ({"role": "assistant"}) and the LangChain
-    serialized shape ({"lc": 1, "id": [..., "AIMessage"]}). Use when: _trace. Inputs: mapping. Output: kind or None.
-    Side effects: none. Role: helper."""
-    names = [obj.get("type"), obj.get("role")]
-    ident = obj.get("id")
-    if obj.get("lc") is not None and isinstance(ident, list) and ident:
-        names.append(ident[-1])
-    for name in names:
-        if isinstance(name, str) and name in _SYSTEM_KINDS:
-            return "system"
-        if isinstance(name, str) and name in _HUMAN_KINDS:
-            return "human"
-    return None
-
-
-def _human_text(text: str) -> str:
-    """What: a human message string: the frame scan when it carries a customer frame, else the full scan (an
-    unframed human string is customer text of unknown shape). Use when: _trace. Inputs: text. Output: text.
-    Side effects: none. Role: helper."""
-    return _system_text(text) if _CUSTOMER_FRAME_RE.search(text) else scan_text(text, _TRACE_CONTEXT)
-
-
 def _trace(obj: Any) -> Any:
-    """What: redact a trace payload by provenance: model, tool and system messages are system data
-    (redact_system); human messages get the frame scan (or the full scan when unframed); every other string is of
-    unknown provenance and gets the full scan (default context). Use when: hide_for_langsmith. Inputs: payload.
-    Output: a redacted copy. Side effects: none; raises TypeError on an object it cannot inspect.
-    Role: D-071 part 3 with the second net kept where provenance is unknown (review-pr76 M2)."""
-    if isinstance(obj, BaseModel):
-        return _trace(obj.model_dump(mode="python"))
-    if is_dataclass(obj) and not isinstance(obj, type):
-        return _trace(asdict(obj))
-    if isinstance(obj, Mapping):
-        kind = _message_kind(obj)
-        if kind == "system":
-            return redact_system(obj)
-        if kind == "human":
-            return _walk(obj, _human_text)
-        return {k: (PIN_TOKEN if isinstance(k, str) and k.lower() in PIN_FIELD_NAMES and v is not None
-                    else _trace(v))
-                for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return type(obj)(_trace(v) for v in obj)
-    return redact(obj, _TRACE_CONTEXT)
+    """What: redact a trace payload by provenance carried in the data: customer-authored text is in a trace only
+    inside the frames ingress writes around it after the step 9a scan (<customer_message>, <voice_transcript>), so
+    those frames get the scanner again as the second net; every other string is ours (code-written evidence and
+    lines, tool results, session state, model text) and keeps its numbers. PIN fields and emails are replaced
+    everywhere (redact_system).
+    Use when: hide_for_langsmith. Inputs: payload. Output: a redacted copy. Side effects: none; raises TypeError on
+    an object it cannot inspect.
+    Role: CS-E-02.F14 (build-log/reports/rca-pin-overmask.md): the message role is a chat API slot, not the author;
+    the gate verifier's code-written evidence is a "human" message and was scanned as customer text (U-[PIN])."""
+    return redact_system(obj)
 
 
 def hide_for_langsmith(payload: Any) -> dict[str, Any]:
-    """What: the LangSmith Client hide_inputs and hide_outputs function, by provenance (_trace): code ids in model
-    and tool messages keep their numbers, customer frames are scanned, and strings of unknown provenance get the
-    full second net. A payload it cannot walk is flattened and every string is scanned.
+    """What: the LangSmith Client hide_inputs and hide_outputs function, by provenance (_trace): our records keep
+    their numbers, customer frames are scanned. A payload it cannot walk (an object of unknown shape) is flattened
+    and every string is scanned (fails closed).
     Use when: langsmith.Client(hide_inputs=hide_for_langsmith, hide_outputs=hide_for_langsmith).
     Inputs: a run's inputs or outputs dict. Output: a redacted dict (never the raw payload).
     Side effects: none. Role: doc 07 s11.1 second net by provenance (D-071); ingress already redacted customer text

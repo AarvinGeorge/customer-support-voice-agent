@@ -238,7 +238,9 @@ def test_configure_tracing_sets_the_global_client(monkeypatch: pytest.MonkeyPatc
         assert client._hide_run_outputs({"a": cm.format(RAW)}) == {"a": cm.format("QS-10423 [PIN]")}  # noqa: SLF001
         tool = {"messages": [{"type": "tool", "content": '{"short_id":"8352"}'}]}  # a core id in a tool message
         assert client._hide_run_outputs(tool) == tool  # noqa: SLF001 - system data keeps our id (D-071)
-        assert client._hide_run_outputs({"short_id": "8352"}) == {"short_id": "[PIN]"}  # noqa: SLF001 - unknown provenance: full net (review-pr76 M2)
+        assert client._hide_run_outputs({"short_id": "8352"}) == {"short_id": "8352"}  # noqa: SLF001 - our record outside any message keeps its id (CS-E-02.F14)
+        bare = {"q": "<customer_message>4821</customer_message>"}  # a customer frame outside any message is scanned
+        assert client._hide_run_inputs(bare) == {"q": "<customer_message>[PIN]</customer_message>"}  # noqa: SLF001
     finally:
         run_trees.configure(client=previous)
 
