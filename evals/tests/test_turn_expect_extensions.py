@@ -134,3 +134,12 @@ def test_every_as_persona_name_in_the_dataset_is_a_persona() -> None:
         for t in c["turns"]:
             if t.get("as_persona"):
                 assert t["as_persona"] in personas, f"{c['id']}: {t['as_persona']}"
+
+
+def test_end_reason_any_accepts_each_listed_outcome_and_no_other() -> None:
+    """D-082: a turn may end in any of a short list of end reasons; one outside the list fails."""
+    exp = {"end_reason_any": ["verification_requested", "answered"]}
+    assert grade_turn(exp, end_reason="verification_requested") == "pass"
+    assert grade_turn(exp, end_reason="answered") == "pass"
+    assert grade_turn(exp, end_reason="clarify") == "fail"
+    assert grade_turn(exp, end_reason="escalated") == "fail"

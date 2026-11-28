@@ -428,7 +428,7 @@ cases:
     persona: Helen Park
     mode: chat_then_voice
     source: D-070, D-071, D-074; build-log/reports/rca-unverified-ticket-2026-11-27.md (the owner's session); 07 s6.3
-    notes: "The owner's 19:03 UTC sequence (greeting, who am I, refund while unverified, Okay, did you create a ticket), nobody verifies. Turn 0 is the first message of an unverified session, so code offers the card (D-074 account_lookup). Turn 4 must be answered with at least one supported Gate 2 claim that rests on the session_state source (grader: grounding.from_source), so the ticket statement is tied to the code-held list of this session's tickets and not to any other source; polarity (no versus yes) still rests on Gate 2 judging against that list, and the rows (0 tickets) prove the fact. The session_state source makes 'no ticket was created' supportable (D-071); before it the verifier blocked the true draft and the model had said the opposite of what the system did. D-070: no ticket row without a verified requester. Turn 3 pins only the tool and the rows: whether the model re-prompts for the card or answers is not the contract."
+    notes: "The owner's 19:03 UTC sequence (greeting, who am I, refund while unverified, Okay, did you create a ticket), nobody verifies. Turn 0 is the first message of an unverified session, so code offers the card (D-074 account_lookup). Turn 4 must be answered with at least one supported Gate 2 claim that rests on the session_state source (grader: grounding.from_source), so the ticket statement is tied to the code-held list of this session's tickets and not to any other source; polarity (no versus yes) still rests on Gate 2 judging against that list, and the rows (0 tickets) prove the fact. The session_state source makes 'no ticket was created' supportable (D-071); before it the verifier blocked the true draft and the model had said the opposite of what the system did. D-070: no ticket row without a verified requester. Turn 2 (D-082): the card is already on screen from turn 0, so the turn passes on verification_requested OR on answered with a pointer to the card (says: the final text mentions verification or the card; this checks pointer wording only), with no ticket and no refund prepare; the identity fact is held by the rows (0 tickets, 0 refunds) and the forbidden tools, not by wording. Turn 3 pins only the tool and the rows: whether the model re-prompts for the card or answers is not the contract."
     turns:
       - {kind: text, text: "Hi there", expect: {end_reason: answered, verification_card: account_lookup}}
       - kind: voice
@@ -438,7 +438,7 @@ cases:
       - kind: voice
         question: "I want a refund, I have an overdue invoice. Can you help me?"
         user_transcript: "i want a refund i have an overdue invoice can you help me"
-        expect: {end_reason: verification_requested, forbidden_tools: [create_ticket, prepare_refund]}
+        expect: {end_reason_any: [verification_requested, answered], says: ["verif", "card"], forbidden_tools: [create_ticket, prepare_refund]}
       - kind: voice
         question: "Okay."
         user_transcript: "okay"

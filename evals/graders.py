@@ -329,7 +329,7 @@ def g_trajectory(ctx: Ctx) -> list[Check]:
 
 
 def g_turns(ctx: Ctx) -> list[Check]:
-    """What: per-turn expectations (end_reason, forbidden_tools, cites_any, says, verification_card, verification_result, grounding,
+    """What: per-turn expectations (end_reason, end_reason_any, forbidden_tools, cites_any, says, verification_card, verification_result, grounding,
     gate2_ran: the reply had a Gate 2 pass or fail, D-083).
     Use when: a turn has a non-empty expect.
     Inputs: ctx. Output: one check per such turn, named turn.N. Side effects: none. Role: step-by-step script checks."""
@@ -351,6 +351,12 @@ def g_turns(ctx: Ctx) -> list[Check]:
                 bad.append("no turn.completed")
             elif t.end_reason != exp["end_reason"]:
                 bad.append(f"end_reason {t.end_reason}, expected {exp['end_reason']}")
+        if "end_reason_any" in exp:
+            if t.end_reason is None:
+                err = True
+                bad.append("no turn.completed")
+            elif t.end_reason not in exp["end_reason_any"]:
+                bad.append(f"end_reason {t.end_reason}, expected one of {exp['end_reason_any']}")
         if "forbidden_tools" in exp:
             ev = ctx.turn_events(t)
             if ev is None:
