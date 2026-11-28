@@ -31,6 +31,8 @@ ingress.swept: I couldn't finish that. Please send your message again.
 router.deadline.no_ticket: I couldn't finish that in time. I couldn't open a ticket just now. If you contact us, please quote reference zero A one F.
 router.deadline.ticket: I couldn't finish that in time. I've opened a ticket for our team, ticket ending eight two one three.
 router.decline_off_topic: I can only help with Quillstack: your account, billing, tickets and how the product works. Is there something there I can help with?
+router.first_verify: Hi, thanks for reaching out. Let's confirm it's you first. To look at your account I need to verify you. Please enter your account ID and support PIN in the secure card.
+router.first_verify_say: Hi, thanks for reaching out. Let's confirm it's you first. To look at your account I need to verify you. Please enter your account ID and support PIN in the secure card on your screen. I can't take them by voice.
 router.generic.ticket: I can't finish that here. I've opened a ticket for our team, ticket ending eight two one three.
 router.grounding_failed.no_ticket: I couldn't confirm that answer against our policies, so I won't guess. I couldn't open a ticket just now. If you contact us, please quote reference zero A one F.
 router.grounding_failed.ticket: I couldn't confirm that answer against our policies, so I won't guess. I've opened a ticket for our team, ticket ending eight two one three.
@@ -58,7 +60,7 @@ router.tool_failure.search_kb.ticket: I couldn't search our help articles just n
 router.tool_failure.ticket: Our systems didn't respond, so nothing was changed. I've opened a ticket for our team, ticket ending eight two one three.
 router.verify: To look at your account I need to verify you. Please enter your account ID and support PIN in the secure card.
 router.verify_say: To look at your account I need to verify you. Please enter your account ID and support PIN in the secure card on your screen. I can't take them by voice.
-verification.conflict: This conversation is already verified as someone else. Please start a new conversation to verify as another person.
+verification.conflict: To help a different account, please start a new conversation.
 verification.failed: That account ID and PIN didn't match. You have two tries left.
 verification.held_ticket: Thanks, Priya. I've opened a ticket for our team, ticket ending eight two one three.
 verification.locked: I couldn't verify you after three tries, so verification is locked for this conversation and I can't open a ticket for you. The How to reach support section of our Support, response times and escalation article explains what to do next.

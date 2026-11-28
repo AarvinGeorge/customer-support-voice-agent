@@ -31,6 +31,8 @@ VERIFY_LINE = ("To look at your account I need to verify you. Please enter your 
 # Voice uses the card too (doc 07 s14 row 18 fallback; rule V spoken verification is designed only, doc 09 s1.2).
 VERIFY_SAY = ("To look at your account I need to verify you. Please enter your account ID and support PIN in "
               "the secure card on your screen. I can't take them by voice.")
+# D-074: the first customer message of an unverified session that needs account data gets a greeting first.
+FIRST_VERIFY_LEAD = "Hi, thanks for reaching out. Let's confirm it's you first."
 DECLINE_OFF_TOPIC_LINE = ("I can only help with Quillstack: your account, billing, tickets and how the product "
                           "works. Is there something there I can help with?")
 # Escalation leads per reason (doc 07 s6.5 lines; tool_failure from the S5 fixture); the ticket clause follows.
@@ -99,12 +101,15 @@ def route_reply(control: TurnControl) -> RouteReply:
     """What: the fixed reply and end_reason for the control's route.
     Use when: RouterMiddleware writes the line; stream_agent_turn builds turn.completed.
     Inputs: control with a route. Output: RouteReply. Side effects: none.
-    Role: end reasons verification_requested, readback, escalated, declined_off_topic (doc 07 s6.2 EndReason)."""
+    Role: end reasons verification_requested, readback, escalated, declined_off_topic (doc 07 s6.2 EndReason); on
+    the session's first customer message the verify line starts with FIRST_VERIFY_LEAD (D-074)."""
     route = control.route
     if route is None:
         raise ValueError("no route set")
     if route.kind == "verify":
-        return RouteReply(VERIFY_LINE, speak(VERIFY_SAY), "verification_requested", verification_reason=route.reason)
+        lead = f"{FIRST_VERIFY_LEAD} " if control.first_message else ""  # D-074: a greeting on the first message
+        return RouteReply(f"{lead}{VERIFY_LINE}", speak(f"{lead}{VERIFY_SAY}"), "verification_requested",
+                          verification_reason=route.reason)
     if route.kind == "readback":
         rb = route.readback or {}
         return RouteReply(str(rb.get("chat", "")), speak(str(rb.get("voice") or rb.get("chat", ""))), "readback")

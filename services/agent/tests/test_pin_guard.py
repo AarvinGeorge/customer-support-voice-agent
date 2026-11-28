@@ -115,7 +115,8 @@ async def test_bare_pin_while_awaiting_is_refused() -> None:
 
 async def test_redacted_but_not_credential_looking_text_goes_to_the_model_redacted() -> None:
     w, flags = guarded(AIMessage(content="Let me check that invoice."))
-    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True)
+    # awaiting means an earlier turn asked for the card, so this is not the first message (no D-074 offer write)
+    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True, user_turns=1)
     evs = await chat(w, "invoice ending 0412")
     assert evs[-1].final.text != TYPED_PIN_LINE and flags.calls == []  # Gate 2 may rewrite the answer
     assert "invoice ending [PIN]" in model_text(w) and "0412" not in model_text(w)
@@ -132,6 +133,7 @@ async def test_verified_invoice_ending_is_kept() -> None:
 async def test_voice_question_and_transcript_are_redacted_before_the_model_and_storage() -> None:
     w, flags = guarded(AIMessage(content="Please use the card on screen."))
     w.vstore.voice["vs-1"] = VoiceSessionRow("vs-1", SID, w.voice.now(), w.voice.now())
+    w.turns.sessions[SID] = replace(w.turns.sessions[SID], user_turns=1)  # not the first message: no D-074 offer write
     said = "Q S one zero four two three, four eight two one"
     body = {"client_turn_id": str(uuid.uuid4()), "voice_session_id": "vs-1", "realtime_call_id": "call_1",
             "question": f"Customer gave {RAW}", "user_item_id": "item_u1", "user_transcript": said,
@@ -272,14 +274,16 @@ async def test_a_pin_split_over_two_messages_never_reaches_the_model(first: str,
 
 async def test_the_awaiting_flag_clears_when_the_topic_moves_on() -> None:
     w, flags = guarded(AIMessage(content="We have Starter, Pro and Enterprise."))
-    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True)
+    # awaiting means an earlier turn asked for the card, so this is not the first message (no D-074 offer write)
+    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True, user_turns=1)
     await chat(w, "what plans do you offer for a team of twelve?")
     assert flags.calls == [(SID, False)] and w.turns.sessions[SID].awaiting_verification is False
 
 
 async def test_a_short_ack_keeps_the_awaiting_flag() -> None:
     w, flags = guarded(AIMessage(content="Take your time."))
-    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True)
+    # awaiting means an earlier turn asked for the card, so this is not the first message (no D-074 offer write)
+    w.turns.sessions[SID] = replace(w.turns.sessions[SID], awaiting_verification=True, user_turns=1)
     await chat(w, "ok one sec")
     assert flags.calls == [] and w.turns.sessions[SID].awaiting_verification is True
 

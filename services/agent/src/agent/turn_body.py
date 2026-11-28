@@ -11,6 +11,8 @@ Budget: steps 10 to 13 are bounded by their own clamps (every core call is min(l
 commit or submit failure ticket started at the end of step 13 runs in the reserve; only step 14 runs under the loop
 timeout (deadline - 3 s), and every escalation ticket is opened after it (doc 07 s8.2, s8.3).
 Side effects: thread reads and writes (checkpointer), core calls, events on the turn stream, the session flag.
+D-074: after step 15 the first customer message of an unverified session gets the verification card
+(agent.first_turn.offer_card) when the turn did not already ask for it.
 Role: composition of the ingress steps between the turn row and the final row. Step 12's result (the merged
 <voice_transcript> message, from Ingress) is placed before the turn message; step 9a (PIN scan) is CS-E-03.S7.T9.
 Wiring part 2 (CS-E-08.S5): reuses the TurnControl Ingress bound (deadline, demo fault), passes cost_of to the SSE
@@ -31,6 +33,7 @@ from psycopg.types.json import Jsonb
 from agent.assembly import run_config, turn_run_config
 from agent.clients.core_agent import CoreAgentClient
 from agent.escalation import EscalationFacts, Escalator
+from agent.first_turn import offer_card
 from agent.gates import identity_key
 from agent.memory import MemoryRefresh, refresh_memory, repair_dangling
 from agent.prompt import TurnContext, build_turn_message
@@ -214,6 +217,7 @@ class TurnRunner:
         agent_input = {**memory.update, **result.state, "messages": messages}
         loop_config = turn_run_config(inp.session_id, control.turn_id, control.demo_fault)
         outcome = await self._loop(stream, control, agent_input, config, loop_config)  # steps 14 and 15
+        offer_card(stream, control, verified)  # D-074: the first message of an unverified session gets the card
         if control.awaiting_verification and self.flags is not None:  # s6.3 step 2: agent.sessions is the authority
             await self.flags.set_awaiting_verification(inp.session_id, True)
         return outcome

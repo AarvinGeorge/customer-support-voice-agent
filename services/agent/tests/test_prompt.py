@@ -105,3 +105,37 @@ def test_system_prompt_states_no_eligibility_rule():
 def test_system_prompt_sends_refunds_and_questions_to_the_deciding_tools():
     assert "prepare_refund" in SYSTEM_PROMPT  # every refund request goes to the rule engine
     assert "search_kb" in SYSTEM_PROMPT  # every question that is not small talk or an account lookup is searched
+
+
+# Review PR #80 I1: the routing rules are pinned by their full sentences, not by a tool name and the hash. Deleting or
+# weakening a rule (and updating the hash) must fail here; each entry was shown red by deleting it from the prompt.
+ROUTING_RULES = {
+    "every refund request goes to prepare_refund, after the charge is identified": (
+        "For every refund request from a verified customer, first identify the charge (from what the customer said, "
+        "the account context, or list_charges when you have it), then call prepare_refund for it, whatever you "
+        "believe about their role, their plan or the charge, and let its result decide."),
+    "eligibility belongs to the system": (
+        "You do not decide whether a customer may have a refund. Who may ask, which charges qualify, time windows "
+        "and amounts are decided by the system, never by you."),
+    "every question that is not small talk or an account lookup starts with search_kb": (
+        "Start every question with search_kb, except pure small talk (a greeting or thanks) and lookups of the "
+        "customer's own account data."),
+    "no decline or answer before searching": (
+        "Never decline or answer such a question from your own judgement before searching."),
+    "off-topic and uncovered questions are searched too": (
+        "This includes questions that seem unrelated to Quillstack and questions you expect the articles not to "
+        "cover"),
+}
+
+
+def test_every_routing_rule_is_in_the_prompt_word_for_word():
+    missing = [name for name, sentence in ROUTING_RULES.items() if sentence not in SYSTEM_PROMPT]
+    assert missing == []
+
+
+def test_the_routing_rule_check_can_fail():
+    # Positive control: the same check on a prompt with one rule removed reports exactly that rule.
+    name = "every question that is not small talk or an account lookup starts with search_kb"
+    weakened = SYSTEM_PROMPT.replace(ROUTING_RULES[name], "A search_kb tool exists.")
+    assert weakened != SYSTEM_PROMPT
+    assert [n for n, s in ROUTING_RULES.items() if s not in weakened] == [name]

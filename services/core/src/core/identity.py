@@ -172,20 +172,26 @@ def verify(conn: Any, *, policy: PolicyConfig, clock: Clock, pepper: str, sessio
     Use when: POST /v1/identity/verify. Inputs: connection (inside the request transaction), policy, clock, pepper,
     session id, NORMALISED account id and PIN, trace id, mode. Output: VerifyOutcome. Side effects: advisory lock
     per session, session_claims upsert, verify_attempts and audit rows (no ticket on lockout, D-070).
-    Role: doc 07 s3.1. Order: session lock, account lock, credentials. A locked session or account answers `locked`
-    without counting. A verified session that sends the same person's credentials gets the same claims; another
-    person's valid credentials give `conflict`; wrong credentials fail without counting against the session."""
+    Role: doc 07 s3.1. Order: identity, session lock, account lock, credentials. A verified session that names another
+    account gets `conflict` before any check (D-075: one identity per conversation; no PIN is tested, nothing is
+    counted against that account, so the session is no PIN oracle for it). A locked session or account answers
+    `locked` without counting. A verified session that sends the same person's credentials gets the same claims;
+    another user's valid credentials on the same account give `conflict`; wrong credentials fail without counting
+    against the session."""
     ident = policy.identity
     now = clock.now()
     conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"verify:{session_id}",))
     conn.execute("INSERT INTO session_claims (session_id, created_at) VALUES (%s,%s) ON CONFLICT (session_id) DO NOTHING",
                  (session_id, now))
-    user_id, expires, failed, locked = conn.execute(
-        "SELECT user_id, expires_at, failed_verifies, verify_locked FROM session_claims WHERE session_id = %s FOR UPDATE",
-        (session_id,)).fetchone()
+    user_id, held_account, expires, failed, locked = conn.execute(
+        "SELECT user_id, account_id, expires_at, failed_verifies, verify_locked FROM session_claims "
+        "WHERE session_id = %s FOR UPDATE", (session_id,)).fetchone()
     held = user_id if (user_id is not None and expires is not None and expires > now) else None
     common = {"policy": policy, "clock": clock, "session_id": session_id, "account_id": account_id,
               "trace_id": trace_id, "mode": mode}
+    if held is not None and account_id != held_account:  # D-075: one identity per conversation, before any PIN check
+        _audit(conn, event="verify_conflict", ok=False, status=409, extra={"reason": "other_account"}, **common)
+        return VerifyOutcome("conflict")
     if locked or _account_locked(conn, policy, account_id, now):
         _audit(conn, event="verify_blocked", ok=False, status=423, extra={"reason": "session" if locked else "account"},
                **common)

@@ -116,13 +116,15 @@ class World:
     """What: one session wired end to end. Use when: each test. Inputs: replies or models, core overrides, tool
     replacements {name: tool}, deadlines, whether the stub session starts verified, whether to use the ASGI stub,
     whether agent.sessions says the session awaits verification, an optional EscalationHolds store
-    (agent.sessions.held_escalation, D-070).
+    (agent.sessions.held_escalation, D-070), an optional SessionFlags writer, the session's user_turns at start
+    (0: the next text turn is the first customer message, D-074).
     Output: send(), values(), seed(), transport. Side effects: none. Role: wiring."""
 
     def __init__(self, replies: list[AIMessage] | None = None, *, model: Any = None, fallback: Any = None,
                  overrides: dict[tuple[str, str], Handler] | None = None, tools: dict[str, Any] | None = None,
                  deadlines: dict[str, float] | None = None, verified: bool = True, use_stub: bool = True,
-                 awaiting_verification: bool = False, holds: Any = None) -> None:
+                 awaiting_verification: bool = False, holds: Any = None, flags: Any = None,
+                 user_turns: int = 0) -> None:
         """What: build it. Use when: tests. Inputs: see class. Output: none. Side effects: none. Role: constructor."""
         self.stub = create_app() if use_stub else None
         if self.stub is not None and verified:
@@ -141,9 +143,10 @@ class World:
         escalator = Escalator(core, holds=holds)
         handler = StructuredInput(core, confirmer, last_turn=None, escalator=escalator)
         self.ingress = Ingress(MemoryTurnStore(SessionRow(session_id=SID, visitor_id=VISITOR,
-                                                          awaiting_verification=awaiting_verification)), MemoryTurnLock(),
+                                                          awaiting_verification=awaiting_verification,
+                                                          user_turns=user_turns)), MemoryTurnLock(),
                                served_by="agent_a", run_agent=TurnRunner(self.agent, core, structured=handler,
-                                                                        escalator=escalator),
+                                                                        escalator=escalator, flags=flags),
                                turn_deadline_s=deadlines)
 
     async def seed(self, values: dict[str, Any]) -> None:
