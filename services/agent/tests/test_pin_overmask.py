@@ -120,48 +120,108 @@ async def test_positive_control_a_typed_pin_never_reaches_the_model_or_the_trace
         assert not leaks(text, ex.STUB_PIN)
 
 
-def test_a_middleware_model_request_in_the_trace_keeps_the_model_tool_args(monkeypatch: pytest.MonkeyPatch) -> None:
-    import requests
-    from langchain.agents.middleware import ModelRequest
-    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+class _Capture:
+    """What: a fake LangSmith endpoint plus a client that posts to it. Use when: the trace tests. Inputs: monkeypatch.
+    Output: .client and .blob(). Side effects: sets LANGSMITH_TRACING for the test. Role: fake."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """What: build the client. Use when: tests. Inputs: monkeypatch. Output: none. Side effects: env.
+        Role: constructor."""
+        import requests
+
+        from agent.tracing import build_langsmith_client
+
+        sent: list[bytes] = []
+        self.sent = sent
+
+        class Session(requests.Session):
+            """What: records bodies, answers 200. Use when: the client posts. Inputs: none. Output: session.
+            Side effects: records. Role: fake."""
+
+            def request(self, method: str | bytes, url: str | bytes, *a: Any, **kw: Any) -> requests.Response:  # type: ignore[override]
+                """What: record the body. Use when: a post. Inputs: request. Output: 200. Side effects: records.
+                Role: fake."""
+                body = kw.get("data")
+                sent.append(body if isinstance(body, bytes) else str(body).encode())
+                resp = requests.Response()
+                resp.status_code, resp._content = 200, b"{}"
+                return resp
+
+        monkeypatch.setenv("LANGSMITH_TRACING", "true")
+        self.client = build_langsmith_client(api_key="lsv2_test_not_real", api_url="http://langsmith.test",
+                                             session=Session(), auto_batch_tracing=False)
+
+    def blob(self) -> str:
+        """What: every posted body, flushed. Use when: asserting. Inputs: none. Output: text. Side effects: flush.
+        Role: helper."""
+        self.client.flush()
+        return b"".join(self.sent).decode()
+
+
+def test_a_middleware_request_in_the_trace_keeps_the_model_tool_args(monkeypatch: pytest.MonkeyPatch) -> None:
     from langchain_core.runnables import RunnableLambda
     from langchain_core.tracers.langchain import LangChainTracer
     from langgraph.runtime import Runtime
 
-    from agent.tracing import build_langsmith_client
+    from agent.prompt import TurnContext, build_turn_message
 
-    sent: list[bytes] = []
-
-    class Capture(requests.Session):
-        """What: a requests session that records bodies and answers 200. Use when: this test. Inputs: none.
-        Output: session. Side effects: records. Role: fake LangSmith endpoint."""
-
-        def request(self, method: str | bytes, url: str | bytes, *a: Any, **kw: Any) -> requests.Response:  # type: ignore[override]
-            """What: record the body. Use when: the client posts. Inputs: request. Output: 200. Side effects: records.
-            Role: fake."""
-            body = kw.get("data")
-            sent.append(body if isinstance(body, bytes) else str(body).encode())
-            resp = requests.Response()
-            resp.status_code, resp._content = 200, b"{}"
-            return resp
-
-    monkeypatch.setenv("LANGSMITH_TRACING", "true")
-    client = build_langsmith_client(api_key="lsv2_test_not_real", api_url="http://langsmith.test", session=Capture(),
-                                    auto_batch_tracing=False)
-    # Live trace 01a2206c-7896: the wrap_model_call runs carry the middleware request (model, runtime and state).
+    cap = _Capture(monkeypatch)
+    # Live trace 01a2206c-7896: the wrap_model_call runs carry the request as a dict (model, messages, state) with a
+    # runtime object inside that the walker cannot inspect.
     call = AIMessage("", tool_calls=[{"name": "list_charges", "args": {"ending": "0412"}, "id": "c1"}])
-    framed = HumanMessage(f"<customer_message>\nmy PIN is {ex.STUB_PIN}\n</customer_message>")
-    req = ModelRequest(model=GenericFakeChatModel(messages=iter([])), messages=[framed, call],
-                       state={"messages": [framed, call], **VERIFIED},  # type: ignore[typeddict-item]
-                       runtime=Runtime(context=None))
+    turn = build_turn_message(f"my PIN is {ex.STUB_PIN}", TurnContext(mode="chat", verified=True,
+                                                                     context_snapshot=VERIFIED["context_snapshot"]))
+    request = {"model": "fake", "messages": [turn, call], "state": {"messages": [turn, call], **VERIFIED},
+               "runtime": Runtime(context=None)}
 
     def step(x: dict[str, Any]) -> str:
         """What: a traced step. Use when: this test. Inputs: dict. Output: text. Side effects: none. Role: fixture."""
         return "ok"
 
-    RunnableLambda(step).invoke({"request": req}, config={"callbacks": [LangChainTracer(client=client)]})
-    client.flush()
-    blob = b"".join(sent).decode()
+    RunnableLambda(step).invoke({"request": request}, config={"callbacks": [LangChainTracer(client=cap.client)]})
+    blob = cap.blob()
     flat = blob.replace(" ", "").replace("\\", "").replace("'", '"')
     assert '"ending":"0412"' in flat and "ticket ending 8213" in blob and "U-0001" in blob
     assert not leaks(blob, ex.STUB_PIN) and "[PIN]" in blob  # the framed customer PIN is masked
+
+
+def test_every_state_field_is_labelled_ours_at_its_source() -> None:
+    from contracts.redact import OURS_FIELDS
+    from langchain.agents.middleware import AgentState
+
+    from agent.state import SupportState
+
+    # A new state field must be added to OURS_FIELDS to keep its numbers; until then it is fully scanned (default deny).
+    ours = set(SupportState.__annotations__) - set(AgentState.__annotations__)
+    assert ours and ours <= OURS_FIELDS, ours - OURS_FIELDS
+
+
+async def test_canary_with_step_9a_off_no_customer_pin_reaches_the_trace(monkeypatch: pytest.MonkeyPatch) -> None:
+    # review-pr91 I2: the frame-invariant canary end to end. Step 9a is switched off, so the raw customer text enters
+    # the graph; the trace net alone must keep it out of LangSmith on every run (model, gates, state, middleware).
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    from langchain_core.tracers.context import tracing_v2_enabled
+
+    import agent.ingress as ingress
+    from agent.pin_guard import Scanned
+    from test_structured_input import Fake
+
+    replies = [AIMessage("Please use the secure card; I never need your PIN here.")]
+
+    async def scripted(self: Any, messages: Any, *a: Any, **kw: Any) -> ChatResult:
+        """What: answer from a list tracing cannot drain. Use when: the fake model call. Inputs: messages.
+        Output: ChatResult. Side effects: records. Role: fake."""
+        Fake.seen.append(list(messages))
+        return ChatResult(generations=[ChatGeneration(message=replies.pop(0) if replies else AIMessage("ok"))])
+
+    monkeypatch.setattr(Fake, "_agenerate", scripted)
+    monkeypatch.setattr(ingress, "scan_input", lambda inp, ctx: Scanned(inp=inp, refuse=False, redacted=0))
+    cap = _Capture(monkeypatch)
+    w = World(verified=True)
+    await w.seed(VERIFIED)
+    with tracing_v2_enabled(project_name="canary", client=cap.client):
+        await w.send(text=f"my PIN is {ex.STUB_PIN}, what about ticket ending 8213?")
+    assert Fake.seen and any(ex.STUB_PIN in str(m.content) for m in Fake.seen[-1])  # 9a is off: the model got it
+    blob = cap.blob()
+    assert '"run_type":"llm"' in blob.replace(" ", "") and "ticket ending 8213" in blob  # runs were traced
+    assert not leaks(blob, ex.STUB_PIN)

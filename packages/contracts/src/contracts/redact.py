@@ -2,7 +2,7 @@
 Use when: before anything is written to turn_events, transcript_items, logs, audit or LangSmith.
 Inputs: none.
 Output: RedactContext, redact, redact_system, scan_text, scan_pins, scan_relayed, PinScan, normalize_spoken_digits,
-hide_for_langsmith, mask_email, PIN_FIELD_NAMES, PIN_TOKEN.
+hide_for_langsmith, ours_id, OURS_ID_PREFIX, OURS_FIELDS, mask_email, PIN_FIELD_NAMES, PIN_TOKEN.
 Side effects: none.
 Role: redaction by provenance (D-071 part 3). Card PIN fields are replaced and email addresses are masked in all data.
 The doc 07 s11.1 free-text PIN scanner applies to customer-originated text only: `redact` (every string scanned) is
@@ -10,7 +10,8 @@ for what the customer typed or said; `redact_system` is for what our system wrot
 tool results, event fields holding code-generated ids), where only text inside a customer frame (<customer_message>,
 <voice_transcript> customer lines) is scanned again as a second net. `scan_relayed` is for text the realtime voice
 model said: full scan, except our own lines keep the exact ids core issued in the session. hide_for_langsmith treats
-recognised model and tool messages as system data and every other string as unknown provenance (full scan).
+text labelled ours (ours_id messages, OURS_FIELDS state) and model and tool messages as system data, and every other
+string as unknown provenance (full scan, D-078).
 """
 import json
 import re
@@ -553,23 +554,82 @@ def _plain(obj: Any) -> Any:
     return json.loads(json.dumps(obj, default=default))
 
 
+# Provenance labels our code writes at the source (CS-E-02.F14 fix round 1, default deny). A customer can author
+# neither a message id nor a state key, so these labels cannot be forged from customer text.
+OURS_ID_PREFIX = "ours:"
+# Agent state fields that hold code-held records (agent.state.SupportState; a test there keeps this list complete).
+OURS_FIELDS = frozenset({"verified", "claims_snapshot", "context_snapshot", "pending", "weak_streak",
+                         "grounding_failures", "last_turn_delivered"})
+_SYSTEM_KINDS = frozenset({"ai", "tool", "system", "function", "assistant", "AIMessage", "AIMessageChunk",
+                           "ToolMessage", "ToolMessageChunk", "SystemMessage", "FunctionMessage", "ChatGeneration",
+                           "ChatGenerationChunk", "Generation"})
+_HUMAN_KINDS = frozenset({"human", "user", "HumanMessage", "HumanMessageChunk"})
+
+
+def ours_id(kind: str) -> str:
+    """What: a unique message id that labels a message our code wrote ("ours:<kind>:<hex>").
+    Use when: building a HumanMessage whose text code composes (the turn message, the merged voice transcript, the
+    Gate 2 verifier input). Inputs: a short kind name. Output: id. Side effects: none.
+    Role: the explicit provenance label hide_for_langsmith reads; unique, so the thread never merges two messages.
+    The random part has letters only, so an id can never look like (or be searched as) a PIN."""
+    from uuid import uuid4
+
+    return f"{OURS_ID_PREFIX}{kind}:{uuid4().hex.translate(_NO_DIGITS)}"
+
+
+_NO_DIGITS = str.maketrans("0123456789", "ghijklmnop")
+
+
+def _message_kind(obj: Mapping[Any, Any]) -> str | None:
+    """What: "ours" for a message labelled with an ours_id, "system" for a model, tool or system message (or a model
+    generation), "human" for any other human message, else None. Reads the plain dump ({"type": "ai", "id": ...}),
+    the OpenAI shape ({"role": "assistant"}) and the LangChain serialized shape ({"lc": 1, "id": [..., "AIMessage"],
+    "kwargs": {"id": ...}}). Use when: _trace. Inputs: mapping. Output: kind or None. Side effects: none.
+    Role: helper."""
+    names = [obj.get("type"), obj.get("role")]
+    ident, kwargs = obj.get("id"), obj.get("kwargs")
+    msg_id = kwargs.get("id") if isinstance(kwargs, Mapping) else ident
+    if obj.get("lc") is not None and isinstance(ident, list) and ident:
+        names.append(ident[-1])
+    if not any(isinstance(n, str) and (n in _SYSTEM_KINDS or n in _HUMAN_KINDS) for n in names):
+        return None
+    if isinstance(msg_id, str) and msg_id.startswith(OURS_ID_PREFIX):
+        return "ours"
+    return "system" if any(isinstance(n, str) and n in _SYSTEM_KINDS for n in names) else "human"
+
+
 def _trace(obj: Any) -> Any:
-    """What: redact a trace payload by provenance carried in the data: customer-authored text is in a trace only
-    inside the frames ingress writes around it after the step 9a scan (<customer_message>, <voice_transcript>), so
-    those frames get the scanner again as the second net; every other string is ours (code-written evidence and
-    lines, tool results, session state, model text) and keeps its numbers. PIN fields and emails are replaced
-    everywhere (redact_system).
-    Use when: hide_for_langsmith. Inputs: payload. Output: a redacted copy. Side effects: none; raises TypeError on
-    an object it cannot inspect.
-    Role: CS-E-02.F14 (build-log/reports/rca-pin-overmask.md): the message role is a chat API slot, not the author;
-    the gate verifier's code-written evidence is a "human" message and was scanned as customer text (U-[PIN])."""
-    return redact_system(obj)
+    """What: redact a trace payload by provenance, default deny (D-078): text our code labelled "ours" (a message
+    with an ours_id, a value under an OURS_FIELDS key) and model, tool and system messages are system data
+    (redact_system: frames scanned, numbers kept); every other string, including any unlabeled human message in or
+    outside a frame, gets the full scan with the default context. PIN fields are replaced everywhere.
+    Use when: hide_for_langsmith. Inputs: payload. Output: a redacted copy. Side effects: none; raises TypeError on an
+    object it cannot inspect.
+    Role: CS-E-02.F14: our records keep their numbers because they say so at the source, never because of the
+    message role or the payload shape; a missing label only over-masks."""
+    if isinstance(obj, BaseModel):
+        return _trace(obj.model_dump(mode="python"))
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return _trace(asdict(obj))
+    if isinstance(obj, Mapping):
+        kind = _message_kind(obj)
+        if kind in ("ours", "system"):
+            return redact_system(obj)
+        if kind == "human":
+            return redact(obj, _TRACE_CONTEXT)
+        return {k: (PIN_TOKEN if isinstance(k, str) and k.lower() in PIN_FIELD_NAMES and v is not None
+                    else redact_system(v) if k in OURS_FIELDS else _trace(v))
+                for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_trace(v) for v in obj)
+    return redact(obj, _TRACE_CONTEXT)
 
 
 def hide_for_langsmith(payload: Any) -> dict[str, Any]:
-    """What: the LangSmith Client hide_inputs and hide_outputs function, by provenance (_trace): our records keep
-    their numbers, customer frames are scanned. A payload it cannot walk (a middleware request holding a runtime
-    object) is flattened to plain data first and redacted by the same rule; if even that fails, nothing is sent.
+    """What: the LangSmith Client hide_inputs and hide_outputs function, by provenance, default deny (_trace): text
+    labelled ours keeps its numbers, everything unlabeled gets the full scan. A payload it cannot walk (a middleware
+    request holding a runtime object) is flattened to plain data first, which keeps its structure and labels, and
+    redacted by the same rule; if even that fails, nothing is sent.
     Use when: langsmith.Client(hide_inputs=hide_for_langsmith, hide_outputs=hide_for_langsmith).
     Inputs: a run's inputs or outputs dict. Output: a redacted dict (never the raw payload).
     Side effects: none. Role: doc 07 s11.1 second net by provenance (D-071); ingress already redacted customer text

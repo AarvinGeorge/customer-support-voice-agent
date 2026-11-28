@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from contracts import limits
+from contracts.redact import ours_id
 from contracts.tools import VISIBILITY
 from contracts.trust import escape_untrusted, escape_untrusted_obj
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -736,7 +737,8 @@ class GroundingVerifier:
         evidence, timeout. Output: GroundingResult. Side effects: one model call; usage on the control.
         Role: helper (fail closed)."""
         citable = evidence.citable
-        msgs = [SystemMessage(VERIFIER_PROMPT), HumanMessage(verifier_input(evidence.text, draft, citable))]
+        msgs = [SystemMessage(VERIFIER_PROMPT), HumanMessage(verifier_input(evidence.text, draft, citable),
+                                                            id=ours_id("gate2_evidence"))]  # code-written evidence
         kwargs = self.output_kwargs(model, verdict_schema())
         try:
             reply = await asyncio.wait_for(model.ainvoke(msgs, config={"tags": list(GATE_TAGS)}, **kwargs),

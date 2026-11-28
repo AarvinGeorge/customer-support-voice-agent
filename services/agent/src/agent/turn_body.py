@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Protocol
 
 from contracts import limits
+from contracts.redact import ours_id
 from langchain_core.messages import HumanMessage
 from psycopg.types.json import Jsonb
 
@@ -246,7 +247,7 @@ class TurnRunner:
             text = inp.text or ""
         control.customer_text = customer_words(inp, result.model_text)  # CS-E-02.F11, Gate 1 input
         merged_msg = getattr(inp, "merged_transcript", None)  # step 12: wrapped, untrusted client chatter
-        messages = ([HumanMessage(content=merged_msg)] if merged_msg else []) + [build_turn_message(text, ctx)]
+        messages = ([HumanMessage(content=merged_msg, id=ours_id("voice_transcript"))] if merged_msg else []) + [build_turn_message(text, ctx)]
         agent_input = {**memory.update, **result.state, "messages": messages}
         loop_config = turn_run_config(inp.session_id, control.turn_id, control.demo_fault)
         outcome = await self._loop(stream, control, agent_input, config, loop_config)  # steps 14 and 15

@@ -130,11 +130,9 @@ def test_voice_frame_scans_customer_lines_only() -> None:
     assert "4821" not in out and "Ticket ending 8352" in out
 
 
-def test_langsmith_scans_customer_frames_anywhere_in_the_payload() -> None:
-    # CS-E-02.F14 (replaces review-pr76 M2): provenance is the ingress frame, not the payload shape; a frame is
-    # scanned wherever it sits, and an unframed string is ours (tests/test_trace_provenance.py).
-    out = hide_for_langsmith({"text": "<customer_message>my PIN is 4821</customer_message>",
-                              "inputs": {"q": "<customer_message>QS-10423 4821</customer_message>"}})
+def test_langsmith_scans_strings_of_unknown_provenance() -> None:
+    # Review M2: outside a recognised message, provenance is unknown, so the full second net runs.
+    out = hide_for_langsmith({"text": "my PIN is 4821", "inputs": {"q": "QS-10423 4821"}})
     assert "4821" not in repr(out) and "QS-10423" in repr(out)
 
 
