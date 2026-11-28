@@ -84,9 +84,6 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
-      args:   # public, non-secret: the drawer's LangSmith run link (project page URL holds ids, not a key)
-        NEXT_PUBLIC_LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-cs-voice-agent}
-        NEXT_PUBLIC_LANGSMITH_PROJECT_URL: ${LANGSMITH_PROJECT_URL:-}
     restart: unless-stopped
     networks: [edge]
     expose: ["3000"]
