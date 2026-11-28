@@ -329,7 +329,8 @@ def g_trajectory(ctx: Ctx) -> list[Check]:
 
 
 def g_turns(ctx: Ctx) -> list[Check]:
-    """What: per-turn expectations (end_reason, forbidden_tools, cites_any, says, verification_card, verification_result, grounding).
+    """What: per-turn expectations (end_reason, end_reason_any, forbidden_tools, cites_any, says, verification_card, verification_result, grounding,
+    gate2_ran: the reply had a Gate 2 pass or fail, D-083).
     Use when: a turn has a non-empty expect.
     Inputs: ctx. Output: one check per such turn, named turn.N. Side effects: none. Role: step-by-step script checks."""
     out: list[Check] = []
@@ -350,6 +351,12 @@ def g_turns(ctx: Ctx) -> list[Check]:
                 bad.append("no turn.completed")
             elif t.end_reason != exp["end_reason"]:
                 bad.append(f"end_reason {t.end_reason}, expected {exp['end_reason']}")
+        if "end_reason_any" in exp:
+            if t.end_reason is None:
+                err = True
+                bad.append("no turn.completed")
+            elif t.end_reason not in exp["end_reason_any"]:
+                bad.append(f"end_reason {t.end_reason}, expected one of {exp['end_reason_any']}")
         if "forbidden_tools" in exp:
             ev = ctx.turn_events(t)
             if ev is None:
@@ -401,6 +408,15 @@ def g_turns(ctx: Ctx) -> list[Check]:
                     src = exp["grounding"].get("from_source")
                     if src and not any(c.get("supported") and c.get("source_id") == src for c in g.get("claims") or []):
                         bad.append(f"no supported claim rests on source {src}")
+        if exp.get("gate2_ran"):
+            ev = ctx.turn_events(t)
+            if ev is None:
+                err = True
+                bad.append("stored events missing")
+            else:
+                g2 = [e.get("verdict") for e in ev if e.get("type") == "gate" and e.get("gate") == "grounding"]
+                if not g2 or g2[-1] not in ("pass", "fail"):
+                    bad.append(f"Gate 2 did not check this reply (grounding verdicts {g2})")
         status = "fail" if any(not b.startswith(("no turn", "stored events", "no final")) for b in bad) else ("error" if err else "pass")
         out.append(Check(name, status, "; ".join(bad) or "ok"))
     return out
@@ -744,7 +760,8 @@ GRADERS: list[Callable[[Ctx], list[Check]]] = [g_outcome, g_final_state, g_reaso
 
 def grade_case(case: dict[str, Any], run: CaseRun, policy: PolicyConfig) -> CaseGrade:
     """What: grade one case run with every code grader. Use when: the runner finished a case (or failed part way).
-    Inputs: the golden case, the CaseRun, the loaded policy. Output: CaseGrade (fail beats error beats pass).
+    Inputs: the golden case, the CaseRun, the loaded policy. Output: CaseGrade (fail beats error beats pass), carrying the
+    case's known_limitation tag (D-083).
     Side effects: none. Role: the single grading entry point."""
     ctx = Ctx(case, run, policy)
     checks: list[Check] = []
@@ -752,7 +769,8 @@ def grade_case(case: dict[str, Any], run: CaseRun, policy: PolicyConfig) -> Case
         checks.append(Check("run", "error", run.error))
     if not any(t.completed for t in run.turns):
         # nothing was observed: every other check would be a guess, so the case is error and nothing else is claimed
-        return CaseGrade(case["id"], case["split"], checks or [Check("run", "error", "no turn completed")])
+        return CaseGrade(case["id"], case["split"], checks or [Check("run", "error", "no turn completed")],
+                         known_limitation=case.get("known_limitation"))
     for g in GRADERS:
         checks.extend(g(ctx))
-    return CaseGrade(case["id"], case["split"], checks)
+    return CaseGrade(case["id"], case["split"], checks, known_limitation=case.get("known_limitation"))

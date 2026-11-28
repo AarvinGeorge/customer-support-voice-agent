@@ -158,8 +158,11 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
     rep = report.build_report(result.grades, g1, {"agent_url": wired.agent_url, "cases_selected": [g.case_id for g in result.grades]}, when)
     md, js = report.write_report(rep, Path(args.out_dir), when)
     v = rep["cases"]["verdicts"]
-    print(f"{rep['cases']['total']} cases: {v['pass']} pass, {v['fail']} fail, {v['error']} error. Report: {md} and {js}")
-    return 0 if v["fail"] == 0 and v["error"] == 0 and rep["cases"]["total"] > 0 else 1
+    k = rep["cases"]["known_limitation"]
+    print(f"{rep['cases']['total']} cases: {v['pass']} pass, {v['fail']} fail, {v['error']} error; known limitations "
+          f"(not counted as fixed) {k['total']}: {k['verdicts']['pass']} on the safe path, {k['verdicts']['fail']} fail, "
+          f"{k['verdicts']['error']} error. Report: {md} and {js}")
+    return 0 if report.all_green(rep) else 1
 
 
 def _smoke_refusal(args: argparse.Namespace, e: Mapping[str, str]) -> str | None:

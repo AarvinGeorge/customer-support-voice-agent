@@ -87,12 +87,14 @@ class Check:
 
 @dataclass
 class CaseGrade:
-    """What: the grade of one case. Use when: reporting. Inputs: checks. Output: the record with a verdict.
+    """What: the grade of one case. Use when: reporting. Inputs: checks, optional known_limitation tag.
+    Output: the record with a verdict.
     Side effects: none. Role: fail beats error beats pass; an empty check list is an error, never a pass."""
 
     case_id: str
     split: str
     checks: list[Check]
+    known_limitation: str | None = None  # the decision id (D-083) when the case's expected path is a known limitation
 
     @property
     def verdict(self) -> Status:
