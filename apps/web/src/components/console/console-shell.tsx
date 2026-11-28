@@ -140,7 +140,7 @@ export function VoiceLine({ state, label, caption, error }: { state: string; lab
 
 /**
  * What: the display-only signed-in hint: the persona a landing row's Start named (D-076).
- * Use when: ConsoleRoute matched ?as= against the persona list.
+ * Use when: ConsoleRoute matched ?as= (and ?who=) against the persona list.
  * Inputs: none (type).
  * Output: none (type).
  * Side effects: none.
@@ -148,7 +148,8 @@ export function VoiceLine({ state, label, caption, error }: { state: string; lab
  *   to the server; the PIN is still required and core verify alone establishes identity.
  */
 export interface VerifyHint {
-  name: string;
+  /** The person, or null when the link named only the account (the card then has no name). */
+  name: string | null;
   accountId: string;
 }
 
