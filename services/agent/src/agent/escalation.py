@@ -227,13 +227,16 @@ class Escalator:
         Use when: any code-owned escalation. Inputs: control, escalation reason, summary, category, key reason
         (defaults to reason). Output: TicketRef dict, or None on failure or when under 1 s is left.
         Side effects: one escalation step and at most one core call; sets control.ticket, or control.requester_refusal
-        when core answers REQUESTER_UNKNOWN (D-070). Role: s8.1 row."""
+        when core answers REQUESTER_UNKNOWN (D-070); always records the result on control.ticket_attempt (opened,
+        failed or refused, CS-E-03.F12), the one fact the ticket clause of a line is chosen from. Role: s8.1 row."""
         if control.ticket is not None:
+            control.ticket_attempt = "opened"
             return control.ticket
         step = Step.start(control.events, "escalation", "create_ticket", "Opening a ticket")
         timeout = clamp_timeout(limits.CORE_TICKET_TIMEOUT_S, control.remaining_s(), reserve_s=0.0)
         if timeout is None:
             step.done("skipped", "Couldn't open a ticket", detail="Not enough time left")
+            control.ticket_attempt = "failed"
             return None
         body = {"category": category or REASON_CATEGORY.get(reason, "other"), "summary": summary[:500] or reason,
                 "steps_tried": [], "blocking": False, "origin": "code", "escalation_reason": reason,
@@ -244,16 +247,19 @@ class Escalator:
         except (ToolCallError, TimeoutError, asyncio.TimeoutError) as err:
             if isinstance(err, ToolCallError) and err.code == "REQUESTER_UNKNOWN":  # D-070: core needs a verified customer
                 control.requester_refusal = dict(err.details or {})
+                control.ticket_attempt = "refused"
                 step.done("blocked", "Needs verification first", detail="A ticket needs a verified customer")
                 return None
             step.done("timeout" if not isinstance(err, ToolCallError) or err.kind == "timeout" else "error",
                       "Couldn't open a ticket", detail="The ticket system did not respond")
+            control.ticket_attempt = "failed"
             return None
         ticket = res.get("ticket") if isinstance(res, dict) else None
         if not isinstance(ticket, dict):
             step.done("error", "Couldn't open a ticket", detail="The ticket system gave no ticket")
+            control.ticket_attempt = "failed"
             return None
-        control.ticket = ticket
+        control.ticket, control.ticket_attempt = ticket, "opened"
         step.done("ok", "Opened a ticket", detail=str(ticket.get("display") or ""))
         return ticket
 

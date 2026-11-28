@@ -159,8 +159,8 @@ ROUTES = [
     ("readback", "prepare_refund", {"reason": "duplicate", "note": "x"}, "V1", _readback, READBACK["chat"], "readback"),
     ("escalate", "search_kb", {"query": "sso setup"}, "V0",
      lambda c: c.set_route(Route("escalate", reason="not_in_docs")),
-     "Our help articles don't cover that. I couldn't open a ticket just now. If you contact us, please quote "
-     "reference 00c1.", "escalated"),
+     # the loop alone makes no ticket attempt, so the line makes no ticket claim (CS-E-03.F12)
+     "Our help articles don't cover that.", "escalated"),
     ("decline_off_topic", "search_kb", {"query": "weather today"}, "V0",
      lambda c: c.set_route(Route("decline_off_topic")), router_mod.DECLINE_OFF_TOPIC_LINE, "declined_off_topic"),
 ]

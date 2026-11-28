@@ -7,7 +7,8 @@ turn with the fixed clarifying line, or on the second consecutive fail, or at on
 escalate(grounding_failed | needs_commitment) route line and its ticket.
 Use when: in the create_agent stack (after_model hooks run in reverse order, so this runs first after the model).
 Inputs: the agent state (messages, grounding_failures), the bound TurnControl, a GroundingVerifier, the optional
-open_ticket hook (the escalation module, CS-E-03.S4.T1; until then the line gives the turn reference).
+open_ticket hook (by default the escalation module opens the ticket after the loop and rewrites the line; the line
+written here carries no ticket clause until an attempt is recorded, CS-E-03.F12).
 Output: GroundingMiddleware.
 The code rules (agent.gates.enforce_code_rules) run on every verifier reply: a claim backed only by an
 injection_suspect chunk or by no known source is unsupported; zero claims passes (D-059: the verifier prompt
@@ -41,7 +42,7 @@ from agent.gates import (
     session_evidence,
     start_gate_step,
 )
-from agent.middleware.router import OpenTicket, route_message
+from agent.middleware.router import OpenTicket, record_hook_ticket, route_message
 from agent.turn_control import Route, current_control
 
 _TITLES = {"answer": "Checked the answer against policy", "clarify": "Could not confirm the answer",
@@ -117,7 +118,7 @@ class GroundingMiddleware(AgentMiddleware):
         control.route = None  # no route can be pending here: one would have ended the turn before this model call
         control.set_route(Route("escalate", reason=reason))
         if self.open_ticket is not None and control.route is not None and control.route.ticket is None:
-            control.route.ticket = await self.open_ticket(control)
+            control.route.ticket = record_hook_ticket(control, await self.open_ticket(control))
         line = route_message(control)  # with no hook, agent.escalation opens the ticket after the loop
         next_failures = 0 if reason == "grounding_failed" else failures
         return {"messages": [removal, line], "grounding_failures": next_failures, "jump_to": "end"}

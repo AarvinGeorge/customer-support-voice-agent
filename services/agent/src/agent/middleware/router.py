@@ -7,7 +7,8 @@ Inputs: the bound TurnControl (route, mode, turn id, Gate 1 scope_check); option
 callers that want the ticket inside the loop; by default the escalation module, agent.escalation, opens the
 failure-path ticket AFTER the loop, in the 3 s reserve, and replaces the line in the thread, CS-E-03.S4.T1);
 optional ScopeClassifier (Gate 1 verdict none, doc 07 s6.5 row 3).
-Output: RouteReply, route_reply, route_message, escalate_from_hook, escalation_lead, RouterMiddleware, the fixed
+Output: RouteReply, route_reply, route_message, escalate_from_hook, escalation_lead, ticket_clause,
+record_hook_ticket, RouterMiddleware, the fixed
 line constants.
 RouterMiddleware also writes weak_streak once per run (after_agent).
 Side effects: writes one AI message (and, for readback, state.pending) to the thread; may call open_ticket.
@@ -55,7 +56,8 @@ TOOL_FAILURE_LEADS: dict[str, str] = {
 }
 GENERIC_ESCALATION_LEAD = "I can't finish that here."
 TICKET_CLAUSE = "I've opened a ticket for our team, {display}."
-# doc 07 s8.1 failure-path row: on a failed (or not yet built) ticket the reply gives the turn id's last 4.
+# doc 07 s8.1 failure-path row: after a failed ticket attempt the reply gives the turn id's last 4 (CS-E-03.F12: only
+# after a recorded failed attempt; a line written before the attempt carries no ticket clause).
 NO_TICKET_CLAUSE = "I couldn't open a ticket just now. If you contact us, please quote reference {ref}."
 
 OpenTicket = Callable[[TurnControl], Awaitable[dict[str, Any] | None]]
@@ -85,16 +87,39 @@ def escalation_lead(control: TurnControl) -> str:
         or ESCALATION_LEADS.get(route.reason or "", GENERIC_ESCALATION_LEAD)
 
 
-def _escalation_text(control: TurnControl) -> str:
-    """What: lead plus ticket clause for an escalate route. Use when: route_reply. Inputs: control.
-    Output: text. Side effects: none. Role: helper."""
+def ticket_clause(control: TurnControl) -> str | None:
+    """What: the ticket clause of an escalation line, chosen from the recorded ticket result (CS-E-03.F12): a ticket
+    gives TICKET_CLAUSE, a recorded failed attempt gives the s8.1 fallback (NO_TICKET_CLAUSE with the turn reference),
+    and no attempt yet gives None (the line makes no claim about a ticket).
+    Use when: _escalation_text. Inputs: control with an escalate route. Output: text or None. Side effects: none.
+    Role: the line can only state what the code recorded; the loop writes it before the attempt in the reserve."""
     route = control.route
-    assert route is not None
+    ticket = route.ticket if route is not None else None
+    if ticket:
+        return TICKET_CLAUSE.format(display=ticket.get("display") or f"ticket ending {ticket.get('short_id')}")
+    if control.ticket_attempt == "failed":
+        return NO_TICKET_CLAUSE.format(ref=control.turn_id.replace("-", "")[-4:])
+    return None
+
+
+def _escalation_text(control: TurnControl) -> str:
+    """What: lead plus the ticket clause the recorded ticket result allows. Use when: route_reply. Inputs: control.
+    Output: text. Side effects: none. Role: helper."""
     lead = escalation_lead(control)
-    ticket = route.ticket
-    clause = (TICKET_CLAUSE.format(display=ticket.get("display") or f"ticket ending {ticket.get('short_id')}")
-              if ticket else NO_TICKET_CLAUSE.format(ref=control.turn_id.replace("-", "")[-4:]))
-    return f"{lead} {clause}"
+    clause = ticket_clause(control)
+    return f"{lead} {clause}" if clause else lead
+
+
+def record_hook_ticket(control: TurnControl, ticket: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What: record the result of an in-loop open_ticket hook on control.ticket_attempt (a hook that answered None
+    tried and failed, unless the hook recorded a more exact result itself, such as refused).
+    Use when: RouterMiddleware and GroundingMiddleware after calling their optional hook. Inputs: control, the hook's
+    ticket or None. Output: the ticket. Side effects: sets control.ticket_attempt. Role: CS-E-03.F12."""
+    if ticket:
+        control.ticket_attempt = "opened"
+    elif control.ticket_attempt is None:
+        control.ticket_attempt = "failed"
+    return ticket
 
 
 def route_reply(control: TurnControl) -> RouteReply:
@@ -171,7 +196,7 @@ class RouterMiddleware(AgentMiddleware):
             return None
         route = control.route
         if route.kind == "escalate" and route.ticket is None and self.open_ticket is not None:
-            route.ticket = await self.open_ticket(control)
+            route.ticket = record_hook_ticket(control, await self.open_ticket(control))
         msg = route_message(control)
         update: dict[str, Any] = {"messages": [msg], "jump_to": "end"}
         if route.kind == "readback" and route.pending and route.pending.get("id"):
