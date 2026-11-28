@@ -125,20 +125,13 @@ describe("Inspector drawer", () => {
     expect(within(drawer).getByText("not in the help articles · ticket ending 8214 · opened by code")).toBeTruthy();
   });
 
-  it("links the turn to LangSmith when the project URL is configured, and shows the trace id", () => {
-    const { drawer } = openDrawer(s1, { langsmithProjectUrl: "https://smith.langchain.com/o/t/projects/p/p1" });
+  it("D-087: shows no LangSmith link or text, even when a project URL is injected, and keeps the trace id as plain text", () => {
+    const { drawer } = openDrawer(s1, { langsmithProjectUrl: "https://smith.langchain.com/o/t/projects/p/p1" } as never);
     const turnId = s1.at(-1)?.turn_id ?? "";
-    const link = within(drawer).getByRole("link", { name: /Open in LangSmith/ });
-    expect(link.getAttribute("href")).toBe(`https://smith.langchain.com/o/t/projects/p/p1/r/${turnId}?poll=true`);
-    expect(link.getAttribute("target")).toBe("_blank");
-    expect(link.getAttribute("rel")).toContain("noopener");
+    expect(within(drawer).queryByRole("link", { name: /LangSmith/ })).toBeNull();
+    expect(drawer.querySelector('a[href*="smith.langchain.com"]')).toBeNull();
+    expect(drawer.textContent).not.toMatch(/LangSmith/i);
     expect(within(drawer).getByText(`trace ${turnId.slice(-8)}`)).toBeTruthy();
-  });
-
-  it("says the LangSmith link is not configured without a project URL", () => {
-    const { drawer } = openDrawer(s1, { langsmithProjectUrl: "" });
-    expect(within(drawer).queryByRole("link", { name: /Open in LangSmith/ })).toBeNull();
-    expect(within(drawer).getByText(/LangSmith link not configured/)).toBeTruthy();
   });
 
   it("renders the Demo controls slot when given", () => {

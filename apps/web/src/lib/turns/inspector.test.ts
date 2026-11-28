@@ -1,6 +1,6 @@
 /**
  * What: unit tests for the observability drawer's pure view logic (metric strip, step tree,
- *   Gate 1 words and numbers, Gate 2 claims, decisions, selection, LangSmith link).
+ *   Gate 1 words and numbers, Gate 2 claims, decisions, selection).
  * Use when: `pnpm test`.
  * Inputs: the S1 and S4 contract fixtures replayed through the reducer.
  * Output: vitest results.
@@ -17,7 +17,6 @@ import {
   decisionRows,
   inspectorSelection,
   inspectorSteps,
-  langsmithRunUrl,
   metricStrip,
   retrievalView,
   turnHeading,
@@ -220,29 +219,5 @@ describe("selection and heading", () => {
   it("describes the turn", () => {
     expect(turnHeading(nth(s1, 1))).toBe("chat · input verification · ended readback");
     expect(turnHeading(nth(s4, 0))).toBe("chat · input text · ended declined_off_topic");
-  });
-});
-
-describe("langsmithRunUrl", () => {
-  it("builds the run link from the turn id (run id = turn id, spike 7)", () => {
-    expect(langsmithRunUrl("019a-turn", "https://smith.langchain.com/o/t1/projects/p/p1/")).toBe(
-      "https://smith.langchain.com/o/t1/projects/p/p1/r/019a-turn?poll=true",
-    );
-  });
-
-  it("drops a query string and fragment from the project URL (I2)", () => {
-    expect(langsmithRunUrl("019a-turn", "https://smith.langchain.com/o/t/projects/p/p1?tab=0#x")).toBe(
-      "https://smith.langchain.com/o/t/projects/p/p1/r/019a-turn?poll=true",
-    );
-  });
-
-  it("returns null for an unparseable URL", () => {
-    expect(langsmithRunUrl("t", "https://")).toBeNull();
-  });
-
-  it("returns null without a configured https project URL", () => {
-    expect(langsmithRunUrl("t", undefined)).toBeNull();
-    expect(langsmithRunUrl("t", "")).toBeNull();
-    expect(langsmithRunUrl("t", "javascript:alert(1)")).toBeNull();
   });
 });

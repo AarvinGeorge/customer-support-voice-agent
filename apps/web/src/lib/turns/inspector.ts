@@ -1,7 +1,7 @@
 /**
  * What: pure view logic for the observability drawer (the Inspector): the metric strip from
  *   turn.completed.usage, the step tree with per-step latency, model usage, Gate 1 and Gate 2
- *   and rule details, the decisions list, the selected turn and the LangSmith run link.
+ *   and rule details, the decisions list, the selected turn.
  * Use when: components/console/inspector-drawer.tsx renders a turn.
  * Inputs: TurnView values from the reducer (our own SSE events only, doc 07 s6.2).
  * Output: plain view objects and strings.
@@ -535,28 +535,4 @@ export function inspectorSelection(order: readonly string[], picked: string | nu
   const at = picked === null ? -1 : order.indexOf(picked);
   const index = at === -1 ? order.length - 1 : at;
   return { turnId: order[index] as string, index, total: order.length };
-}
-
-/**
- * What: the LangSmith link of a turn's root run: `{projectUrl}/r/{turn_id}?poll=true` (spike 7
- *   proved the root run id equals the turn id).
- * Use when: the drawer footer.
- * Inputs: the turn id and the public project URL (NEXT_PUBLIC_LANGSMITH_PROJECT_URL, the
- *   LangSmith page of the LANGSMITH_PROJECT project; never a key).
- * Output: the URL, or null when the project URL is unset or not https.
- * Side effects: none.
- * Role: the drawer's way into the full trace (the trace proxy is designed only, D-035).
- */
-export function langsmithRunUrl(turnId: string, projectUrl: string | undefined): string | null {
-  if (!projectUrl) return null;
-  let url: URL;
-  try {
-    url = new URL(projectUrl);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== "https:") return null;
-  url.search = "";
-  url.hash = "";
-  return `${url.toString().replace(/\/+$/, "")}/r/${encodeURIComponent(turnId)}?poll=true`;
 }

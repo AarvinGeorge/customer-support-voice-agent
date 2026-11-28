@@ -133,7 +133,7 @@ The diagram shows the designed system. Under the thin-slice decision (D-035) som
 Legend, designed but not built (D-035; each has a trigger in the [production posture](#production-posture) table):
 
 - `[D]` ops router and `/api/operator/*`, operator page and Approvals tab, `CORE_TOKEN_OPS` and `X-Operator-Token`.
-- `[D]` trace proxy `/api/traces/{trace_id}`: the drawer uses our own SSE usage events plus a LangSmith link instead.
+- `[D]` trace proxy `/api/traces/{trace_id}`: the drawer uses our own SSE usage events instead.
 - `[D]` A2 billing email change and step-up verification, A4, notification preferences, the voice usage post.
 - `[T]` time-boxed: the voice panel ships with waveform bars first; the ElevenLabs orb is built only if time allows (90 minutes, cut at the Saturday 13:00 voice checkpoint).
 - Help articles are authored in Notion and exported once; there is no live Notion sync. Citations link to the public pages.
@@ -166,9 +166,9 @@ Each turn's `turn.completed` event carries usage and gate data. The drawer reads
 
 - A metric strip: latency, first-status time, time to first token, tokens, cached tokens, estimated cost, models used, fallback flag and which replica served the turn.
 - One panel: the tool steps, the retrieval score against its threshold (with calibration status), grounding claims, rule reason codes, the action outcome and any escalation.
-- A link from `turn_id` to the full LangSmith trace (`LANGSMITH_PROJECT=cs-voice-agent` by default). The turn id is the LangSmith run id.
+- The trace id of each turn, as plain text (the turn id is the LangSmith run id). Backend tracing to LangSmith (`LANGSMITH_PROJECT=cs-voice-agent` by default) is operator-only: the product UI has no link to it and the web bundle holds no LangSmith URL (D-087).
 
-TODO CS-E-06.S3.T1: screenshot and the real LangSmith project link once traces exist. The in-app trace detail tab is designed, not built.
+The in-app trace detail tab is designed, not built.
 
 ## Showcase
 
