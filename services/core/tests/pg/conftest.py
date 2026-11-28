@@ -97,7 +97,7 @@ class Seed:
         self.conn = conn
         conn.execute("INSERT INTO accounts (id, name, tier, contract_status, seats) VALUES (%s,'Acme','pro','active',5)",
                      (self.account_id,))
-        conn.execute("INSERT INTO users (id, account_id, display_name, role, pin_hmac) VALUES (%s,%s,'Priya','owner',%s)",
+        conn.execute("INSERT INTO users (id, account_id, display_name, role, pin_hmac) VALUES (%s,%s,'Natasha','owner',%s)",
                      (self.user_id, self.account_id, uuid.uuid4().bytes))
         conn.execute("INSERT INTO charges (id, account_id, charged_at, amount_cents, description, status) "
                      "VALUES (%s,%s, now(), 9600, 'Pro plan', 'paid')", (self.charge_id, self.account_id))

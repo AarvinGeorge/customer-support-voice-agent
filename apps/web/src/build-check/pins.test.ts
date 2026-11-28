@@ -37,7 +37,7 @@ describe("collectPins", () => {
   });
 
   it("fails loudly when the seeds file exists but yields no PIN", () => {
-    expect(() => collectPins(["4821"], "personas:\n  - name: Priya\n    secret: 4821x\n")).toThrow(/seeds/i);
+    expect(() => collectPins(["4821"], "personas:\n  - name: Natasha\n    secret: 4821x\n")).toThrow(/seeds/i);
   });
 
   it("fails loudly when neither source yields a PIN", () => {

@@ -80,7 +80,7 @@ class World:
         self.conn = conn
         conn.execute("INSERT INTO accounts (id, name, tier, contract_status, seats) VALUES (%s,'Acme',%s,'active',5)",
                      (self.account_id, tier))
-        conn.execute("INSERT INTO users (id, account_id, display_name, role, pin_hmac) VALUES (%s,%s,'Priya','owner',%s)",
+        conn.execute("INSERT INTO users (id, account_id, display_name, role, pin_hmac) VALUES (%s,%s,'Natasha','owner',%s)",
                      (self.user_id, self.account_id, uuid.uuid4().bytes))
         self.session_id = self.add_session(verified=True)
 

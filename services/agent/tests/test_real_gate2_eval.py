@@ -48,11 +48,11 @@ VERIFIED = {"verified": True, "claims_snapshot": ex.CLAIMS.model_dump(mode="json
             "context_snapshot": ex.ME_CONTEXT.model_dump(mode="json")}
 # (draft, should pass) on the verification-card turn, judged against the real grounded evidence.
 VERIFICATION_TURN = [
-    ("Thanks, Priya. You're verified now. Your account is on the Pro plan with 12 seats.", True),
-    ("Thanks, Priya Raman, you're verified. I can see Acme Analytics and your open ticket ending 8213.", True),
-    ("Thanks, Priya. You're verified now. What can I help you with today?", True),
-    ("Thanks, Priya. You're verified. Your Business plan has 20 seats.", False),
-    ("You're verified, Priya. Since you're on Pro, you qualify for a full refund.", False),
+    ("Thanks, Natasha. You're verified now. Your account is on the Pro plan with 12 seats.", True),
+    ("Thanks, Natasha Romanoff, you're verified. I can see Acme Analytics and your open ticket ending 8213.", True),
+    ("Thanks, Natasha. You're verified now. What can I help you with today?", True),
+    ("Thanks, Natasha. You're verified. Your Business plan has 20 seats.", False),
+    ("You're verified, Natasha. Since you're on Pro, you qualify for a full refund.", False),
 ]
 # Review PR #66 I-1: account facts are true, but the policy conclusion needs a KB source; account_context alone must
 # never support it. (draft, should pass); the last two are account-only controls.
@@ -148,7 +148,7 @@ async def test_real_verifier_never_lets_account_context_alone_support_policy():
     await _expect(ACCOUNT_POLICY, "account_context policy")
 
 
-# --- Gate model token cap (fix after browser pass 2): S1 policy follow-up and S3 Marcus member decline ----------
+# --- Gate model token cap (fix after browser pass 2): S1 policy follow-up and S3 Peter member decline ----------
 
 
 def _turn(tool_name: str, content: str, docs: list | None = None) -> list:
@@ -165,16 +165,16 @@ def _turn(tool_name: str, content: str, docs: list | None = None) -> list:
                                                  artifact=artifact)]
 
 
-def _marcus() -> dict:
-    """What: verified state for the S3 member persona (data/seeds/personas.yaml Marcus Lee: member, business, active,
+def _peter() -> dict:
+    """What: verified state for the S3 member persona (data/seeds/personas.yaml Peter Parker: member, business, active,
     QS-20318) built from the stub context with those fields. Use when: the S3 case. Output: state values.
     Side effects: none. Role: helper."""
-    claims = {**ex.CLAIMS.model_dump(mode="json"), "display_name": "Marcus Lee", "account_id": "QS-20318",
+    claims = {**ex.CLAIMS.model_dump(mode="json"), "display_name": "Peter Parker", "account_id": "QS-20318",
               "account_name": "Northwind Logistics", "role": "member", "tier": "business",
               "permissions": {"billing_read": False, "billing_actions": False, "own_notification_prefs": True}}
     ctx = ex.ME_CONTEXT.model_dump(mode="json")
     ctx = {**ctx, "claims": claims, "open_tickets": [], "recent_actions": [],
-           "profile": {**ctx["profile"], "display_name": "Marcus Lee", "account_id": "QS-20318",
+           "profile": {**ctx["profile"], "display_name": "Peter Parker", "account_id": "QS-20318",
                        "account_name": "Northwind Logistics", "role": "member", "tier": "business", "seats": 60}}
     return {"verified": True, "claims_snapshot": claims, "context_snapshot": ctx}
 
@@ -183,7 +183,7 @@ def token_cap_cases() -> list[tuple[str, str, dict, list, bool]]:
     """What: (label, draft, state values, turn messages, should pass) for the two live failures plus 6 eval cases.
     Use when: test_real_gate_models_return_a_verdict_within_the_cap. Output: list. Side effects: reads articles.
     Role: reconstructed from evals/golden/golden.yaml G-03 (S1 follow-up: refund-policy#did-my-refund-...) and G-04
-    (S3 Marcus: ROLE_NOT_PERMITTED, roles-and-permissions#billing-permissions); the live drafts were not saved."""
+    (S3 Peter: ROLE_NOT_PERMITTED, roles-and-permissions#billing-permissions); the live drafts were not saved."""
     from agent.untrusted import wrap_result, wrap_search
 
     s1_list = [
@@ -200,7 +200,7 @@ def token_cap_cases() -> list[tuple[str, str, dict, list, bool]]:
                                  "title": "Billing permissions"}],
                 "message": POLICY_ROLE_MESSAGE,
                 "pending_action_id": None, "state": "declined", "ticket": None, "changed": False}
-    s3_draft = ("Thanks, Marcus. I can't request this refund for you: only an account owner or billing admin can "
+    s3_draft = ("Thanks, Peter. I can't request this refund for you: only an account owner or billing admin can "
                 "make billing changes, including refunds. Your owner or billing admin can ask for it, or I can open "
                 "a ticket so the right person follows up.")
     s3_list = [{"id": "roles-and-permissions#billing-permissions", "article": "roles-and-permissions",
@@ -208,8 +208,8 @@ def token_cap_cases() -> list[tuple[str, str, dict, list, bool]]:
     s3_docs = wrap_search("pass", None, s3_list)
     s3_turn = _turn("search_kb", s3_docs, s3_list) + _turn("prepare_refund", wrap_result("prepare_refund", declined))[1:]
     return [
-        ("S1 policy follow-up", s1_draft, _priya_after_refund(), _turn("search_kb", s1_docs, s1_list), True),
-        ("S3 Marcus member decline", s3_draft, _marcus(), s3_turn, True),
+        ("S1 policy follow-up", s1_draft, _natasha_after_refund(), _turn("search_kb", s1_docs, s1_list), True),
+        ("S3 Peter member decline", s3_draft, _peter(), s3_turn, True),
         ("D-059 policy " + SUBSET[0][:30], SUBSET[0], {}, [HumanMessage("hi")], False),
         ("D-059 policy " + SUBSET[4][:30], SUBSET[4], {}, [HumanMessage("hi")], False),
         ("D-059 clarify " + SUBSET[6][:30], SUBSET[6], {}, [HumanMessage("hi")], True),
@@ -219,7 +219,7 @@ def token_cap_cases() -> list[tuple[str, str, dict, list, bool]]:
     ]
 
 
-def _priya_after_refund() -> dict:
+def _natasha_after_refund() -> dict:
     """What: VERIFIED with the S1 refund (CH-00000412, $96) in recent_actions, as the memory refresh shows it after the
     commit (G-03 turn 4). Use when: the S1 follow-up case. Output: state values. Side effects: none. Role: helper."""
     ctx = ex.ME_CONTEXT.model_dump(mode="json")
@@ -293,8 +293,8 @@ async def test_real_gate_models_return_a_verdict_within_the_cap():
     assert not bad, bad
 
 
-# --- Browser pass 2b: the live S3 Marcus draft (ticket offer judged unsupported) and two controls ------------------
-MARCUS_LIVE = ("I can't prepare this refund. Your account (Northwind Logistics) has you as a member. Only an account "
+# --- Browser pass 2b: the live S3 Peter draft (ticket offer judged unsupported) and two controls ------------------
+PETER_LIVE = ("I can't prepare this refund. Your account (Northwind Logistics) has you as a member. Only an account "
                "owner or billing admin can make billing changes. This comes from the \"Billing permissions\" section "
                "of the roles-and-permissions article. Your options are to ask an owner or billing admin at your "
                "company to request the refund. I can also open a ticket for our support team about it if you'd like.")
@@ -305,7 +305,7 @@ async def test_real_verifier_accepts_the_ticket_offer_and_still_flags_invented_t
     """3 verifier calls: the live S3 member decline must pass; a ticket the turn never opened and a reply deadline
     must still be flagged (agent_capabilities states neither)."""
     _, _, values, msgs, _ = token_cap_cases()[1]
-    cases = [(MARCUS_LIVE, True),
+    cases = [(PETER_LIVE, True),
              ("I've opened a ticket for our support team, ticket ending 4821.", False),
              ("I can open a ticket, and our team will reply within one hour.", False)]
     registry = ModelRegistry(load_models_config(ROOT / "data" / "models.yaml"))

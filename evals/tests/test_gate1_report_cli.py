@@ -186,7 +186,7 @@ def test_agent_client_access_failure_is_exit_2(tmp_path: Path) -> None:
 
 
 def test_all_golden_cases_and_personas_still_load() -> None:
-    assert len(load_cases()) == 21 and "Priya Raman" in load_personas() and AgentClient and ACCESS_CODE
+    assert len(load_cases()) == 21 and "Natasha Romanoff" in load_personas() and AgentClient and ACCESS_CODE
 
 
 def test_a_malformed_search_body_is_request_failed_and_does_not_lose_the_run() -> None:

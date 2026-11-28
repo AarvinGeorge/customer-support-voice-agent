@@ -22,7 +22,7 @@ from knowledge.embeddings import OpenAIEmbedder
 
 # (label, scenario, tier, query). Tier "public" means unverified. Scenario questions are the S1 to S5 customer
 # questions of L1 s4 and the showcase Loom order (doc 04), phrased as the customer would say them; tiers are the
-# personas' (Priya Pro, Marcus and Dana Business).
+# personas' (Natasha Pro, Peter and Tony Business).
 PROBES = [
     ("answerable", "generic", "public", "How do I request a refund for a duplicate charge?"),
     ("answerable", "generic", "public", "How long does a refund take to reach my card?"),

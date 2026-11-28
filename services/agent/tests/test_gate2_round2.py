@@ -33,8 +33,8 @@ from agent.turn_control import TurnControl
 from agent.untrusted import wrap_result, wrap_search
 
 CHUNK = search_body("pass")["chunks"][0]
-PRIYA = {"verified": True, "claims_snapshot": {"user_id": "U-1", "account_id": "QS-10423"}}
-DANA = {"verified": True, "claims_snapshot": {"user_id": "U-9", "account_id": "QS-20318"}}
+NATASHA = {"verified": True, "claims_snapshot": {"user_id": "U-1", "account_id": "QS-10423"}}
+TONY = {"verified": True, "claims_snapshot": {"user_id": "U-9", "account_id": "QS-20318"}}
 P_KEY, D_KEY = "U-1|QS-10423", "U-9|QS-20318"
 
 
@@ -79,7 +79,7 @@ def test_n1_every_sid_session_evidence_writes_is_in_the_vocabulary():
                                                                     tool_call_id="t-1", name="list_tickets",
                                                                     artifact={"bound_to": P_KEY}), AIMessage("a")]
               + [line_ids.code_line(line_ids.ROUTE, "t0", "line", P_KEY), HumanMessage("now")])
-    ev = session_evidence(PRIYA, thread, TurnControl(session_id="s", turn_id="t"))
+    ev = session_evidence(NATASHA, thread, TurnControl(session_id="s", turn_id="t"))
     assert set(ev.citable) <= set(sid_vocabulary())
     assert "doc@1" in ev.citable and ev.chunks["doc@1"]["chunk_id"] == CHUNK["chunk_id"]
     assert ev.provenance["doc@1"]["chunk_id"] == CHUNK["chunk_id"]
@@ -149,7 +149,7 @@ def test_n3_code_lines_are_stamped_by_the_one_builder():
     assert msg.id == "route-T1" and msg.response_metadata["bound_to"] == P_KEY
 
 
-@pytest.mark.parametrize("values", [DANA, {"verified": False}])
+@pytest.mark.parametrize("values", [TONY, {"verified": False}])
 def test_n3_a_code_line_written_under_another_verification_is_not_carried(values: dict[str, Any]):
     thread = [HumanMessage("refund"), _commit_line(P_KEY), HumanMessage("now")]
     ev = session_evidence(values, thread)
@@ -157,12 +157,12 @@ def test_n3_a_code_line_written_under_another_verification_is_not_carried(values
 
 
 def test_n3_the_same_verification_and_public_lines_are_carried_and_unstamped_lines_are_not():
-    same = session_evidence(PRIYA, [HumanMessage("refund"), _commit_line(P_KEY), HumanMessage("now")])
+    same = session_evidence(NATASHA, [HumanMessage("refund"), _commit_line(P_KEY), HumanMessage("now")])
     assert "fixed_line@1" in same.ids and "INV-1001" in same.text
-    public = session_evidence(PRIYA, [HumanMessage("hi"), line_ids.code_line(line_ids.ROUTE, "t0", "Verify, please.",
+    public = session_evidence(NATASHA, [HumanMessage("hi"), line_ids.code_line(line_ids.ROUTE, "t0", "Verify, please.",
                                                                              None), HumanMessage("now")])
     assert "fixed_line@1" in public.ids
-    bare = session_evidence(PRIYA, [HumanMessage("hi"), AIMessage("old", id="route-t0"), HumanMessage("now")])
+    bare = session_evidence(NATASHA, [HumanMessage("hi"), AIMessage("old", id="route-t0"), HumanMessage("now")])
     assert not any(i.startswith("fixed_line") for i in bare.ids)
 
 
@@ -173,7 +173,7 @@ def test_n3_the_session_ticket_list_is_bound_to_the_verification():
     assert rec.response_metadata["bound_to"] == P_KEY
     assert session_tickets([rec], P_KEY) == ["ticket ending 1863"]
     assert session_tickets([rec], D_KEY) == [] and session_tickets([rec], None) == []
-    ev = session_evidence(DANA, [HumanMessage("a"), rec, HumanMessage("now")])
+    ev = session_evidence(TONY, [HumanMessage("a"), rec, HumanMessage("now")])
     assert "ticket ending 1863" not in ev.text
 
 
@@ -181,12 +181,12 @@ def test_n3_the_session_ticket_list_is_bound_to_the_verification():
 
 
 def test_n4_a_public_article_read_before_verifying_is_citable_after_verifying():
-    ev = session_evidence(PRIYA, [*_search("s-1", None), HumanMessage("now")])
+    ev = session_evidence(NATASHA, [*_search("s-1", None), HumanMessage("now")])
     assert "doc@1" in ev.citable and ev.chunks["doc@1"]["chunk_id"] == CHUNK["chunk_id"]
 
 
 def test_n4_a_tier_scoped_search_made_under_an_identity_stays_bound():
-    ev = session_evidence(DANA, [*_search("s-1", P_KEY), HumanMessage("now")])
+    ev = session_evidence(TONY, [*_search("s-1", P_KEY), HumanMessage("now")])
     assert not ev.chunks
     unverified = session_evidence({"verified": False}, [*_search("s-1", P_KEY), HumanMessage("now")])
     assert not unverified.chunks
@@ -287,10 +287,10 @@ def test_m8_session_tickets_use_the_one_binding_rule():
     control = TurnControl(session_id="s", turn_id="t0")  # identity None: opened while unverified (public stamp)
     public = ticket_record(control, {"ticket_id": "TCK-2", "display": "ticket ending 2002"}, "deadline")
     control.identity = P_KEY
-    priya = ticket_record(TurnControl(session_id="s", turn_id="t1", identity=P_KEY),
+    natasha = ticket_record(TurnControl(session_id="s", turn_id="t1", identity=P_KEY),
                           {"ticket_id": "TCK-1", "display": "ticket ending 1001"}, "deadline")
     unstamped = AIMessage("[System record] x", id="record-t2-ticket",
                           response_metadata={"qs_action": {"kind": "ticket", "display": "ticket ending 3003"}})
-    msgs: list[Any] = [public, priya, unstamped]
+    msgs: list[Any] = [public, natasha, unstamped]
     assert session_tickets(msgs, P_KEY) == ["ticket ending 2002", "ticket ending 1001"]
     assert session_tickets(msgs, D_KEY) == ["ticket ending 2002"]

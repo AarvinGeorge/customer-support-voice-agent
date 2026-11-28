@@ -65,7 +65,7 @@ def test_requests_match_the_browser_contract() -> None:
     w, _run, _g = run_one("G-01", g01_script())
     t0, t1, t2 = (r["body"] for r in w.requests)
     assert set(t0) == {"client_turn_id", "text"} and "0412" in t0["text"]
-    assert t1["verification"] == {"account_id": "QS-10423", "pin": PERSONAS["Priya Raman"]["pin"]} and "text" not in t1
+    assert t1["verification"] == {"account_id": "QS-10423", "pin": PERSONAS["Natasha Romanoff"]["pin"]} and "text" not in t1
     assert t2["confirm"] == {"pending_action_id": PA, "decision": "confirm"}  # no step_up_pin unless the card requires step-up
     assert len({r["body"]["client_turn_id"] for r in w.requests}) == 3
 
@@ -77,7 +77,7 @@ def test_step_up_card_gets_the_persona_pin_on_confirm() -> None:
               end_reason="readback")
     s.turns[1] = t1[0].events
     w, *_ = run_one("G-01", s)
-    assert w.requests[2]["body"]["confirm"]["step_up_pin"] == PERSONAS["Priya Raman"]["pin"]
+    assert w.requests[2]["body"]["confirm"]["step_up_pin"] == PERSONAS["Natasha Romanoff"]["pin"]
 
 
 def test_fault_header_is_sent_on_that_turn_only() -> None:
@@ -91,8 +91,8 @@ def test_typed_pin_is_substituted_into_the_request_but_never_into_the_grade() ->
     t0 = turn(0, "text", [VERIFY_REQ], end_reason="verification_requested")
     t1 = turn(1, "verification", [*step("get_account_summary")], end_reason="answered", text="You are on Pro.")
     w, _run, grade = run_one("G-02", Script([t0[0].events, t1[0].events]))
-    assert PERSONAS["Priya Raman"]["pin"] in w.requests[0]["body"]["text"]
-    assert all(PERSONAS["Priya Raman"]["pin"] not in c.detail for c in grade.checks)
+    assert PERSONAS["Natasha Romanoff"]["pin"] in w.requests[0]["body"]["text"]
+    assert all(PERSONAS["Natasha Romanoff"]["pin"] not in c.detail for c in grade.checks)
 
 
 def test_voice_turns_use_voice_ask_with_a_registered_voice_session() -> None:
@@ -119,7 +119,7 @@ def test_http_error_mid_case_stops_the_case_and_is_not_pass() -> None:
     w, client, store = world_and_client()
     w.next, w.fail_turn_with = g01_script(), 1
     client.access(ACCESS_CODE)
-    run = runner.run_case(case_by_id("G-01"), PERSONAS["Priya Raman"], client, store)
+    run = runner.run_case(case_by_id("G-01"), PERSONAS["Natasha Romanoff"], client, store)
     from evals import graders
     g = graders.grade_case(case_by_id("G-01"), run, POLICY)
     assert len(run.turns) == 2 and run.turns[1].status_code == 500 and "HTTP 500" in (run.error or "")
@@ -222,7 +222,7 @@ def test_a_case_with_fixtures_and_no_ingest_command_is_an_error_not_a_skip() -> 
 
 def test_grade_details_never_contain_a_persona_pin() -> None:
     _w, _run, grade = run_one("G-02", Script([turn(0, "text", [VERIFY_REQ], end_reason="verification_requested")[0].events]))
-    assert PERSONAS["Priya Raman"]["pin"] not in repr(grade)
+    assert PERSONAS["Natasha Romanoff"]["pin"] not in repr(grade)
 
 
 def test_hook_commands_that_cannot_start_or_time_out_are_hook_errors() -> None:

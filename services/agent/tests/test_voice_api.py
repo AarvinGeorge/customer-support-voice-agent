@@ -94,7 +94,7 @@ class World:
             """What: fake thread summary. Use when: voice/token. Inputs: sid, redact context. Output: summary.
             Side effects: records. Role: fake."""
             self.summaries.append(sid)
-            return SessionSummary(verified_name="Priya Raman")
+            return SessionSummary(verified_name="Natasha Romanoff")
 
         deps = VoiceDeps(store=self.vstore, minter=self.minter,
                          voice_spec=load_models_config(MODELS).roles["voice"], summary=summary,
@@ -170,7 +170,7 @@ async def test_token_mints_with_session_config_and_writes_voice_session_row() ->
     (session,) = w.minter.sessions
     assert session["model"] == "gpt-realtime-2.1" and session["audio"]["output"]["voice"] == "marin"
     assert [t["name"] for t in session["tools"]] == ["ask_support_agent"]
-    assert session["instructions"].startswith(REALTIME_PROMPT) and "verified: Priya Raman" in session["instructions"]
+    assert session["instructions"].startswith(REALTIME_PROMPT) and "verified: Natasha Romanoff" in session["instructions"]
     assert w.summaries == [SID]
 
 

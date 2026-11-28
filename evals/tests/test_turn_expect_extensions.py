@@ -73,14 +73,14 @@ def test_new_expect_keys_are_in_the_schema_and_a_bad_value_is_rejected() -> None
 def test_as_persona_sends_the_other_personas_credentials_and_unknown_names_error() -> None:
     case = copy.deepcopy(case_by_id("G-10"))
     case["turns"] = [{"kind": "verification", "credentials": "persona"},
-                     {"kind": "verification", "credentials": "persona", "as_persona": "Marcus Lee"}]
+                     {"kind": "verification", "credentials": "persona", "as_persona": "Peter Parker"}]
     w, client, store = world_and_client()
     w.next = Script([turn(0, "verification", [], end_reason="verified")[0].events, turn(1, "verification", [], end_reason="answered")[0].events])
     client.access(ACCESS_CODE)
     run = runner.run_case(case, PERSONAS[case["persona"]], client, store, personas=PERSONAS)
     first, second = (r["body"]["verification"] for r in w.requests)
-    assert first == {"account_id": "QS-10423", "pin": PERSONAS["Priya Raman"]["pin"]}
-    assert second == {"account_id": "QS-20318", "pin": PERSONAS["Marcus Lee"]["pin"]} and run.error is None
+    assert first == {"account_id": "QS-10423", "pin": PERSONAS["Natasha Romanoff"]["pin"]}
+    assert second == {"account_id": "QS-20318", "pin": PERSONAS["Peter Parker"]["pin"]} and run.error is None
     case["turns"][1]["as_persona"] = "Nobody"
     w2, client2, store2 = world_and_client()
     w2.next = Script([turn(0, "verification", [], end_reason="verified")[0].events])
@@ -89,7 +89,7 @@ def test_as_persona_sends_the_other_personas_credentials_and_unknown_names_error
     assert "Nobody" in (run2.error or "")
 
 
-@pytest.mark.parametrize("name", ["Priya Raman", "Marcus Lee"])
+@pytest.mark.parametrize("name", ["Natasha Romanoff", "Peter Parker"])
 def test_persona_fixture_is_the_seeded_one(name: str) -> None:
     assert PERSONAS[name]["account_id"].startswith("QS-") and PERSONA["pin"] == "7342"
 

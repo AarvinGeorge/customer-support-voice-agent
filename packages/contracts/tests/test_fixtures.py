@@ -144,7 +144,7 @@ def test_s4_unsure_covers_the_scenario():
 
 
 def test_s3_decline_covers_the_scenario():
-    """What: the S3 member file verifies Marcus (member, Business), then the refund prepare is
+    """What: the S3 member file verifies Peter (member, Business), then the refund prepare is
     declined ROLE_NOT_PERMITTED with its policy ref, reported as action.result declined with
     changed false, and the grounded answer cites the public roles article (L1 S3, doc 07 s6.2).
     Use when: CI. Inputs: none. Output: assertion. Side effects: reads a file.

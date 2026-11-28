@@ -59,7 +59,7 @@ class World:
                      "VALUES (%s,'Acme','pro','active',5,NULL)", (self.a,))
         conn.execute("INSERT INTO accounts (id, name, tier, contract_status, seats) "
                      "VALUES (%s,'Globex','business','past_due',50)", (self.b,))
-        for uid, acct, name, role in ((self.owner, self.a, "Priya", "owner"), (self.member, self.a, "Sam", "member"),
+        for uid, acct, name, role in ((self.owner, self.a, "Natasha", "owner"), (self.member, self.a, "Steve", "member"),
                                       (self.owner_b, self.b, "Gina", "billing_admin")):
             conn.execute("INSERT INTO users (id, account_id, display_name, role, pin_hmac) VALUES (%s,%s,%s,%s,%s)",
                          (uid, acct, name, role, pin_hmac(PEPPER, acct, self.pins[uid])))
@@ -178,7 +178,7 @@ def test_success_returns_claims_and_claims_endpoint_agrees(stack):
     assert r.status_code == 200, r.text
     body = r.json()
     assert (body["verified"], body["user_id"], body["display_name"], body["account_id"], body["account_name"]) == \
-        (True, s.w.owner, "Priya", s.w.a, "Acme")
+        (True, s.w.owner, "Natasha", s.w.a, "Acme")
     assert (body["role"], body["tier"], body["contract_status"], body["grace_until"]) == ("owner", "pro", "active", None)
     assert body["permissions"] == {"billing_read": True, "billing_actions": True, "own_notification_prefs": True}
     assert body["session_id"] == sid

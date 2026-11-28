@@ -84,9 +84,9 @@ function ar(fields: Partial<ActionResultEvent>): ActionResultEvent {
 describe("verificationNotice: one test per verification result (doc 07 s6.2, s6.3)", () => {
   it("verified names the person, role and plan", () => {
     const n = verificationNotice(
-      vr({ status: "verified", person: { display_name: "Priya Shah", role: "billing_admin", tier: "pro", contract_status: "active", account_id: "QS-10423" } }),
+      vr({ status: "verified", person: { display_name: "Natasha Romanoff", role: "billing_admin", tier: "pro", contract_status: "active", account_id: "QS-10423" } }),
     );
-    expect(n).toEqual({ status: "verified", tone: "success", text: "Verified as Priya Shah, billing admin, Pro plan" });
+    expect(n).toEqual({ status: "verified", tone: "success", text: "Verified as Natasha Romanoff, billing admin, Pro plan" });
   });
 
   it("failed gives the same words for any mismatch and the attempts left", () => {

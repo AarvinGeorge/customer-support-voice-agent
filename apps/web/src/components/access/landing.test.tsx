@@ -107,13 +107,13 @@ describe("Landing", () => {
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
     expect(await screen.findByRole("heading", { name: "Choose who you are" })).toBeTruthy();
-    const priya = screen.getByRole("listitem", { name: /Priya Shah/ });
-    expect(within(priya).getByText("QS-10423")).toBeTruthy();
-    expect(within(priya).getByText("4821")).toBeTruthy();
-    expect(within(priya).getByText("Billing admin")).toBeTruthy();
-    expect(within(priya).getByText(/Pro/)).toBeTruthy();
-    expect(within(priya).getByText("S1, S2, S5")).toBeTruthy();
-    expect(within(priya).getByText(MOCK_PERSONAS[0]!.description)).toBeTruthy();
+    const natasha = screen.getByRole("listitem", { name: /Natasha Romanoff/ });
+    expect(within(natasha).getByText("QS-10423")).toBeTruthy();
+    expect(within(natasha).getByText("4821")).toBeTruthy();
+    expect(within(natasha).getByText("Billing admin")).toBeTruthy();
+    expect(within(natasha).getByText(/Pro/)).toBeTruthy();
+    expect(within(natasha).getByText("S1, S2, S5")).toBeTruthy();
+    expect(within(natasha).getByText(MOCK_PERSONAS[0]!.description)).toBeTruthy();
     expect(screen.getAllByRole("listitem")).toHaveLength(MOCK_PERSONAS.length);
     expect(screen.getByText(/This demo records conversations/)).toBeTruthy();
     expect(calls.find((c) => c.path === "/api/access")?.body).toEqual({ code: MOCK_ACCESS_CODE });
@@ -213,9 +213,9 @@ describe("Landing", () => {
       expect(start.querySelector('[data-icon="new-tab"]')).not.toBeNull();
     }
     // The table stays a reference sheet: account ID, PIN, plan and Try this are all still there.
-    const dana = screen.getByRole("listitem", { name: /Dana Okafor/ });
-    expect(within(dana).getByText(MOCK_PERSONAS.find((p) => p.name === "Dana Okafor")!.account_id)).toBeTruthy();
-    await user.click(within(dana).getByRole("link", { name: "Start as Dana Okafor (opens in a new tab)" }));
+    const tony = screen.getByRole("listitem", { name: /Tony Stark/ });
+    expect(within(tony).getByText(MOCK_PERSONAS.find((p) => p.name === "Tony Stark")!.account_id)).toBeTruthy();
+    await user.click(within(tony).getByRole("link", { name: "Start as Tony Stark (opens in a new tab)" }));
     expect(push).not.toHaveBeenCalled();
     expect(calls.some((c) => c.path === "/api/sessions")).toBe(false);
   });
@@ -249,11 +249,11 @@ describe("Landing", () => {
     await user.click(screen.getByRole("button", { name: /continue/i }));
     await screen.findByRole("heading", { name: "Choose who you are" });
 
-    const marcus = screen.getByRole("listitem", { name: /Marcus Lee/ });
-    await user.click(within(marcus).getByRole("button", { name: /copy pin/i }));
+    const peter = screen.getByRole("listitem", { name: /Peter Parker/ });
+    await user.click(within(peter).getByRole("button", { name: /copy pin/i }));
 
     expect(await navigator.clipboard.readText()).toBe("1937");
-    expect(await within(marcus).findByText("Copied")).toBeTruthy();
+    expect(await within(peter).findByText("Copied")).toBeTruthy();
   });
 
   it("moves focus to the persona heading after the code is accepted, not on a cold load", async () => {

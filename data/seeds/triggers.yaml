@@ -3,17 +3,17 @@
 # charge null means the code applies before any charge is looked at (role, free tier, trial).
 # Role: "every refund reason code has a seeded trigger" (CS-E-09.S4.T1 Done-when).
 refund_triggers:
-  ROLE_NOT_PERMITTED:          {persona: Marcus Lee,     charge: CH-00000901}
-  FREE_NOTHING_CHARGED:        {persona: Sam Okafor,     charge: null}
-  TRIAL_NOTHING_TO_REFUND:     {persona: Tomas Reyes,    charge: null}
-  PAST_DUE:                    {persona: Helen Park,     charge: CH-00000503}
-  ALREADY_REFUNDED:            {persona: Omar Haddad,    charge: CH-00000801}
-  CHARGE_NOT_REFUNDABLE:       {persona: Nadia Ali,      charge: CH-00000704}
-  PRO_PAST_LATE_BAND:          {persona: Nadia Ali,      charge: CH-00000703}
-  OUTSIDE_WINDOW:              {persona: Dana Whitfield, charge: CH-00000902}
-  PRO_LATE_IN_BAND:            {persona: Nadia Ali,      charge: CH-00000701}
-  PRO_OVER_CAP:                {persona: Nadia Ali,      charge: CH-00000702}
-  PRO_SECOND_IN_REPEAT_WINDOW: {persona: Omar Haddad,    charge: CH-00000802}
-  BUSINESS_APPROVAL_REQUIRED:  {persona: Dana Whitfield, charge: CH-00000901}
-  ENTERPRISE_HUMAN_DECIDES:    {persona: Ivan Petrov,    charge: CH-00000601}
-  PRO_WITHIN_LIMITS:           {persona: Priya Raman,    charge: CH-00000412}
+  ROLE_NOT_PERMITTED:          {persona: Peter Parker,     charge: CH-00000901}
+  FREE_NOTHING_CHARGED:        {persona: Steve Rogers,     charge: null}
+  TRIAL_NOTHING_TO_REFUND:     {persona: Reed Richards,    charge: null}
+  PAST_DUE:                    {persona: Sue Storm,        charge: CH-00000503}
+  ALREADY_REFUNDED:            {persona: Carol Danvers,    charge: CH-00000801}
+  CHARGE_NOT_REFUNDABLE:       {persona: Wanda Maximoff,   charge: CH-00000704}
+  PRO_PAST_LATE_BAND:          {persona: Wanda Maximoff,   charge: CH-00000703}
+  OUTSIDE_WINDOW:              {persona: Tony Stark,       charge: CH-00000902}
+  PRO_LATE_IN_BAND:            {persona: Wanda Maximoff,   charge: CH-00000701}
+  PRO_OVER_CAP:                {persona: Wanda Maximoff,   charge: CH-00000702}
+  PRO_SECOND_IN_REPEAT_WINDOW: {persona: Carol Danvers,    charge: CH-00000802}
+  BUSINESS_APPROVAL_REQUIRED:  {persona: Tony Stark,       charge: CH-00000901}
+  ENTERPRISE_HUMAN_DECIDES:    {persona: Stephen Strange,  charge: CH-00000601}
+  PRO_WITHIN_LIMITS:           {persona: Natasha Romanoff, charge: CH-00000412}

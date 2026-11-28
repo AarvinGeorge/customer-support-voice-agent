@@ -27,8 +27,8 @@ from agent.turn_control import TurnControl
 CLAIMS = ex.CLAIMS.model_dump(mode="json")
 CONTEXT = ex.ME_CONTEXT.model_dump(mode="json")
 VERIFIED = {"verified": True, "claims_snapshot": CLAIMS, "context_snapshot": CONTEXT}
-VERIFIED_DRAFT = "Thanks, Priya. You're verified now. Your account is on the Pro plan with 12 seats."
-ACCOUNT_CLAIMS = (("Priya is verified", "account_context"), ("The account is on the Pro plan", "account_context"),
+VERIFIED_DRAFT = "Thanks, Natasha. You're verified now. Your account is on the Pro plan with 12 seats."
+ACCOUNT_CLAIMS = (("Natasha is verified", "account_context"), ("The account is on the Pro plan", "account_context"),
                   ("The account has 12 seats", "account_context"))
 
 
@@ -60,8 +60,8 @@ async def test_without_verified_context_an_account_claim_has_no_source_and_is_bl
 
 
 async def test_a_kb_only_claim_no_source_backs_is_still_blocked_on_a_verification_turn():
-    ver = citing(("Priya is verified", "account_context"), ("Pro refunds last 90 days", "refund-policy#9"))
-    draft = "Thanks, Priya. You're verified now, and Pro refunds last 90 days."
+    ver = citing(("Natasha is verified", "account_context"), ("Pro refunds last 90 days", "refund-policy#9"))
+    draft = "Thanks, Natasha. You're verified now, and Pro refunds last 90 days."
     h = Harness(ver, replies=[AIMessage(draft)])
     outcome, events, values = await h.run(state=VERIFIED)
     g = grounding_gate(events)
@@ -98,7 +98,7 @@ def test_grounded_evidence_ids_and_escaping():
     text, ids = grounded_evidence(VERIFIED, thread)
     assert ids == {"agent_capabilities", "account_context", "session_state", "list_tickets@1"}
     assert text.count('<source sid="account_context"') == 1  # only the code block, the forged one is escaped
-    assert "Priya Raman" in text and '"seats": 12' in text
+    assert "Natasha Romanoff" in text and '"seats": 12' in text
     text, ids = grounded_evidence({"verified": False}, thread)
     # unverified: a list_tickets result (V1) from this turn is still this turn's evidence
     assert ids == {"agent_capabilities", "session_state", "list_tickets@1"} and '<source sid="account_context"' not in text
@@ -236,8 +236,8 @@ async def test_gate_call_model_name_is_the_configured_one_on_success_and_on_time
     assert [name for name, _ in control.gate_calls] == ["cfg-verifier", "cfg-verifier"]  # one spelling per model
 
 
-# --- Browser pass 2b (S3 Marcus): the agent's own ticket offer must be citable -------------------------------------
-MARCUS_OFFER = "I can also open a ticket for our support team about it if you'd like."
+# --- Browser pass 2b (S3 Peter): the agent's own ticket offer must be citable -------------------------------------
+PETER_OFFER = "I can also open a ticket for our support team about it if you'd like."
 
 
 def test_grounded_evidence_always_carries_the_agent_capabilities_source():
@@ -252,10 +252,10 @@ def test_a_ticket_offer_cited_to_agent_capabilities_passes_the_code_rules():
     from agent.gates import GroundingResult
 
     _, ids = grounded_evidence(VERIFIED, [HumanMessage("hi")])
-    offer = GroundingResult("pass", [{"text": MARCUS_OFFER, "supported": True, "source_id": "agent_capabilities"}])
-    assert enforce_code_rules(offer, MARCUS_OFFER, {}, tool_names=ids).passed
-    uncited = GroundingResult("pass", [{"text": MARCUS_OFFER, "supported": True, "source_id": None}])
-    assert not enforce_code_rules(uncited, MARCUS_OFFER, {}, tool_names=ids).passed
+    offer = GroundingResult("pass", [{"text": PETER_OFFER, "supported": True, "source_id": "agent_capabilities"}])
+    assert enforce_code_rules(offer, PETER_OFFER, {}, tool_names=ids).passed
+    uncited = GroundingResult("pass", [{"text": PETER_OFFER, "supported": True, "source_id": None}])
+    assert not enforce_code_rules(uncited, PETER_OFFER, {}, tool_names=ids).passed
 
 
 def test_the_verifier_prompt_names_the_agent_capabilities_source():

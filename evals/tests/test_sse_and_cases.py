@@ -45,7 +45,7 @@ def test_load_retrieval_and_personas() -> None:
     q = cases.load_retrieval()
     assert len(q) == 25 and {x["label"] for x in q} == {"answerable", "not_in_docs", "off_topic"}
     p = cases.load_personas()
-    assert p["Priya Raman"]["account_id"] == "QS-10423" and len(p["Priya Raman"]["pin"]) == 4
+    assert p["Natasha Romanoff"]["account_id"] == "QS-10423" and len(p["Natasha Romanoff"]["pin"]) == 4
 
 
 def test_every_case_persona_exists_in_the_persona_file() -> None:

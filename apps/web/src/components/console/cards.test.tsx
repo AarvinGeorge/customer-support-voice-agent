@@ -163,7 +163,7 @@ describe("verification card", () => {
     expect(Object.keys(body).sort()).toEqual(["client_turn_id", "verification"]);
     expect(body.verification).toEqual({ account_id: "QS-10423", pin: PIN });
     expect(store.getState().thread.filter((t) => t.kind === "user")).toHaveLength(0);
-    expect(screen.getByText("Verified as Priya Raman, owner, Pro plan")).toBeTruthy();
+    expect(screen.getByText("Verified as Natasha Romanoff, owner, Pro plan")).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Verify your account" })).toBeNull();
     expect(domText()).not.toContain(PIN);
     expect(JSON.stringify(store.getState())).not.toContain(PIN);
@@ -262,8 +262,8 @@ describe("verification card", () => {
   const results: [VerificationResultEvent["status"], Partial<VerificationResultEvent>, string][] = [
     [
       "verified",
-      { person: { display_name: "Priya Shah", role: "billing_admin", tier: "pro", contract_status: "active", account_id: "QS-10423" } },
-      "Verified as Priya Shah, billing admin, Pro plan",
+      { person: { display_name: "Natasha Romanoff", role: "billing_admin", tier: "pro", contract_status: "active", account_id: "QS-10423" } },
+      "Verified as Natasha Romanoff, billing admin, Pro plan",
     ],
     ["failed", { attempts_left: 2 }, "That account ID and PIN didn't match. 2 attempts left."],
     ["locked", {}, "For your security, verification is locked for this conversation. See How to reach support in our help center for what to do next."],
