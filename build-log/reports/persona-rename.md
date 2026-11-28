@@ -20,7 +20,7 @@ User ids, account ids, account names, PINs, roles, tiers and scenarios are untou
 ## Inventory
 - Before (origin/main c6a95b7): 193 matching lines in 46 files; zero in services/*/src (checked first; no hard-coded name).
   Per surname: Raman 50, Okafor 17, Whitfield 14, Haddad 6, Reyes 4, Petrov 4, plus first-name-only mentions.
-- After: zero display names or first-name mentions. 31 lines remain by design, all email local parts:
+- After: zero display names or first-name mentions. 33 lines remain by design, all email local parts:
   `priya@acme.com` and `priya@acme-analytics.example` in redaction tests (mask output `p***@` is asserted in many tests and
   generated fixtures), and `tomas@`, `helen@`, `nadia@`, `omar@` billing emails in data/seeds/accounts.yaml (account data, not display names).
   Deliberate exception: data identifiers, not persona names.
