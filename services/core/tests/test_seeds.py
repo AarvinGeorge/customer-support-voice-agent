@@ -1,7 +1,7 @@
 """What: unit tests (no database) for the seed data files and the seed planner: shape, personas, PIN hashing,
 relative dates under a frozen clock, and refund reason-code triggers.
 Use when: changing data/seeds/*.yaml or core/seeds. Inputs: the YAML files under data/seeds. Output: pytest results.
-Side effects: none. Role: CS-E-09.S4.T1 Done-when (frozen-clock reseed keeps Priya's duplicate 5 days old; every
+Side effects: none. Role: CS-E-09.S4.T1 Done-when (frozen-clock reseed keeps Natasha's duplicate 5 days old; every
 refund reason code has a seeded trigger) plus the invariants the later engines and the landing page rely on."""
 from __future__ import annotations
 
@@ -80,14 +80,14 @@ def test_personas_validate_against_the_contract_and_match_the_users(data):
 
 
 def test_scenario_coverage(data):
-    """What: Priya covers S1, S2, S5; Marcus and Dana cover S3 on one account; some persona covers S4; a past_due
+    """What: Natasha covers S1, S2, S5; Peter and Tony cover S3 on one account; some persona covers S4; a past_due
     and a trialing persona exist and are tagged "rules". Use when: always. Inputs: data. Output: assertions.
     Side effects: none. Role: L1 s4 (one persona per scenario plus rule personas)."""
     by_name = {p["name"]: p for p in data.personas_raw}
-    assert by_name["Priya Raman"]["scenarios"] == ["S1", "S2", "S5"]
-    assert "S3" in by_name["Marcus Lee"]["scenarios"] and "S3" in by_name["Dana Whitfield"]["scenarios"]
-    assert by_name["Marcus Lee"]["account_id"] == by_name["Dana Whitfield"]["account_id"]
-    assert (by_name["Marcus Lee"]["role"], by_name["Dana Whitfield"]["role"]) == ("member", "owner")
+    assert by_name["Natasha Romanoff"]["scenarios"] == ["S1", "S2", "S5"]
+    assert "S3" in by_name["Peter Parker"]["scenarios"] and "S3" in by_name["Tony Stark"]["scenarios"]
+    assert by_name["Peter Parker"]["account_id"] == by_name["Tony Stark"]["account_id"]
+    assert (by_name["Peter Parker"]["role"], by_name["Tony Stark"]["role"]) == ("member", "owner")
     assert any("S4" in p["scenarios"] for p in data.personas_raw)
     for status in ("past_due", "trialing"):
         assert any(p["contract_status"] == status and "rules" in p["scenarios"] for p in data.personas_raw)
@@ -131,11 +131,11 @@ def test_planned_users_carry_the_hmac_not_the_pin(data):
 
 
 @pytest.mark.parametrize("day", DAYS)
-def test_priyas_duplicate_charge_is_five_days_old_whatever_the_day(data, day):
+def test_natashas_duplicate_charge_is_five_days_old_whatever_the_day(data, day):
     """What: planning on four different days (one just after the autumn DST change) always yields the duplicate
     $96 charge on the local date exactly 5 days earlier, same amount as its twin. Use when: always.
     Inputs: data, a day. Output: assertions. Side effects: none.
-    Role: Done-when 'reseeding on two different days keeps Priya's duplicate charge 5 days old'."""
+    Role: Done-when 'reseeding on two different days keeps Natasha's duplicate charge 5 days old'."""
     rows = rows_on(data, day)
     dup = next(c for c in rows.charges if c["id"] == "CH-00000412")
     twin = next(c for c in rows.charges if c["id"] == "CH-00000411")

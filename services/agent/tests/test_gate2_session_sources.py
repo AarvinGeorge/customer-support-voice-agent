@@ -33,9 +33,9 @@ from agent.untrusted import wrap_result, wrap_search
 
 CHUNK = search_body("pass")["chunks"][0]
 CLAIM = ("Pro refunds are allowed within 30 days", "doc@1")  # chunks are cited by sid (N1); the chunk id is in the provenance
-PRIYA = {"verified": True, "claims_snapshot": {"user_id": "U-1", "account_id": "QS-10423", "role": "owner",
+NATASHA = {"verified": True, "claims_snapshot": {"user_id": "U-1", "account_id": "QS-10423", "role": "owner",
                                                 "tier": "pro"}}
-DANA = {"verified": True, "claims_snapshot": {"user_id": "U-9", "account_id": "QS-20318", "role": "owner",
+TONY = {"verified": True, "claims_snapshot": {"user_id": "U-9", "account_id": "QS-20318", "role": "owner",
                                                "tier": "business"}}
 
 
@@ -93,7 +93,7 @@ async def test_s1_follow_up_naming_the_article_retrieved_one_turn_earlier_passes
     assert g.chunk_ids == ["refund-policy#2"]  # M6: the session chunk in the evidence, not this turn's (none)
 
 
-async def test_marcus_retry_restating_the_earlier_tool_result_passes_with_its_provenance_on_the_step():
+async def test_peter_retry_restating_the_earlier_tool_result_passes_with_its_provenance_on_the_step():
     ver = citing(("You have no open tickets", "list_tickets@1"))
     h = Harness(ver, replies=[_call("list_tickets", "lt1"), AIMessage("You have no open tickets.")])
     _, events1, _ = await h.run(turn_id="t-1")
@@ -121,11 +121,11 @@ async def test_a_claim_with_no_source_anywhere_in_the_session_is_still_blocked()
 
 
 def test_every_tool_block_has_one_unique_sid_and_the_newest_of_each_tool_is_current():
-    priya = "U-1|QS-10423"
-    thread = (_turn(_call("list_tickets", "a"), _tool_msg("list_tickets", "a", {"tickets": []}, priya))
-              + _turn(_call("list_tickets", "b"), _tool_msg("list_tickets", "b", {"tickets": [{"id": "T"}]}, priya))
+    natasha = "U-1|QS-10423"
+    thread = (_turn(_call("list_tickets", "a"), _tool_msg("list_tickets", "a", {"tickets": []}, natasha))
+              + _turn(_call("list_tickets", "b"), _tool_msg("list_tickets", "b", {"tickets": [{"id": "T"}]}, natasha))
               + [HumanMessage("now")])
-    ev = session_evidence(PRIYA, thread)
+    ev = session_evidence(NATASHA, thread)
     assert ev.text.count('sid="list_tickets@1"') == 1 and ev.text.count('sid="list_tickets@2"') == 1
     assert 'sid="list_tickets@1" kind="tool_result" tool="list_tickets" turns_ago="2" current="false"' in ev.text
     assert 'sid="list_tickets@2" kind="tool_result" tool="list_tickets" turns_ago="1" current="true"' in ev.text
@@ -212,17 +212,17 @@ def _charges_turn(bound_to: str | None) -> list[Any]:
 
 
 def test_account_results_are_kept_only_under_the_same_verification():
-    priya = "U-1|QS-10423"
-    same = session_evidence(PRIYA, _charges_turn(priya) + [HumanMessage("now")])
+    natasha = "U-1|QS-10423"
+    same = session_evidence(NATASHA, _charges_turn(natasha) + [HumanMessage("now")])
     assert "list_charges@1" in same.ids and "$96.00" in same.text
-    lapsed = session_evidence({"verified": False}, _charges_turn(priya) + [HumanMessage("now")])
+    lapsed = session_evidence({"verified": False}, _charges_turn(natasha) + [HumanMessage("now")])
     assert "list_charges@1" not in lapsed.ids and "$96.00" not in lapsed.text
-    other = session_evidence(DANA, _charges_turn(priya) + [HumanMessage("now")])
+    other = session_evidence(TONY, _charges_turn(natasha) + [HumanMessage("now")])
     assert "list_charges@1" not in other.ids and "$96.00" not in other.text
     unstamped = [HumanMessage("q"), _call("list_charges", "c-1"),
                  ToolMessage(wrap_result("list_charges", {"display": "$96.00"}), tool_call_id="c-1",
                              name="list_charges"), AIMessage("a"), HumanMessage("now")]
-    assert "$96.00" not in session_evidence(PRIYA, unstamped).text  # no stamp: never carried over
+    assert "$96.00" not in session_evidence(NATASHA, unstamped).text  # no stamp: never carried over
 
 
 def test_after_a_lapse_only_unverified_public_results_carry_over():
@@ -236,10 +236,10 @@ def test_after_a_lapse_only_unverified_public_results_carry_over():
 async def test_a_reverification_as_another_account_drops_the_first_accounts_results_through_the_agent():
     ver = citing(("You have no open tickets", "list_tickets@1"))
     h = Harness(ver, replies=[_call("list_tickets", "lt1"), AIMessage("You have no open tickets.")])
-    _, events1, _ = await h.run(state=PRIYA, turn_id="t-1")
+    _, events1, _ = await h.run(state=NATASHA, turn_id="t-1")
     assert grounding_gate(events1).verdict == "pass"
     h.script(AIMessage("As I said, you have 0 open tickets."))
-    _, events2, _ = await h.run(state=DANA, turn_id="t-2")  # verified again, as Dana on another account
+    _, events2, _ = await h.run(state=TONY, turn_id="t-2")  # verified again, as Tony on another account
     assert grounding_gate(events2).verdict == "fail"
 
 

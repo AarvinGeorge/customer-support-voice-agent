@@ -87,7 +87,7 @@ describe("console shell with the S1 fixture", () => {
     render(<ConsoleShell sessionId="s" store={store} />);
     expect(screen.getByText("Not verified")).toBeTruthy();
     act(() => s1.forEach((e) => store.getState().apply(e)));
-    expect(screen.getByText("Verified as Priya Raman")).toBeTruthy();
+    expect(screen.getByText("Verified as Natasha Romanoff")).toBeTruthy();
     expect(screen.getByText("Owner · Pro")).toBeTruthy();
   });
 

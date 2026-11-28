@@ -43,7 +43,7 @@ class RedactContext:
 
 
 def mask_email(email: str) -> str:
-    """What: mask an email address to first letter plus domain ("p***@acme.com").
+    """What: mask an email address to first letter plus domain ("n***@acme.com").
     Use when: an email goes to events, logs, audit or LangSmith. Inputs: email.
     Output: masked string. Side effects: none. Role: doc 07 s11 email rule."""
     return _EMAIL_RE.sub(lambda m: f"{m.group(1)}***@{m.group(2)}", email)

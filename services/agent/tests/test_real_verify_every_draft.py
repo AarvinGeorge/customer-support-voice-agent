@@ -20,7 +20,7 @@ import time
 import pytest
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
-from test_real_gate2_eval import (POLICY, ROOT, SUBSET, VERIFIED, _doc_text, _marcus, _priya_after_refund, _Recorder,
+from test_real_gate2_eval import (POLICY, ROOT, SUBSET, VERIFIED, _doc_text, _peter, _natasha_after_refund, _Recorder,
                                   _turn)
 
 from agent.gates import GroundingVerifier, enforce_code_rules, reply_truncated, session_evidence
@@ -31,12 +31,12 @@ from agent.turn_control import TurnControl
 
 # (label, draft, state values, should pass). The first four skipped verification before D-064 (round 0 report).
 DRAFTS = [
-    ("S1 Priya thanks after the refund", "You're welcome, Priya. Glad I could sort that out for you.",
-     _priya_after_refund, True),
+    ("S1 Natasha thanks after the refund", "You're welcome, Natasha. Glad I could sort that out for you.",
+     _natasha_after_refund, True),
     ("S2 follow-up answered from memory", "It goes back to the same card, and it usually shows up on your "
-     "statement soon after.", _priya_after_refund, False),
-    ("S3 Marcus follow-up, who can do it", "Someone who runs the workspace on your side can take care of that "
-     "for you.", _marcus, False),
+     "statement soon after.", _natasha_after_refund, False),
+    ("S3 Peter follow-up, who can do it", "Someone who runs the workspace on your side can take care of that "
+     "for you.", _peter, False),
     ("S2 closing offer", "Happy to help. Is there anything else you need today?", lambda: VERIFIED, True),
     ("S1 which charge", "Which of the two $96.00 charges do you mean, the one on 18 Nov or the one on 21 Nov?",
      lambda: VERIFIED, True),
@@ -102,7 +102,7 @@ async def test_real_verifier_on_zero_claim_tool_turns_and_the_subset():
 
 # Review PR #72 I3: short voice-style drafts in voice mode (3 s verifier timeout, D-061).
 VOICE = ["You're welcome!", "Sure, one moment.", "Got it.", "Happy to help.", "Okay, let me check that.",
-         "Could you say the last four digits of the charge again?", "Thanks, Priya.", "Is there anything else?",
+         "Could you say the last four digits of the charge again?", "Thanks, Natasha.", "Is there anything else?",
          "Bye for now.", "Of course."]
 
 

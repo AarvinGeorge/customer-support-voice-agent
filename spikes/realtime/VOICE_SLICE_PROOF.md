@@ -9,7 +9,7 @@ Verdict: **PASS**. No code change was needed.
 - `docker compose up -d --build`, then `docker compose run --rm seed_core` (prints `seeded`) and one `docker compose run --rm ingest_knowledge` (`articles=10 chunks=81 embedded=81 embedding_calls=1`). `/api/readyz` answered `ready` with redis, postgres, core and knowledge `ok`.
 - Spoken question: OpenAI TTS (`gpt-4o-mini-tts`, voice alloy) of "Did my refund go through, and when will I see it?" (3.8 s), padded with 6 s of silence before and 120 s after so Chrome's looping fake capture asks once.
 - Chrome (system channel) driven by Playwright 1.49.1 with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream --use-file-for-fake-audio-capture=<wav>`. An init script wraps `RTCPeerConnection.prototype.createDataChannel` to record every data channel event in and out (no app code touched).
-- Persona: Priya Raman (QS-10423), not verified.
+- Persona: Natasha Romanoff (QS-10423), not verified.
 
 ## What happened (run 2; times are seconds since page load)
 

@@ -409,14 +409,14 @@ async def test_ticket_offer_reaches_the_structured_handler_with_no_model_call() 
 
 
 async def test_verification_card_through_the_route_verifies_and_never_streams_the_pin() -> None:
-    w = World(AIMessage(content="Thanks Priya, I can see your account."))
+    w = World(AIMessage(content="Thanks Natasha, I can see your account."))
     async with w.client() as c:
         r = await c.post(f"/api/sessions/{SID}/turns", json={"client_turn_id": str(uuid.uuid4()),
                                                              "verification": {"account_id": "qs 10423",
                                                                               "pin": ex.STUB_PIN}})
     evs = events_of(r)
     (res,) = [e for e in evs if e.type == "verification.result"]
-    assert res.status == "verified" and res.person.display_name == "Priya Raman"
+    assert res.status == "verified" and res.person.display_name == "Natasha Romanoff"
     assert ex.STUB_PIN not in r.text and w.core_calls("/identity/verify")[0].token == "core-agent-tok"
     assert w.flags.calls == [(SID, False, ex.CLAIMS.user_id)]
 
@@ -459,8 +459,8 @@ class CitingRegistry(FakeRegistry):
 async def test_s1_verification_turn_keeps_the_greeting_with_account_facts_then_reads_back() -> None:
     # s5-fault-scripts-report concern: the verified context must be Gate 2 evidence, or every S1 to S5
     # verification turn shows the clarify line.
-    draft = "Thanks, Priya. You're verified now. Your account is on the Pro plan with 12 seats."
-    claims = [("Priya is verified", "account_context"), ("The account is on the Pro plan", "account_context"),
+    draft = "Thanks, Natasha. You're verified now. Your account is on the Pro plan with 12 seats."
+    claims = [("Natasha is verified", "account_context"), ("The account is on the Pro plan", "account_context"),
               ("The account has 12 seats", "account_context")]
     w = World(registry=CitingRegistry(claims, AIMessage(content=draft),
                                       AIMessage(content="", tool_calls=[PREPARE_CALL])))

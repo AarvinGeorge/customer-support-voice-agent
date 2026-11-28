@@ -27,13 +27,13 @@ def test_pin_is_in_the_fixture_and_absent_from_the_stored_audit_row(app_conn):
     and no full email. Use when: always. Inputs: app_conn. Output: assertions. Side effects: rolled back.
     Role: the Done-when against the real table, not a fake."""
     session = uuid.UUID("00000000-0000-4821-8000-000000000000")  # a UUID group that is exactly the PIN digits
-    args = {"account_id": "QS-10423", "pin": PIN, "nested": {"step_up_pin": PIN, "email": "priya@acme.com"}}
+    args = {"account_id": "QS-10423", "pin": PIN, "nested": {"step_up_pin": PIN, "email": "natasha@acme.com"}}
     assert PIN in str(args)  # the secret is really in the fixture
     audit_id = write_audit(app_conn, AuditEvent(event="verify", actor="agent", session_id=session,
                                                 mode="chat", args=args), clock=CLOCK)
     row_text = app_conn.execute("SELECT t::text FROM audit_events t WHERE id = %s", (audit_id,)).fetchone()[0]
-    assert "[PIN]" in row_text and "p***@acme.com" in row_text  # the row exists and was redacted
-    assert not leaks(row_text, PIN) and "priya@acme.com" not in row_text
+    assert "[PIN]" in row_text and "n***@acme.com" in row_text  # the row exists and was redacted
+    assert not leaks(row_text, PIN) and "natasha@acme.com" not in row_text
 
 
 def test_free_text_pin_in_audit_args_is_absent_from_the_stored_row(app_conn):

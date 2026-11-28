@@ -4,7 +4,7 @@
 #   ("invoice ending 0412"). refunded_days_ago is set only on status refunded and must match history.yaml.
 # Role: each rule trigger in triggers.yaml points at one charge here. Source: L1 s4, s5 A1; doc 07 s3.2 ChargeView.
 charges:
-  # Priya, Pro monthly 12 seats x $8 = $96. S1 refunds the duplicate (0412); its twin is 0411.
+  # Natasha, Pro monthly 12 seats x $8 = $96. S1 refunds the duplicate (0412); its twin is 0411.
   - {id: CH-00000355, account_id: QS-10423, days_ago: 65, time: "09:00", amount_cents: 9600, status: paid, invoice: true, description: "Pro plan, 12 seats, monthly"}
   - {id: CH-00000388, account_id: QS-10423, days_ago: 35, time: "09:00", amount_cents: 9600, status: paid, invoice: true, description: "Pro plan, 12 seats, monthly"}
   - {id: CH-00000411, account_id: QS-10423, days_ago: 5,  time: "09:00", amount_cents: 9600, status: paid, invoice: true, description: "Pro plan, 12 seats, monthly"}

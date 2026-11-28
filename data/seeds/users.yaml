@@ -1,12 +1,12 @@
 # What: seeded people (one row per persona; the PIN lives only in personas.yaml, core stores its HMAC).
 # Use when: core/seeds/seed.py. Source: L1 s3 requester profile. Role: who can be verified.
 users:
-  - {id: U-2041, account_id: QS-10423, display_name: Priya Raman,     role: billing_admin}
-  - {id: U-3102, account_id: QS-20318, display_name: Marcus Lee,      role: member}
-  - {id: U-3103, account_id: QS-20318, display_name: Dana Whitfield,  role: owner}
-  - {id: U-4410, account_id: QS-30571, display_name: Sam Okafor,      role: owner}
-  - {id: U-5521, account_id: QS-40712, display_name: Tomas Reyes,     role: owner}
-  - {id: U-6633, account_id: QS-50234, display_name: Helen Park,      role: billing_admin}
-  - {id: U-7744, account_id: QS-60845, display_name: Ivan Petrov,     role: owner}
-  - {id: U-8855, account_id: QS-70156, display_name: Nadia Ali,       role: owner}
-  - {id: U-9966, account_id: QS-80267, display_name: Omar Haddad,     role: owner}
+  - {id: U-2041, account_id: QS-10423, display_name: Natasha Romanoff, role: billing_admin}
+  - {id: U-3102, account_id: QS-20318, display_name: Peter Parker,     role: member}
+  - {id: U-3103, account_id: QS-20318, display_name: Tony Stark,       role: owner}
+  - {id: U-4410, account_id: QS-30571, display_name: Steve Rogers,     role: owner}
+  - {id: U-5521, account_id: QS-40712, display_name: Reed Richards,    role: owner}
+  - {id: U-6633, account_id: QS-50234, display_name: Sue Storm,        role: billing_admin}
+  - {id: U-7744, account_id: QS-60845, display_name: Stephen Strange,  role: owner}
+  - {id: U-8855, account_id: QS-70156, display_name: Wanda Maximoff,   role: owner}
+  - {id: U-9966, account_id: QS-80267, display_name: Carol Danvers,    role: owner}

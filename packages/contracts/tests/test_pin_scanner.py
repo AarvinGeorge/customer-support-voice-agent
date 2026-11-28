@@ -89,11 +89,11 @@ def test_credential_looking_flag(text: str, ctx: RedactContext, credential: bool
 
 
 def test_scan_text_and_redact_apply_the_scanner_and_email_mask() -> None:
-    raw = {"note": "QS-10423 4821, mail priya@acme.com", "items": ["my PIN is 4821"]}
-    assert "4821" in repr(raw) and "priya@acme.com" in repr(raw)
+    raw = {"note": "QS-10423 4821, mail natasha@acme.com", "items": ["my PIN is 4821"]}
+    assert "4821" in repr(raw) and "natasha@acme.com" in repr(raw)
     out = redact(raw, UNVERIFIED)
-    assert "4821" not in repr(out) and "priya@acme.com" not in repr(out)
-    assert out["note"] == f"QS-10423 {PIN_TOKEN}, mail p***@acme.com"
+    assert "4821" not in repr(out) and "natasha@acme.com" not in repr(out)
+    assert out["note"] == f"QS-10423 {PIN_TOKEN}, mail n***@acme.com"
     assert scan_text("invoice ending 0412", VERIFIED) == "invoice ending 0412"
 
 
@@ -109,12 +109,12 @@ class Opaque:
 
 def test_hide_for_langsmith_redacts_any_payload_shape() -> None:
     payload = {"messages": [[{"type": "human", "content": "QS-10423 4821"}]], "pin": "7302",
-               "obj": Opaque(), "email": "priya@acme.com"}
+               "obj": Opaque(), "email": "natasha@acme.com"}
     assert "4821" in repr(payload) and "7302" in repr(payload)
     out = hide_for_langsmith(payload)
     text = repr(out)
     assert isinstance(out, dict)
-    assert "4821" not in text and "7302" not in text and "priya@acme.com" not in text
+    assert "4821" not in text and "7302" not in text and "natasha@acme.com" not in text
     assert "QS-10423" in text  # the account id is kept
 
 

@@ -137,7 +137,7 @@ def of(events: list[Any], type_: str) -> list[Any]:
 
 
 async def readback_world(extra_replies: list[AIMessage] | None = None) -> tuple[World, list[Any], Any]:
-    """What: a world after the S1 prepare turn (Priya asks for the duplicate refund; the model calls prepare_refund;
+    """What: a world after the S1 prepare turn (Natasha asks for the duplicate refund; the model calls prepare_refund;
     the read-back ends the turn). Use when: confirm tests. Inputs: replies after the prepare turn.
     Output: (world, prepare-turn events, prepare-turn outcome). Side effects: as turns. Role: helper."""
     w = World([AIMessage(content="", tool_calls=[PREPARE_CALL]), *(extra_replies or [])])
@@ -330,10 +330,10 @@ async def test_voice_text_yes_without_a_final_transcript_never_commits_and_repea
 # --- verification card ---------------------------------------------------------------------------------------
 
 async def test_card_success_verifies_loads_context_and_continues_with_a_value_free_thread_line() -> None:
-    w = World([AIMessage("Thanks Priya, I can see the two charges.")], verified=False)
+    w = World([AIMessage("Thanks Natasha, I can see the two charges.")], verified=False)
     outcome, events = await w.send(verification={"account_id": "qs 10423", "pin": ex.STUB_PIN})
     (res,) = of(events, "verification.result")
-    assert res.status == "verified" and res.person.display_name == "Priya Raman"
+    assert res.status == "verified" and res.person.display_name == "Natasha Romanoff"
     assert outcome.end_reason == "answered"
     human = [m for m in Fake.seen[-1] if isinstance(m, HumanMessage)][-1]
     assert VERIFIED_THREAD_LINE in human.content and "verification: just_verified" in human.content

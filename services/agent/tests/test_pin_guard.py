@@ -159,10 +159,10 @@ async def test_voice_question_and_transcript_are_redacted_before_the_model_and_s
 
 def test_log_formatter_redacts_pins_and_emails() -> None:
     from agent.logs import RedactingFormatter
-    rec = logging.LogRecord("agent.x", logging.INFO, __file__, 1, "text=%s mail=%s", (RAW, "priya@acme.com"), None)
+    rec = logging.LogRecord("agent.x", logging.INFO, __file__, 1, "text=%s mail=%s", (RAW, "natasha@acme.com"), None)
     assert PIN in rec.getMessage()  # the secret is in the record
     out = RedactingFormatter("%(name)s %(message)s").format(rec)
-    assert out == "agent.x text=QS-10423 [PIN] mail=p***@acme.com"
+    assert out == "agent.x text=QS-10423 [PIN] mail=n***@acme.com"
 
 
 def test_install_log_redaction_covers_the_root_handlers() -> None:

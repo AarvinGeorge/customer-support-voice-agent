@@ -41,7 +41,7 @@ docker compose ps                 # wait until the long-running services show "h
 # 4. Load the help articles into the knowledge service (needs a real OPENAI_API_KEY for embeddings).
 docker compose run --rm ingest_knowledge     # TODO CS-E-02.S1: ingest job is in review, not on main yet
 
-# 5. Reseed the demo accounts (personas such as Priya, Marcus and Dana). Needs DEMO_RESEED=true.
+# 5. Reseed the demo accounts (personas such as Natasha, Peter and Tony). Needs DEMO_RESEED=true.
 # TODO CS-E-09.S4.T1: reseed CLI is not built yet; command to be written here when it lands.
 
 # 6. Open the app.

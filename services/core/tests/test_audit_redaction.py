@@ -17,7 +17,7 @@ from core.clock import FixedClock
 from tests.pin_probe import leaks
 
 PIN = "4821"
-EMAIL = "priya@acme.com"
+EMAIL = "natasha@acme.com"
 TS = datetime(2026, 11, 27, 9, 30, tzinfo=ZoneInfo("America/New_York"))
 
 
@@ -58,7 +58,7 @@ def test_audit_row_has_no_pin_and_masked_email():
     assert not leaks(blob, PIN) and EMAIL not in blob
     assert row["args_redacted"]["account_id"] == "QS-10423"
     assert row["args_redacted"]["pin"] == "[PIN]"
-    assert row["args_redacted"]["nested"]["billing_email"] == "p***@acme.com"
+    assert row["args_redacted"]["nested"]["billing_email"] == "n***@acme.com"
 
 
 def test_hash_is_over_redacted_args_so_it_cannot_be_used_to_brute_force_the_pin():
@@ -93,7 +93,7 @@ def test_free_text_email_in_a_string_value_is_masked():
     Output: assertion. Side effects: none. Role: redact applies to every string, not only known keys."""
     row = audit_row(AuditEvent(event="x", actor="system", args={"note": f"changed to {EMAIL} today"}),
                     RedactContext(), TS, uuid.uuid4())
-    assert row["args_redacted"]["note"] == "changed to p***@acme.com today"
+    assert row["args_redacted"]["note"] == "changed to n***@acme.com today"
 
 
 def test_no_args_means_null_columns():

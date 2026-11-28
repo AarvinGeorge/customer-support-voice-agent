@@ -153,7 +153,7 @@ def _s1_chat() -> list[dict]:
     t = _Turn(sid, "019a7c2e-5b30-7000-8000-0000000000c2", "chat", 30)
     t.add("turn.started", served_by="agent_b", input_kind="verification", contract_version=VERSION)
     t.step("verify", "identity_verify", "Verifying your identity", "Verified identity", 140,
-           args={"account_id": ex.ACCOUNT_ID, "pin": "[PIN]"}, detail="Priya Raman, owner, Pro")
+           args={"account_id": ex.ACCOUNT_ID, "pin": "[PIN]"}, detail="Natasha Romanoff, owner, Pro")
     t.add("verification.result", status="verified", person=person.model_dump(mode="json"), attempts_left=None,
           ticket=None)
     t.step("memory", "me_context", "Loading your account", "Loaded your account", 90,
@@ -367,14 +367,14 @@ ROLE_DECLINE_MESSAGE = ("Only an account owner or billing admin can make billing
 
 
 def _s3_decline() -> list[dict]:
-    """What: S3, Marcus (member, Business) asks for a refund: the verification request, then the
+    """What: S3, Peter (member, Business) asks for a refund: the verification request, then the
     verified turn where core declines the prepare with ROLE_NOT_PERMITTED (doc 07 s5.2 keeps
     prepare_refund visible to members so the decline and its policy ref reach the customer); the
     model answers from the roles article and offers a ticket. Use when: rendering
     s3_decline.jsonl. Inputs: none. Output: event dicts. Side effects: none.
     Role: fixture body for the decline note (CS-E-04.S5.T3)."""
     sid = "019a7c2e-8000-7000-8000-00000000b001"
-    person = VerifiedPerson(display_name="Marcus Lee", role="member", tier="business",
+    person = VerifiedPerson(display_name="Peter Parker", role="member", tier="business",
                             contract_status="active", account_id="QS-20871")
     out: list[dict] = []
 
@@ -394,7 +394,7 @@ def _s3_decline() -> list[dict]:
     t = _Turn(sid, "019a7c2e-8020-7000-8000-0000000000b2", "chat", 430)
     t.add("turn.started", served_by="agent_b", input_kind="verification", contract_version=VERSION)
     t.step("verify", "identity_verify", "Verifying your identity", "Verified identity", 150,
-           args={"account_id": "QS-20871", "pin": "[PIN]"}, detail="Marcus Lee, member, Business")
+           args={"account_id": "QS-20871", "pin": "[PIN]"}, detail="Peter Parker, member, Business")
     t.add("verification.result", status="verified", person=person.model_dump(mode="json"),
           attempts_left=None, ticket=None)
     t.step("memory", "me_context", "Loading your account", "Loaded your account", 90, detail="no open tickets")
@@ -432,7 +432,7 @@ def _s3_decline() -> list[dict]:
 
 
 def _s5_failures() -> list[dict]:
-    """What: S5 for Priya: (1) the primary model is rate limited (demo fault llm_429), the fallback
+    """What: S5 for Natasha: (1) the primary model is rate limited (demo fault llm_429), the fallback
     model finds the duplicate charge and prepares the refund, so the read-back carries the fallback
     badge; (2) on the yes the billing system fails, one retry fails too, nothing changed, and a
     ticket is opened in code (escalate tool_failure). Use when: rendering s5_failures.jsonl.

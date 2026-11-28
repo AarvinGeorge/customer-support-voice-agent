@@ -73,7 +73,7 @@ def fixed_lines() -> dict[str, str]:
         "confirm.verify_lapsed": confirm.VERIFY_LAPSED_LINE,
         "verification.failed": verification.FAILED_LINE.format(n=2, tries="tries"),
         "verification.locked": verification.LOCKED_LINE, "verification.no_pin": verification.NO_PIN_LINE, "verification.held_ticket":
-            verification.HELD_TICKET_LINE.format(name="Priya", clause=router.TICKET_CLAUSE.format(display=DISPLAY)),
+            verification.HELD_TICKET_LINE.format(name="Natasha", clause=router.TICKET_CLAUSE.format(display=DISPLAY)),
         "escalation.hold": f"{router.ESCALATION_LEADS['not_in_docs']} {escalation.HOLD_SAY}",
         "escalation.hold_chat": f"{router.ESCALATION_LEADS['not_in_docs']} {escalation.HOLD_LINE}",
         "escalation.card_pending": escalation.CARD_PENDING_LINE, "escalation.no_requester": escalation.NO_REQUESTER_LINE,

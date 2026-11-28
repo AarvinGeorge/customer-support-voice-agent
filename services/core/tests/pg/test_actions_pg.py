@@ -50,7 +50,7 @@ def build_world(c: psycopg.Connection) -> SimpleNamespace:
                   (acct, tier, status))
     for uid, acct, role in ((w.owner, w.pro, "owner"), (w.member, w.pro, "member"), (w.biz_owner, w.biz, "owner"),
                             (w.due_owner, w.due, "owner")):
-        c.execute("INSERT INTO users (id, account_id, display_name, role, pin_hmac) VALUES (%s,%s,'Priya',%s,%s)",
+        c.execute("INSERT INTO users (id, account_id, display_name, role, pin_hmac) VALUES (%s,%s,'Natasha',%s,%s)",
                   (uid, acct, role, uuid.uuid4().bytes))
     pfx = random.randrange(1000, 9990)  # two increments follow: keep the prefix at 4 digits (CH ids are 8 digits)
 

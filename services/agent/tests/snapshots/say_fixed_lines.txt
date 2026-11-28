@@ -60,7 +60,7 @@ router.verify: To look at your account I need to verify you. Please enter your a
 router.verify_say: To look at your account I need to verify you. Please enter your account ID and support PIN in the secure card on your screen. I can't take them by voice.
 verification.conflict: To help a different account, please start a new conversation.
 verification.failed: That account ID and PIN didn't match. You have two tries left.
-verification.held_ticket: Thanks, Priya. I've opened a ticket for our team, ticket ending eight two one three.
+verification.held_ticket: Thanks, Natasha. I've opened a ticket for our team, ticket ending eight two one three.
 verification.locked: I couldn't verify you after three tries, so verification is locked for this conversation and I can't open a ticket for you. The How to reach support section of our Support, response times and escalation article explains what to do next.
 verification.no_pin: Without your support PIN I can't verify you in this conversation, so I can't look at your account or open a ticket for you. The How to reach support section of our Support, response times and escalation article explains what to do next.
 verification.unavailable: I couldn't check your details just now. Please try the card again in a moment.

@@ -118,7 +118,7 @@ describe("replaying both fixtures: one assertion per event type", () => {
 
   it("verification.result: verified person set and the card closes", () => {
     expect(turn(S1, tid(s1, "c2")).verificationResult?.status).toBe("verified");
-    expect(S1.verified?.display_name).toBe("Priya Raman");
+    expect(S1.verified?.display_name).toBe("Natasha Romanoff");
     expect(S1.awaitingVerification).toBeNull();
   });
 

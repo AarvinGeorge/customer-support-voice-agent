@@ -176,7 +176,7 @@ describe("decisionRows", () => {
   it("S1 turn 2: identity, Gate 1 absent, rule and fallback", () => {
     const rows = decisionRows(nth(s1, 1));
     const byKey = Object.fromEntries(rows.map((r) => [r.key, r.text]));
-    expect(byKey.identity).toBe("verified: Priya Raman, owner, Pro, active");
+    expect(byKey.identity).toBe("verified: Natasha Romanoff, owner, Pro, active");
     expect(byKey.rule).toBe("allowed · PRO_WITHIN_LIMITS · refund-policy §2, Refunds on the Pro plan");
     expect(byKey.fallback).toBe("not used this turn");
   });

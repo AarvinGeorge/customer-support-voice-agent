@@ -42,7 +42,7 @@ export const MOCK_RATE_LIMITED_CODE = "too-many";
  */
 export const MOCK_PERSONAS: readonly Persona[] = [
   {
-    name: "Priya Shah",
+    name: "Natasha Romanoff",
     role: "billing_admin",
     tier: "pro",
     contract_status: "active",
@@ -52,7 +52,7 @@ export const MOCK_PERSONAS: readonly Persona[] = [
     description: "Refund a duplicate $96 charge by chat, follow up by voice, then try a failure.",
   },
   {
-    name: "Dana Okafor",
+    name: "Tony Stark",
     role: "owner",
     tier: "business",
     contract_status: "active",
@@ -62,7 +62,7 @@ export const MOCK_PERSONAS: readonly Persona[] = [
     description: "Request a Business refund that needs approval.",
   },
   {
-    name: "Marcus Lee",
+    name: "Peter Parker",
     role: "member",
     tier: "business",
     contract_status: "active",
@@ -72,7 +72,7 @@ export const MOCK_PERSONAS: readonly Persona[] = [
     description: "Ask for a refund your role cannot request.",
   },
   {
-    name: "Sam Rivera",
+    name: "Steve Rogers",
     role: "owner",
     tier: "free",
     contract_status: "active",
@@ -82,7 +82,7 @@ export const MOCK_PERSONAS: readonly Persona[] = [
     description: "Ask something off topic, then something our docs do not cover.",
   },
   {
-    name: "Omar Haddad",
+    name: "Carol Danvers",
     role: "billing_admin",
     tier: "pro",
     contract_status: "past_due",

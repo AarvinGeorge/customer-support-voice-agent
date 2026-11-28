@@ -228,7 +228,7 @@ async def test_real_seed_file_parses_into_the_contract_list():
     assert len(raw) == 9
     assert all(set(p) == set(Persona.model_fields) for p in raw)  # nothing beyond the contract fields
     people = [Persona.model_validate(p) for p in raw]
-    assert people[0].name == "Priya Raman" and people[0].scenarios == ["S1", "S2", "S5"] and people[0].pin == "7342"
+    assert people[0].name == "Natasha Romanoff" and people[0].scenarios == ["S1", "S2", "S5"] and people[0].pin == "7342"
     assert people[1].scenarios == ["S3", "rules"] and people[1].role == "member"
 
 

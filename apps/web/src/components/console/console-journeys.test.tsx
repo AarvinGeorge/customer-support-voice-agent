@@ -29,7 +29,7 @@ vi.mock("next/navigation", () => ({
 
 const c1 = loadFixture("s1_chat.jsonl").filter((e) => e.turn_id.endsWith("c1"));
 const SID = c1[0]?.session_id as string;
-const PRIYA = MOCK_PERSONAS.find((p) => p.account_id === "QS-10423")!;
+const NATASHA = MOCK_PERSONAS.find((p) => p.account_id === "QS-10423")!;
 
 /** One recorded request to the fake agent. */
 interface Call {
@@ -93,11 +93,11 @@ afterEach(() => {
 
 describe("a console tab opened from the landing page", () => {
   it("keeps the person (who) as well as the account in the URL it redirects to (F13)", async () => {
-    nav.query = "as=QS-20871&who=Dana%20Okafor";
+    nav.query = "as=QS-20871&who=Tony%20Stark";
     const { fetchMock } = fakeAgent();
     vi.stubGlobal("fetch", fetchMock);
     render(<ConsoleRoute />);
-    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`/console?session=${SID}&as=QS-20871&who=Dana%20Okafor`));
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`/console?session=${SID}&as=QS-20871&who=Tony%20Stark`));
   });
 
   it("without a session creates exactly one fresh session (empty body) and keeps the hint in the URL", async () => {
@@ -177,13 +177,13 @@ describe("a console tab opened from the landing page", () => {
 
 describe("the verification card and the display-only hint", () => {
   it("with a known hint shows 'Verify as <Name>', pre-fills the account ID and leaves the PIN empty", async () => {
-    nav.query = `session=${SID}&as=${PRIYA.account_id}`;
+    nav.query = `session=${SID}&as=${NATASHA.account_id}`;
     const { fetchMock } = fakeAgent();
     vi.stubGlobal("fetch", fetchMock);
     render(<ConsoleRoute />);
     sendMessage("I was charged twice");
-    const card = await screen.findByRole("region", { name: `Verify as ${PRIYA.name}` });
-    expect((screen.getByLabelText("Account ID") as HTMLInputElement).value).toBe(PRIYA.account_id);
+    const card = await screen.findByRole("region", { name: `Verify as ${NATASHA.name}` });
+    expect((screen.getByLabelText("Account ID") as HTMLInputElement).value).toBe(NATASHA.account_id);
     expect((screen.getByLabelText("Support PIN") as HTMLInputElement).value).toBe("");
     expect(card).toBeTruthy();
   });
@@ -205,19 +205,19 @@ describe("the verification card and the display-only hint", () => {
     }
   });
 
-  it("the seeded case: Dana's link titles her card 'Verify as Dana Whitfield' (Marcus is listed first on QS-20318)", async () => {
+  it("the seeded case: Tony's link titles her card 'Verify as Tony Stark' (Peter is listed first on QS-20318)", async () => {
     const base = MOCK_PERSONAS[0]!;
     const personas = [
-      { ...base, name: "Marcus Lee", role: "member", account_id: "QS-20318" },
-      { ...base, name: "Dana Whitfield", role: "owner", account_id: "QS-20318" },
+      { ...base, name: "Peter Parker", role: "member", account_id: "QS-20318" },
+      { ...base, name: "Tony Stark", role: "owner", account_id: "QS-20318" },
     ];
-    nav.query = `session=${SID}&as=QS-20318&who=${encodeURIComponent("Dana Whitfield")}`;
+    nav.query = `session=${SID}&as=QS-20318&who=${encodeURIComponent("Tony Stark")}`;
     const { fetchMock } = fakeAgent({ personas });
     vi.stubGlobal("fetch", fetchMock);
     render(<ConsoleRoute />);
     sendMessage("I was charged twice");
-    await screen.findByRole("region", { name: "Verify as Dana Whitfield" });
-    expect(screen.queryByRole("region", { name: "Verify as Marcus Lee" })).toBeNull();
+    await screen.findByRole("region", { name: "Verify as Tony Stark" });
+    expect(screen.queryByRole("region", { name: "Verify as Peter Parker" })).toBeNull();
     expect((screen.getByLabelText("Account ID") as HTMLInputElement).value).toBe("QS-20318");
   });
 
@@ -233,22 +233,22 @@ describe("the verification card and the display-only hint", () => {
   });
 
   it("a name that does not belong to the account is ignored (account still pre-filled, no name)", async () => {
-    nav.query = `session=${SID}&as=${PRIYA.account_id}&who=Marcus%20Lee`;
+    nav.query = `session=${SID}&as=${NATASHA.account_id}&who=Peter%20Parker`;
     const { fetchMock } = fakeAgent();
     vi.stubGlobal("fetch", fetchMock);
     render(<ConsoleRoute />);
     sendMessage("I was charged twice");
     await screen.findByRole("region", { name: "Verify your account" });
-    await waitFor(() => expect((screen.getByLabelText("Account ID") as HTMLInputElement).value).toBe(PRIYA.account_id));
+    await waitFor(() => expect((screen.getByLabelText("Account ID") as HTMLInputElement).value).toBe(NATASHA.account_id));
   });
 
   it("an empty who= behaves like an absent one (single-persona account still names its person)", async () => {
-    nav.query = `session=${SID}&as=${PRIYA.account_id}&who=`;
+    nav.query = `session=${SID}&as=${NATASHA.account_id}&who=`;
     const { fetchMock } = fakeAgent();
     vi.stubGlobal("fetch", fetchMock);
     render(<ConsoleRoute />);
     sendMessage("I was charged twice");
-    await screen.findByRole("region", { name: `Verify as ${PRIYA.name}` });
+    await screen.findByRole("region", { name: `Verify as ${NATASHA.name}` });
   });
 
   it("without a hint the card says 'Verify your account' with empty fields", async () => {
@@ -273,20 +273,20 @@ describe("the verification card and the display-only hint", () => {
   });
 
   it("the hint never reaches an API call as identity: verification posts only the typed account ID and PIN", async () => {
-    nav.query = `as=${PRIYA.account_id}`;
+    nav.query = `as=${NATASHA.account_id}`;
     const { fetchMock, calls } = fakeAgent();
     vi.stubGlobal("fetch", fetchMock);
     const { rerender } = render(<ConsoleRoute />);
-    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`/console?session=${SID}&as=${PRIYA.account_id}`));
-    nav.query = `session=${SID}&as=${PRIYA.account_id}`;
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith(`/console?session=${SID}&as=${NATASHA.account_id}`));
+    nav.query = `session=${SID}&as=${NATASHA.account_id}`;
     rerender(<ConsoleRoute />);
     sendMessage("I was charged twice");
-    await screen.findByRole("region", { name: `Verify as ${PRIYA.name}` });
+    await screen.findByRole("region", { name: `Verify as ${NATASHA.name}` });
 
     // Before the customer presses Verify, nothing sent so far carries the hint anywhere.
     const before = calls.map((c) => JSON.stringify(c));
     expect(before.length).toBeGreaterThan(0);
-    for (const line of before) expect(line).not.toContain(PRIYA.account_id);
+    for (const line of before) expect(line).not.toContain(NATASHA.account_id);
     const textTurn = calls.find((c) => c.path.endsWith("/turns"))?.body as Record<string, unknown>;
     expect(Object.keys(textTurn).sort()).toEqual(["client_turn_id", "text"]);
 
@@ -300,33 +300,33 @@ describe("the verification card and the display-only hint", () => {
     const verifyTurn = calls.filter((c) => c.path.endsWith("/turns"))[1]?.body as Record<string, unknown>;
     expect(Object.keys(verifyTurn).sort()).toEqual(["client_turn_id", "verification"]);
     expect(verifyTurn.verification).toEqual({ account_id: "QS-20117", pin: "1234" });
-    for (const line of calls.map((c) => JSON.stringify(c))) expect(line).not.toContain(PRIYA.account_id);
+    for (const line of calls.map((c) => JSON.stringify(c))) expect(line).not.toContain(NATASHA.account_id);
   });
 });
 
 describe("the hint goes stale (review PR #81 M-2)", () => {
   it("a changed ?as= to an unknown id drops the old name in the same mount", async () => {
-    nav.query = `session=${SID}&as=${PRIYA.account_id}`;
+    nav.query = `session=${SID}&as=${NATASHA.account_id}`;
     const { fetchMock } = fakeAgent();
     vi.stubGlobal("fetch", fetchMock);
     const { rerender } = render(<ConsoleRoute />);
     sendMessage("I was charged twice");
-    await screen.findByRole("region", { name: `Verify as ${PRIYA.name}` });
+    await screen.findByRole("region", { name: `Verify as ${NATASHA.name}` });
     nav.query = `session=${SID}&as=QS-99999`;
     rerender(<ConsoleRoute />);
     // Gone at once (keyed on ?as=), and still gone after the persona list answered with no match.
-    expect(screen.queryByRole("region", { name: `Verify as ${PRIYA.name}` })).toBeNull();
+    expect(screen.queryByRole("region", { name: `Verify as ${NATASHA.name}` })).toBeNull();
     await act(async () => {});
-    expect(screen.queryByRole("region", { name: `Verify as ${PRIYA.name}` })).toBeNull();
+    expect(screen.queryByRole("region", { name: `Verify as ${NATASHA.name}` })).toBeNull();
   });
 
   it("once the session is verified the hint no longer names anyone on a later card", async () => {
-    nav.query = `session=${SID}&as=${PRIYA.account_id}`;
+    nav.query = `session=${SID}&as=${NATASHA.account_id}`;
     const { fetchMock } = fakeAgent();
     vi.stubGlobal("fetch", fetchMock);
     render(<ConsoleRoute />);
     sendMessage("I was charged twice");
-    await screen.findByRole("region", { name: `Verify as ${PRIYA.name}` });
+    await screen.findByRole("region", { name: `Verify as ${NATASHA.name}` });
     const base = c1[0]!;
     const env = (seq: number) => ({ v: 1 as const, seq, session_id: SID, turn_id: "tv-verified", trace_id: base.trace_id, ts: base.ts, mode: "chat" as const });
     act(() => {
@@ -335,17 +335,17 @@ describe("the hint goes stale (review PR #81 M-2)", () => {
         ...env(2),
         type: "verification.result",
         status: "verified",
-        person: { display_name: "Dana Okafor", role: "owner", tier: "business", contract_status: "active", account_id: "QS-20117" },
+        person: { display_name: "Tony Stark", role: "owner", tier: "business", contract_status: "active", account_id: "QS-20117" },
       } as SseEvent);
       turnStore.getState().apply({ ...env(3), type: "verification.required", reason: "account_lookup", prompt_text: "p", attempts_left: 3, fields: ["account_id", "pin"] } as SseEvent);
     });
-    expect(screen.queryByRole("region", { name: `Verify as ${PRIYA.name}` })).toBeNull();
+    expect(screen.queryByRole("region", { name: `Verify as ${NATASHA.name}` })).toBeNull();
   });
 });
 
 describe("New conversation in the console header (D-075)", () => {
   it("opens a fresh session in the same tab and drops the display-only hint", async () => {
-    nav.query = `session=${SID}&as=${PRIYA.account_id}`;
+    nav.query = `session=${SID}&as=${NATASHA.account_id}`;
     const NEW = "019a7c2e-9999-7000-8000-00000000b001";
     const { fetchMock, calls } = fakeAgent({ sessionId: NEW });
     vi.stubGlobal("fetch", fetchMock);

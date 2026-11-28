@@ -1,5 +1,5 @@
 """What: Postgres-backed tests of apply_seed: rows land with the right shapes, reseed on two different days keeps
-Priya's duplicate 5 days old, meta.seed_date follows, audit survives, a second plain seed is a no-op.
+Natasha's duplicate 5 days old, meta.seed_date follows, audit survives, a second plain seed is a no-op.
 Use when: changing core/seeds. Inputs: the Compose Postgres (marker pg). Output: pytest results.
 Side effects: everything runs in a core_owner transaction that is rolled back (TRUNCATE is transactional).
 Role: CS-E-09.S4.T1 Done-when against the real schema."""
@@ -30,7 +30,7 @@ def seed(conn, day: date, reseed: bool) -> bool:
 
 
 def dup_age(conn, today: date) -> int:
-    """What: age in days of Priya's duplicate charge as stored. Use when: asserting. Inputs: connection, today.
+    """What: age in days of Natasha's duplicate charge as stored. Use when: asserting. Inputs: connection, today.
     Output: int. Side effects: one SELECT. Role: the Done-when measurement, read from the database."""
     ts = conn.execute("SELECT charged_at FROM charges WHERE id = 'CH-00000412'").fetchone()[0]
     return (today - ts.astimezone(NY).date()).days
@@ -40,7 +40,7 @@ def test_reseed_on_two_different_days_keeps_the_duplicate_five_days_old(owner_co
     """What: reseed on 27 Nov, then on 4 Dec (and a DST-adjacent 3 Nov): each time the stored duplicate is 5 days
     old, the row counts are unchanged and meta.seed_date is that day. Use when: always. Inputs: owner_conn.
     Output: assertions. Side effects: rolled back. Role: Done-when 'reseeding on two different days keeps
-    Priya's duplicate charge 5 days old'."""
+    Natasha's duplicate charge 5 days old'."""
     counts = []
     for day in (date(2026, 11, 27), date(2026, 12, 4), date(2026, 11, 3)):
         assert seed(owner_conn, day, reseed=True) is True
@@ -52,11 +52,11 @@ def test_reseed_on_two_different_days_keeps_the_duplicate_five_days_old(owner_co
 
 
 def test_users_carry_a_verifiable_pin_hmac_and_no_plain_pin(owner_conn):
-    """What: Priya's stored pin_hmac equals the HMAC of her persona PIN; the row text holds no plain PIN.
+    """What: Natasha's stored pin_hmac equals the HMAC of her persona PIN; the row text holds no plain PIN.
     Use when: always. Inputs: owner_conn. Output: assertions. Side effects: rolled back. Role: draft C C-6."""
     seed(owner_conn, date(2026, 11, 27), reseed=True)
-    persona = next(p for p in load_seed_data().personas_raw if p["name"] == "Priya Raman")
-    row = owner_conn.execute("SELECT t::text, pin_hmac FROM users t WHERE display_name = 'Priya Raman'").fetchone()
+    persona = next(p for p in load_seed_data().personas_raw if p["name"] == "Natasha Romanoff")
+    row = owner_conn.execute("SELECT t::text, pin_hmac FROM users t WHERE display_name = 'Natasha Romanoff'").fetchone()
     assert bytes(row[1]) == pin_hmac(PEPPER, persona["account_id"], persona["pin"])
     assert persona["pin"] not in row[0]
 

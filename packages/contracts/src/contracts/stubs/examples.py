@@ -1,4 +1,4 @@
-"""What: example core bodies for the S1 persona (Priya, Pro owner, duplicate $96.00 charge on
+"""What: example core bodies for the S1 persona (Natasha, Pro owner, duplicate $96.00 charge on
 21 November 2026), built from the doc 07 s3 examples and validated by the models.
 Use when: the core stub answers, fixtures are rendered, or a unit test needs a realistic body.
 Inputs: none.
@@ -34,14 +34,14 @@ POLICY_VERSION = "pv-stub-0001"
 
 PERMISSIONS = Permissions(billing_read=True, billing_actions=True, own_notification_prefs=True)
 
-CLAIMS = Claims(verified=True, session_id=SESSION_ID, user_id="U-0001", display_name="Priya Raman",
+CLAIMS = Claims(verified=True, session_id=SESSION_ID, user_id="U-0001", display_name="Natasha Romanoff",
                 account_id=ACCOUNT_ID, account_name="Acme Analytics", role="owner", tier="pro",
                 contract_status="active", grace_until=None, permissions=PERMISSIONS,
                 expires_at="2026-11-27T15:00:00Z")
 
-PROFILE = Profile(account_id=ACCOUNT_ID, account_name="Acme Analytics", display_name="Priya Raman",
+PROFILE = Profile(account_id=ACCOUNT_ID, account_name="Acme Analytics", display_name="Natasha Romanoff",
                   role="owner", tier="pro", contract_status="active", grace_until=None, seats=12,
-                  billing_email_masked="p***@acme.com",
+                  billing_email_masked="n***@acme.com",
                   notification_prefs={"product_updates": True, "billing_notices": True,
                                       "incident_alerts": True, "weekly_digest": False})
 

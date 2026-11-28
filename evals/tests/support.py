@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SID = "019a7c2e-5b10-7000-8000-00000000a001"
 _counter = itertools.count(1)
 
-PERSONA = {"name": "Priya Raman", "account_id": "QS-10423", "pin": "7342", "tier": "pro", "role": "billing_admin"}
+PERSONA = {"name": "Natasha Romanoff", "account_id": "QS-10423", "pin": "7342", "tier": "pro", "role": "billing_admin"}
 
 
 def case_by_id(case_id: str) -> dict[str, Any]:

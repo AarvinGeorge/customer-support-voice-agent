@@ -2,11 +2,11 @@
 # Use when: core/seeds/seed.py loads it; tests read it. Dates are never written here (see charges.yaml days_ago).
 # Role: demo and rule-test data. Fictional companies, demo emails.
 accounts:
-  - {id: QS-10423, name: Acme Analytics,     tier: pro,        contract_status: active,   seats: 12,  billing_email: priya@acme-analytics.example}
+  - {id: QS-10423, name: Acme Analytics,     tier: pro,        contract_status: active,   seats: 12,  billing_email: natasha@acme-analytics.example}
   - {id: QS-20318, name: Northwind Logistics, tier: business,   contract_status: active,   seats: 60,  billing_email: finance@northwind-logistics.example}
   - {id: QS-30571, name: Bluebird Studio,    tier: free,       contract_status: active,   seats: 3,   billing_email: null}
-  - {id: QS-40712, name: Harbor Labs,        tier: pro,        contract_status: trialing,  seats: 5,   billing_email: tomas@harbor-labs.example}
-  - {id: QS-50234, name: Delta Freight,      tier: pro,        contract_status: past_due,  seats: 12,  billing_email: helen@delta-freight.example}
+  - {id: QS-40712, name: Harbor Labs,        tier: pro,        contract_status: trialing,  seats: 5,   billing_email: reed@harbor-labs.example}
+  - {id: QS-50234, name: Delta Freight,      tier: pro,        contract_status: past_due,  seats: 12,  billing_email: sue@delta-freight.example}
   - {id: QS-60845, name: Orion Systems,      tier: enterprise, contract_status: active,   seats: 400, billing_email: ap@orion-systems.example}
-  - {id: QS-70156, name: Kestrel Design,     tier: pro,        contract_status: active,   seats: 10,  billing_email: nadia@kestrel-design.example}
-  - {id: QS-80267, name: Lumen Books,        tier: pro,        contract_status: active,   seats: 12,  billing_email: omar@lumen-books.example}
+  - {id: QS-70156, name: Kestrel Design,     tier: pro,        contract_status: active,   seats: 10,  billing_email: wanda@kestrel-design.example}
+  - {id: QS-80267, name: Lumen Books,        tier: pro,        contract_status: active,   seats: 12,  billing_email: carol@lumen-books.example}
